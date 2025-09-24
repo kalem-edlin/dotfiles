@@ -1,3 +1,5 @@
+#!/bin/bash
+
 function icon_map() {
   case "$1" in
   "Keynote" | "Keynote 讲演")
@@ -9,7 +11,7 @@ function icon_map() {
   "VMware Fusion")
     icon_result=":vmware_fusion:"
     ;;
-  "Alacritty" | "Hyper" | "iTerm2" | "kitty" | "Terminal" | "终端" | "WezTerm")
+  "Alacritty" | "Hyper" | "iTerm2" | "kitty" | "Terminal" | "终端" | "WezTerm" | "Ghostty")
     icon_result=":terminal:"
     ;;
   "Microsoft To Do" | "Things")
@@ -138,7 +140,7 @@ function icon_map() {
   "Jellyfin Media Player")
     icon_result=":jellyfin:"
     ;;
-  "Code" | "Code - Insiders")
+  "Code" | "Code - Insiders" | "Cursor")
     icon_result=":code:"
     ;;
   "Linear")

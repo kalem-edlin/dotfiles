@@ -5,7 +5,11 @@ sketchybar \
   --add item apple.logo left \
   --set apple.logo icon=󰀵 \
   icon.padding_right=8 \
+  icon.font="SF Pro:Semibold:18.0" \
+  icon.padding_left=5 \
+  icon.padding_right=5 \
   label.drawing=off \
+  icon.y_offset=1 \
   popup.height=30 \
   click_script="sketchybar -m --set \$NAME popup.drawing=toggle"
 

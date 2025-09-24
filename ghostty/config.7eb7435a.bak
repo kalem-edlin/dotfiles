@@ -1,0 +1,4 @@
+theme = catppuccin-mocha
+background-opacity = 0.90
+font-family = JetBrains Mono NL
+font-size = 22

@@ -1,2 +1,5 @@
-theme = catppuccin-mocha
+theme = catppuccin-mocha.conf
 background-opacity = 0.90
+font-family = JetBrains Mono NL
+font-size = 22
+keybind = shift+enter=text:\n
