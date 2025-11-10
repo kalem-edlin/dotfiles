@@ -1,6 +1,6 @@
 after-startup-command = ['exec-and-forget sketchybar']
 
-start-at-login = false
+start-at-login = true
 
 # Normalizations. See: https://nikitabobko.github.io/AeroSpace/guide#normalization
 enable-normalization-flatten-containers = true
@@ -55,6 +55,10 @@ run = 'layout floating'
 [[on-window-detected]]
 if.app-name-regex-substring = 'raycast'
 run = 'layout floating'
+
+[[on-window-detected]]
+if.app-name-regex-substring = 'simulator'
+run = 'layout tiling'
 
 [[on-window-detected]]
 if.app-name-regex-substring = 'calendar'
