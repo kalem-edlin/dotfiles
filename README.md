@@ -1,22 +1,49 @@
 # Dotfiles
 
-My personal dotfiles managed with GNU Stow.
+My personal dotfiles.
+
+## Quick Start (New Machine Setup)
+
+```bash
+make setup
+```
+
+This will:
+1. Install Homebrew and all CLI packages
+2. Install cask GUI applications
+3. Symlink all configurations
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `make setup` | Full setup for a new machine |
+| `make install` | Symlink all dotfiles |
+| `make uninstall` | Remove all symlinks |
+| `make brew` | Install Homebrew CLI packages |
+| `make brew-cask` | Install Homebrew cask applications |
+| `make brew-all` | Install all Homebrew packages |
 
 ## Structure
 
-- Install all configurations:
-   ```bash
-   make install
-   ```
-   
-   Or install specific packages:
-   ```bash
-   stow -t ~ packages/vim     # Install only vim config
-   stow -t ~ packages/tmux    # Install only tmux config
-   ```
+```
+dotfiles/
+├── aerospace/      → ~/.config/aerospace     (direct symlink)
+├── ghostty/        → ~/.config/ghostty       (direct symlink)
+├── sketchybar/     → ~/.config/sketchybar    (direct symlink)
+├── tmux/           → ~/.config/tmux          (direct symlink)
+├── claude/.claude/ → ~/.claude/              (stow)
+├── vim/.vimrc      → ~/.vimrc                (stow)
+├── zsh/.zshrc      → ~/.zshrc                (stow)
+├── install/
+│   ├── brew.sh         # Homebrew CLI packages
+│   └── brew-cask.sh    # Homebrew cask apps
+└── Makefile
+```
 
-## Package Management
+## New Machine Additions
 
-- Each tool's configuration lives in its own package directory under `packages/`
-- Files in each package directory mirror the structure of your home directory
-- Stow automatically creates symlinks from the package directory to your home directory
+Look at the following links for new machine additions:
+- https://developer.apple.com/download/all/
+- https://github.com/beardedspice/beardedspice
+  

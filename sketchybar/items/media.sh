@@ -9,4 +9,4 @@ sketchybar --add item media right \
                        icon.color=$WHITE   \
                        background.drawing=off \
                        script="$PLUGIN_DIR/media.sh" \
-           --subscribe media media_change
+                       update_freq=5
