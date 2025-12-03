@@ -147,6 +147,24 @@ defaults write com.apple.Preview ApplePersistenceIgnoreState YES
 defaults -currentHost write com.apple.ImageCapture disableHotPlug -bool true
 
 ###############################################################################
+# Developer Directory                                                         #
+###############################################################################
+
+# Create ~/Developer directory (macOS gives it a special hammer icon)
+mkdir -p ~/Developer
+
+# Add Developer folder to Finder sidebar (requires mysides: brew install mysides)
+if command -v mysides &> /dev/null; then
+  # Remove existing entry first to avoid duplicates, then add
+  mysides remove Developer 2>/dev/null
+  mysides add Developer "file://$HOME/Developer"
+  echo "✓ Developer folder added to Finder sidebar"
+else
+  echo "⚠ mysides not installed. Install with: brew install mysides"
+  echo "  Then re-run this script to add Developer to Finder sidebar."
+fi
+
+###############################################################################
 # Kill affected applications                                                  #
 ###############################################################################
 
