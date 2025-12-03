@@ -11,11 +11,43 @@ zstyle ':omz:update' mode auto      # update automatically without asking
 # Enable command auto-correction.
 ENABLE_CORRECTION="true"
 
+ZVM_SYSTEM_CLIPBOARD_ENABLED=true
+ZVM_VI_HIGHLIGHT_BACKGROUND=#A8A8A8
+
+# zsh-vi-mode cursor configuration
+function zvm_config() {
+  # Insert mode: use default terminal cursor
+  ZVM_INSERT_MODE_CURSOR=$ZVM_CURSOR_USER_DEFAULT
+}
+
+# Patch for zsh-vi-mode: fix lingering visual highlight
+# Must be defined BEFORE sourcing the plugin
+function zvm_after_lazy_keybindings() {
+  # Override functions to add zvm_exit_visual_mode false
+  function zvm_insert_bol() {
+    ZVM_INSERT_MODE='I'
+    zle vi-first-non-blank
+    zvm_exit_visual_mode false
+    zvm_select_vi_mode $ZVM_MODE_INSERT
+    zvm_reset_repeat_commands $ZVM_MODE_NORMAL $ZVM_INSERT_MODE
+  }
+
+  function zvm_append_eol() {
+    ZVM_INSERT_MODE='A'
+    zle vi-end-of-line
+    zvm_exit_visual_mode false
+    zvm_select_vi_mode $ZVM_MODE_INSERT
+    zvm_reset_repeat_commands $ZVM_MODE_NORMAL $ZVM_INSERT_MODE
+  }
+}
+
 eval "$(starship init zsh)"
 # export STARSHIP_CONFIG=~/.config/starship/starship.toml
 
 source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-source $(brew --prefix)/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+source $(brew --prefix)/opt/zsh-vi-mode/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
+source $(brew --prefix)/opt/zsh-autocomplete/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh
+
 
 
 # Would you like to use another custom folder than $ZSH/custom?
@@ -37,7 +69,7 @@ alias cat=bat
 
 # export MANPATH="/usr/local/man:$MANPATH"
 
-You may need to manually set your language environment
+# You may need to manually set your language environment
 export LANG=en_US.UTF-8
 
 # Git
@@ -65,9 +97,6 @@ alias ......="cd ../../../../.."
 
 alias cl='clear'
 
-# VI Mode
-bindkey '^C' vi-cmd-mode
-bindkey '^X' send-break 
 
 # Open Code editor at current directory
 function cursor {
@@ -101,12 +130,10 @@ alias ll='ls -al'
 
 export XDG_CONFIG_HOME="/Users/kedlin/.config"
 
-# Kafka in cli
-export PATH=/usr/local/kafka/bin:$PATH
-
 eval "$(zoxide init zsh)"
 
 # nvm
 export NVM_DIR="$HOME/.nvm"
 [ -s "$HOMEBREW_PREFIX/opt/nvm/nvm.sh" ] && \. "$HOMEBREW_PREFIX/opt/nvm/nvm.sh"
 [ -s "$HOMEBREW_PREFIX/opt/nvm/etc/bash_completion.d/nvm" ] && \. "$HOMEBREW_PREFIX/opt/nvm/etc/bash_completion.d/nvm"
+

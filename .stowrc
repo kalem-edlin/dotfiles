@@ -1,4 +1,4 @@
---target=~/.config
+--target=~
 --ignore=.git
 --ignore=.gitignore
 --ignore=README.md

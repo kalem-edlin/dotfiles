@@ -14,6 +14,7 @@ apps=(
     font-hack-nerd-font
     font-sf-pro
     ghostty
+    kindavim
     ngrok
     raycast
     sf-symbols

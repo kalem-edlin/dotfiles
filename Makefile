@@ -1,4 +1,4 @@
-.PHONY: all setup install brew brew-cask brew-all uninstall reload help
+.PHONY: all setup install brew brew-cask brew-all node python uninstall reload help
 
 # Dotfiles directory (absolute path)
 DOTFILES := $(shell pwd)
@@ -16,7 +16,7 @@ setup:
 	@echo "Requesting sudo access..."
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew brew-cask install
+	@$(MAKE) brew brew-cask node python install
 	@echo "✓ Setup complete!"
 
 # Install all dotfile configurations
@@ -84,10 +84,21 @@ brew-all:
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
 	@$(MAKE) brew brew-cask
 
+# Install Node.js via nvm and global npm packages
+node:
+	@echo "Installing Node.js and npm packages..."
+	@chmod +x install/node.sh
+	@./install/node.sh
+
+# Install Python via pyenv
+python:
+	@echo "Installing Python..."
+	@chmod +x install/python.sh
+	@./install/python.sh
+
 # Reload all configs
 reload:
 	@echo "Reloading configurations..."
-	@echo "  → zsh"; source ~/.zshrc 2>/dev/null || true
 	@echo "  → aerospace"; aerospace reload-config 2>/dev/null || true
 	@echo "  → sketchybar"; sketchybar --reload 2>/dev/null || true
 	@if [ -n "$$TMUX" ]; then \
@@ -98,6 +109,8 @@ reload:
 	@echo "  → ghostty (restart app manually)"
 	@echo "  → vim (restart app manually)"
 	@echo "✓ Configs reloaded!"
+	@echo "  → zsh (restarting shell...)"
+	@exec zsh
 
 help:
 	@echo "Dotfiles Management"
@@ -105,11 +118,13 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
-	@echo "  setup      Full setup (brew + brew-cask + install)"
+	@echo "  setup      Full setup (brew + brew-cask + node + python + install)"
 	@echo "  install    Symlink dotfiles to ~/.config/ and ~ (via stow)"
 	@echo "  uninstall  Remove dotfile symlinks"
 	@echo "  brew       Install Homebrew CLI packages"
 	@echo "  brew-cask  Install Homebrew cask applications"
 	@echo "  brew-all   Install all Homebrew packages"
+	@echo "  node       Install Node.js (nvm) and global npm packages"
+	@echo "  python     Install Python (pyenv)"
 	@echo "  reload     Reload all configs (aerospace, sketchybar, tmux, zsh)"
 	@echo "  help       Show this help message"

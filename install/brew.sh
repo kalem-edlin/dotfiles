@@ -44,7 +44,7 @@ apps=(
     telnet
     tmux
     tree
-    turso
+    tursodatabase/tap/turso
     watchman
     yarn
     zoxide
@@ -56,21 +56,4 @@ apps=(
 
 brew install "${apps[@]}"
 
-# Setup nvm
-mkdir -p ~/.nvm
-export NVM_DIR="$HOME/.nvm"
-[ -s "$(brew --prefix)/opt/nvm/nvm.sh" ] && \. "$(brew --prefix)/opt/nvm/nvm.sh"
-
-# Install latest LTS Node
-echo "Installing Node LTS..."
-nvm install --lts
-nvm alias default 'lts/*'
-
-# Install latest Python
-echo "Installing Python latest..."
-eval "$(pyenv init -)"
-LATEST_PYTHON=$(pyenv install --list | grep -E '^\s*[0-9]+\.[0-9]+\.[0-9]+$' | tail -1 | tr -d ' ')
-pyenv install -s "$LATEST_PYTHON"
-pyenv global "$LATEST_PYTHON"
-
-echo "✓ Node LTS and Python $LATEST_PYTHON installed!"
+echo "✓ Homebrew packages installed!"
