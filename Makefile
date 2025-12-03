@@ -11,7 +11,7 @@ export PATH := $(BREW_PREFIX)/bin:$(PATH)
 CONFIG_PACKAGES := aerospace ghostty sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~)
-STOW_PACKAGES := claude git ssh vim zsh
+STOW_PACKAGES := claude git kindavim ssh vim zsh
 
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User
@@ -43,6 +43,19 @@ install:
 		fi \
 	done
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
+	@# Back up any existing files that would conflict with stow
+	@for pkg in $(STOW_PACKAGES); do \
+		if [ -d "$(DOTFILES)/$$pkg" ]; then \
+			for file in $$(find "$(DOTFILES)/$$pkg" -type f 2>/dev/null); do \
+				relpath=$${file#$(DOTFILES)/$$pkg/}; \
+				target=~/"$$relpath"; \
+				if [ -f "$$target" ] && [ ! -L "$$target" ]; then \
+					echo "  → Backing up existing $$relpath"; \
+					mv "$$target" "$$target.bak"; \
+				fi \
+			done \
+		fi \
+	done
 	@for pkg in $(STOW_PACKAGES); do \
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			echo "  → Stowing $$pkg"; \
