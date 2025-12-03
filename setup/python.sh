@@ -2,7 +2,18 @@
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Ensure Homebrew is in PATH (required after fresh install)
+if [[ -f /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -f /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+fi
+
 # Setup pyenv (requires pyenv installed via brew)
+if ! command -v pyenv &> /dev/null; then
+    echo "Error: pyenv not found. Run 'make brew' first."
+    exit 1
+fi
 eval "$(pyenv init -)"
 
 # Install latest Python

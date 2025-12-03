@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# Ensure Homebrew is in PATH (required after fresh install)
+if [[ -f /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -f /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+fi
+
 # macOS System Preferences Configuration
 # Run this script to configure macOS defaults
 # Some changes require a logout/restart to take effect
@@ -153,15 +160,17 @@ defaults -currentHost write com.apple.ImageCapture disableHotPlug -bool true
 # Create ~/Developer directory (macOS gives it a special hammer icon)
 mkdir -p ~/Developer
 
-# Add Developer folder to Finder sidebar (requires mysides: brew install mysides)
+# Add Developer folder to Finder sidebar
+# mysides is disabled in Homebrew, so we try it if manually installed,
+# otherwise provide manual instructions
 if command -v mysides &> /dev/null; then
   # Remove existing entry first to avoid duplicates, then add
   mysides remove Developer 2>/dev/null
   mysides add Developer "file://$HOME/Developer"
   echo "✓ Developer folder added to Finder sidebar"
 else
-  echo "⚠ mysides not installed. Install with: brew install mysides"
-  echo "  Then re-run this script to add Developer to Finder sidebar."
+  echo "✓ ~/Developer folder created (with hammer icon)"
+  echo "  → To add to Finder sidebar: drag ~/Developer to Favorites, or press Cmd+Ctrl+T with it selected"
 fi
 
 ###############################################################################

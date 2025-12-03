@@ -1,6 +1,17 @@
 #!/bin/bash
 
+# Ensure Homebrew is in PATH (required after fresh install)
+if [[ -f /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -f /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+fi
+
 # Setup fnm (requires fnm installed via brew)
+if ! command -v fnm &> /dev/null; then
+    echo "Error: fnm not found. Run 'make brew' first."
+    exit 1
+fi
 eval "$(fnm env --use-on-cd --shell bash)"
 
 # Install latest LTS Node

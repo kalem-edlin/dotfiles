@@ -3,6 +3,10 @@
 # Dotfiles directory (absolute path)
 DOTFILES := $(shell pwd)
 
+# Ensure Homebrew is in PATH (for stow and other tools)
+BREW_PREFIX := $(shell if [ -f /opt/homebrew/bin/brew ]; then echo /opt/homebrew; elif [ -f /usr/local/bin/brew ]; then echo /usr/local; fi)
+export PATH := $(BREW_PREFIX)/bin:$(PATH)
+
 # Packages that go to ~/.config/
 CONFIG_PACKAGES := aerospace ghostty sketchybar tmux
 

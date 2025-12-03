@@ -27,7 +27,6 @@ brew "glow"
 brew "httpd"
 brew "jq"                     
 brew "jesseduffield/lazydocker/lazydocker" 
-brew "mysides"               # Manage Finder sidebar from CLI 
 brew "ninja"
 brew "pipx"
 brew "prettyping"
