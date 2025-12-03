@@ -1,0 +1,53 @@
+{
+  "window.commandCenter": 1,
+  "vim.useSystemClipboard": true,
+  "typescript.tsserver.experimental.enableProjectDiagnostics": true,
+  "editor.codeActionsOnSave": {
+    "source.organizeImports": "explicit"
+  },
+  "typescript.updateImportsOnFileMove.enabled": "always",
+  "git.decorations.enabled": false,
+  "editor.wordWrap": "on",
+  "editor.wrappingIndent": "indent",
+  "editor.lineNumbers": "relative",
+  "typescript.inlayHints.parameterNames.enabled": "all",
+  "javascript.updateImportsOnFileMove.enabled": "always",
+  "editor.fontFamily": "'JetBrains Mono NL'",
+  "color-highlight.markerType": "dot-before",
+  "git.autofetch": true,
+  "githubPullRequests.pullBranch": "never",
+  "editor.largeFileOptimizations": false,
+  "cursor.cpp.disabledLanguages": ["plaintext"],
+  "markdown-preview-enhanced.breakOnSingleNewLine": true,
+  "editor.accessibilitySupport": "off",
+  "[markdown]": {
+    "diffEditor.ignoreTrimWhitespace": true
+  },
+  "git.openRepositoryInParentFolders": "never",
+  "typescript.tsserver.watchOptions": "vscode",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "vim.commandLineModeKeyBindings": [],
+  "workbench.colorTheme": "Catppuccin Mocha",
+  "editor.fontWeight": "bold",
+  "workbench.iconTheme": "material-icon-theme",
+  "cursor.composer.shouldAllowCustomModes": true,
+  "diffEditor.ignoreTrimWhitespace": false,
+  "diffEditor.renderSideBySide": false,
+  "diffEditor.useInlineViewWhenSpaceIsLimited": false,
+  "json.schemaDownload.enable": true,
+  "[dockercompose]": {
+    "editor.insertSpaces": true,
+    "editor.tabSize": 2,
+    "editor.autoIndent": "advanced",
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  "[github-actions-workflow]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  "cursorpyright.analysis.diagnosticMode": "workspace",
+  "cursorpyright.analysis.typeCheckingMode": "standard",
+  "lldb.library": "/Applications/Xcode.app/Contents/SharedFrameworks/LLDB.framework/Versions/A/LLDB",
+  "lldb.launch.expressions": "native",
+  "makefile.configureOnOpen": true
+}
+

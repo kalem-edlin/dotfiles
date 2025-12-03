@@ -1,0 +1,118 @@
+// Place your key bindings in this file to override the defaults
+// Using tmux-style chord keybindings: ctrl+a then <key>
+// Vim-style H/L navigation: [Project Tree] ←H─ [Editor] ─L→ [AI Chat]
+[
+  // ============================================
+  // VIM-STYLE PANEL NAVIGATION (H=left, L=right)
+  // ============================================
+
+  // --- FROM EDITOR ---
+  // ctrl+a h - Go left to Project Tree (when in editor)
+  {
+    "key": "ctrl+a h",
+    "command": "workbench.view.explorer",
+    "when": "editorFocus"
+  },
+  // ctrl+a l - Go right to AI Chat (when in editor)
+  {
+    "key": "ctrl+a l",
+    "command": "workbench.action.focusAuxiliaryBar",
+    "when": "editorFocus"
+  },
+
+  // --- FROM PROJECT TREE (left sidebar) ---
+  // ctrl+a l - Go right to Editor (when in sidebar)
+  {
+    "key": "ctrl+a l",
+    "command": "workbench.action.focusActiveEditorGroup",
+    "when": "sideBarFocus || filesExplorerFocus || explorerViewletFocus"
+  },
+  // ctrl+a h - Go more left = close sidebar, focus editor (when in sidebar)
+  {
+    "key": "ctrl+a h",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.action.toggleSidebarVisibility",
+        "workbench.action.focusActiveEditorGroup"
+      ]
+    },
+    "when": "sideBarFocus || filesExplorerFocus || explorerViewletFocus"
+  },
+
+  // --- FROM AI CHAT (right auxiliary bar) ---
+  // ctrl+a h - Go left to Editor (when in auxiliary bar)
+  {
+    "key": "ctrl+a h",
+    "command": "workbench.action.focusActiveEditorGroup",
+    "when": "auxiliaryBarFocus"
+  },
+  // ctrl+a l - Go more right = close auxiliary bar, focus editor (when in aux bar)
+  {
+    "key": "ctrl+a l",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.action.toggleAuxiliaryBar",
+        "workbench.action.focusActiveEditorGroup"
+      ]
+    },
+    "when": "auxiliaryBarFocus"
+  },
+
+  // ============================================
+  // FILE TAB NAVIGATION (ctrl+a n / ctrl+a p)
+  // ============================================
+  // ctrl+a n - Next file tab (right)
+  {
+    "key": "ctrl+a n",
+    "command": "workbench.action.nextEditor"
+  },
+  // ctrl+a p - Previous file tab (left)
+  {
+    "key": "ctrl+a p",
+    "command": "workbench.action.previousEditor"
+  },
+
+  // ============================================
+  // CLOSE EDITORS (ctrl+a q / ctrl+a w)
+  // ============================================
+  // ctrl+a q - Close current editor
+  {
+    "key": "ctrl+a q",
+    "command": "workbench.action.closeActiveEditor"
+  },
+  // ctrl+a w - Close ALL editors
+  {
+    "key": "ctrl+a w",
+    "command": "workbench.action.closeAllEditors"
+  },
+
+  // ============================================
+  // DISABLE TERMINAL KEYBINDINGS
+  // ============================================
+  {
+    "key": "ctrl+`",
+    "command": "-workbench.action.terminal.toggleTerminal"
+  },
+  {
+    "key": "ctrl+shift+`",
+    "command": "-workbench.action.terminal.new"
+  },
+  {
+    "key": "cmd+j",
+    "command": "-workbench.action.togglePanel"
+  },
+  {
+    "key": "ctrl+shift+c",
+    "command": "-workbench.action.terminal.openNativeConsole"
+  },
+  {
+    "key": "cmd+`",
+    "command": "-workbench.action.terminal.focusNext"
+  },
+  {
+    "key": "cmd+shift+`",
+    "command": "-workbench.action.terminal.focusPrevious"
+  }
+]

@@ -1,4 +1,4 @@
-.PHONY: all setup install brew brew-cask brew-all node python uninstall reload help
+.PHONY: all setup install brew brew-cleanup node python macos misc uninstall reload help
 
 # Dotfiles directory (absolute path)
 DOTFILES := $(shell pwd)
@@ -7,7 +7,10 @@ DOTFILES := $(shell pwd)
 CONFIG_PACKAGES := aerospace ghostty sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~)
-STOW_PACKAGES := claude vim zsh
+STOW_PACKAGES := claude git ssh vim zsh
+
+# App settings paths
+CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User
 
 all: help
 
@@ -16,7 +19,7 @@ setup:
 	@echo "Requesting sudo access..."
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew brew-cask node python install
+	@$(MAKE) brew node python macos install misc
 	@echo "✓ Setup complete!"
 
 # Install all dotfile configurations
@@ -35,12 +38,31 @@ install:
 			fi \
 		fi \
 	done
+	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@for pkg in $(STOW_PACKAGES); do \
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			echo "  → Stowing $$pkg"; \
-			stow -t ~ $$pkg 2>/dev/null || echo "    (already stowed or conflict)"; \
+			stow --no-folding --restow -t ~ $$pkg; \
 		fi \
 	done
+	@# Cursor settings
+	@if [ -d "$(DOTFILES)/cursor" ]; then \
+		echo "  → Linking cursor settings"; \
+		for file in settings.json keybindings.json; do \
+			if [ -f "$(DOTFILES)/cursor/$$file" ]; then \
+				if [ -L "$(CURSOR_USER_DIR)/$$file" ]; then \
+					echo "    $$file already linked"; \
+				elif [ -f "$(CURSOR_USER_DIR)/$$file" ]; then \
+					echo "    backing up $$file"; \
+					mv "$(CURSOR_USER_DIR)/$$file" "$(CURSOR_USER_DIR)/$$file.bak"; \
+					ln -s "$(DOTFILES)/cursor/$$file" "$(CURSOR_USER_DIR)/$$file"; \
+				else \
+					ln -s "$(DOTFILES)/cursor/$$file" "$(CURSOR_USER_DIR)/$$file"; \
+				fi \
+			fi \
+		done \
+	fi
+	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Dotfiles installed!"
 
 # Uninstall all dotfile configurations
@@ -58,43 +80,55 @@ uninstall:
 			stow -D -t ~ $$pkg 2>/dev/null || true; \
 		fi \
 	done
+	@# Cursor settings
+	@echo "  → Removing cursor settings symlinks"
+	@for file in settings.json keybindings.json; do \
+		if [ -L "$(CURSOR_USER_DIR)/$$file" ]; then \
+			rm "$(CURSOR_USER_DIR)/$$file"; \
+			if [ -f "$(CURSOR_USER_DIR)/$$file.bak" ]; then \
+				mv "$(CURSOR_USER_DIR)/$$file.bak" "$(CURSOR_USER_DIR)/$$file"; \
+				echo "    restored $$file from backup"; \
+			fi \
+		fi \
+	done
 	@echo "✓ Dotfiles removed!"
 
-# Install Homebrew CLI packages
+# Install Homebrew and all packages from Brewfile
 brew:
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@echo "Installing Homebrew packages..."
-	@chmod +x install/brew.sh
-	@./install/brew.sh
-	@echo "✓ Homebrew packages installed!"
+	@echo "Installing Homebrew packages from Brewfile..."
+	@chmod +x setup/brew.sh
+	@./setup/brew.sh
 
-# Install Homebrew cask applications
-brew-cask:
-	@sudo -v
-	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@echo "Installing Homebrew cask applications..."
-	@chmod +x install/brew-cask.sh
-	@./install/brew-cask.sh
-	@echo "✓ Cask applications installed!"
+# Remove packages not in Brewfile
+brew-cleanup:
+	@echo "Removing packages not in Brewfile..."
+	@brew bundle cleanup --file="$(DOTFILES)/Brewfile" --force
 
-# Install all Homebrew packages
-brew-all:
-	@sudo -v
-	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew brew-cask
-
-# Install Node.js via nvm and global npm packages
+# Install Node.js via fnm and global npm packages
 node:
 	@echo "Installing Node.js and npm packages..."
-	@chmod +x install/node.sh
-	@./install/node.sh
+	@chmod +x setup/node.sh
+	@./setup/node.sh
 
 # Install Python via pyenv
 python:
 	@echo "Installing Python..."
-	@chmod +x install/python.sh
-	@./install/python.sh
+	@chmod +x setup/python.sh
+	@./setup/python.sh
+
+# Configure macOS system preferences
+macos:
+	@echo "Configuring macOS preferences..."
+	@chmod +x setup/macos.sh
+	@./setup/macos.sh
+
+# Miscellaneous setup (Xcode tools, npm config, GitHub CLI check)
+misc:
+	@echo "Running miscellaneous setup..."
+	@chmod +x setup/misc.sh
+	@./setup/misc.sh
 
 # Reload all configs
 reload:
@@ -108,6 +142,7 @@ reload:
 	fi
 	@echo "  → ghostty (restart app manually)"
 	@echo "  → vim (restart app manually)"
+	@echo "  → cursor (restart app manually)"
 	@echo "✓ Configs reloaded!"
 	@echo "  → zsh (restarting shell...)"
 	@exec zsh
@@ -118,13 +153,14 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
-	@echo "  setup      Full setup (brew + brew-cask + node + python + install)"
-	@echo "  install    Symlink dotfiles to ~/.config/ and ~ (via stow)"
-	@echo "  uninstall  Remove dotfile symlinks"
-	@echo "  brew       Install Homebrew CLI packages"
-	@echo "  brew-cask  Install Homebrew cask applications"
-	@echo "  brew-all   Install all Homebrew packages"
-	@echo "  node       Install Node.js (nvm) and global npm packages"
-	@echo "  python     Install Python (pyenv)"
-	@echo "  reload     Reload all configs (aerospace, sketchybar, tmux, zsh)"
-	@echo "  help       Show this help message"
+	@echo "  setup        Full setup (brew + node + python + macos + install + misc)"
+	@echo "  install      Symlink dotfiles to ~/.config/, ~, and app settings"
+	@echo "  uninstall    Remove dotfile symlinks"
+	@echo "  brew         Install Homebrew + all packages from Brewfile"
+	@echo "  brew-cleanup Remove packages not in Brewfile"
+	@echo "  node         Install Node.js (fnm) and global npm packages"
+	@echo "  python       Install Python (pyenv)"
+	@echo "  macos        Configure macOS system preferences"
+	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
+	@echo "  reload       Reload all configs (aerospace, sketchybar, tmux, zsh)"
+	@echo "  help         Show this help message"

@@ -1,7 +1,13 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "alwaysThinkingEnabled": false,
   "feedbackSurveyState": {
     "lastShownTime": 1753997481824
+  },
+  "includeCoAuthoredBy": false,
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1"
   },
   "statusLine": {
     "type": "command", 

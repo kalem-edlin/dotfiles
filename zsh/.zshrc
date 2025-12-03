@@ -11,6 +11,11 @@ zstyle ':omz:update' mode auto      # update automatically without asking
 # Enable command auto-correction.
 ENABLE_CORRECTION="true"
 
+# Don't suggest corrections for dotfiles (.*) or underscore-prefixed files (_*)
+export CORRECT_IGNORE_FILE=".*"
+export CORRECT_IGNORE="_*"
+export SPROMPT="Correct '%F{red}%R%f' to '%F{green}%r%f' [nyae]?"
+
 ZVM_SYSTEM_CLIPBOARD_ENABLED=true
 ZVM_VI_HIGHLIGHT_BACKGROUND=#A8A8A8
 
@@ -62,15 +67,73 @@ plugins=(git)
 
 source $ZSH/oh-my-zsh.sh
 
-# User configuration
-
-alias la=tree
-alias cat=bat
-
 # export MANPATH="/usr/local/man:$MANPATH"
 
-# You may need to manually set your language environment
+# Language environment
 export LANG=en_US.UTF-8
+export LC_ALL="en_US.UTF-8"
+export LANGUAGE="en_US.UTF-8"
+
+# Hide the "default interactive shell is now zsh" warning on macOS
+export BASH_SILENCE_DEPRECATION_WARNING=1
+
+# ZSH History (100k lines, persisted across sessions)
+export HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
+export HISTSIZE=100000
+export SAVEHIST="$HISTSIZE"
+
+# Typos
+alias gut="git"
+alias gti="git"
+alias mdkir="mkdir"
+alias brwe="brew"
+alias pmpm="pnpm"
+alias pmpn="pnpm"
+
+# Sane defaults for built-ins (verbose and interactive)
+alias cp='cp -iv'
+alias mv='mv -iv'
+alias rm='rm -iv'
+alias grep="grep -i --color=auto"
+alias mkdir="mkdir -p"
+
+# Enhancements
+alias python="python3"
+alias nvm="fnm"
+alias la=tree
+alias find="fd"
+alias cat="bat --style=plain"
+alias ls="eza --no-user --hyperlink --icons=auto --group-directories-first --color-scale=age"
+alias mkcd='mkdir -p "$1" && cd "$1"'
+alias ll='eza -la --icons --git'
+alias lt='eza --tree --level=2 --icons'
+alias lsa="ls -a"
+alias lt="ls --tree --level=2 --long --header --git --git-ignore"
+alias lta="lt -a"
+alias rm="trash"
+alias top="btop"
+alias ping="prettyping --nolegend"
+alias get="curl -O -L"
+alias path='echo -e ${PATH//:/\\n}'
+
+
+alias ..="cd .."
+alias ...="cd ../.."
+alias ....="cd ../../.."
+alias .....="cd ../../../.."
+alias ......="cd ../../../../.."
+
+alias cl='clear'
+
+
+# Open Code editor at current directory
+function cursor {
+  open -a "/Applications/Cursor.app" "$@"
+}
+alias c='cursor'
+alias ld="lazydocker"
+alias zshconfig="vi ~/.zshrc"
+alias ohmyzsh="vi ~/.oh-my-zsh"
 
 # Git
 alias gc="git commit -m"
@@ -89,51 +152,141 @@ alias gcoall='git checkout -- .'
 alias gr='git remote'
 alias gre='git reset'
 
-alias ..="cd .."
-alias ...="cd ../.."
-alias ....="cd ../../.."
-alias .....="cd ../../../.."
-alias ......="cd ../../../../.."
+function git() {
+  # Clone a GitHub repo and cd into the created directory
+  if [ $1 = "clone" ];
+  then
+    command git clone "${@:2}"
 
-alias cl='clear'
+    if [ "$3" ]; then
+      cd "$3"
+    else
+      cd $(basename "$2" .git)
+    fi
 
-
-# Open Code editor at current directory
-function cursor {
-  open -a "/Applications/Cursor.app" "$@"
+    if [[ -r "./yarn.lock" ]]; then
+      yarn
+    elif [[ -r "./pnpm-lock.yaml" ]]; then
+      pnpm install
+    elif [[ -r "./package-lock.json" ]]; then
+      npm install
+    elif [[ -r "./bun.lock" ]]; then
+      bun install
+    fi
+  else
+    command git $@
+  fi
 }
-alias c='cursor'
+
+# Cd into the directory shown by the front-most Finder window
+# Based on https://scriptingosx.com/2017/02/terminal-finder-interaction/
+cdf() {
+  cd "$(osascript -e 'tell app "Finder" to POSIX path of (insertion location as alias)')"
+}
+
+# Make a new directory and cd into it
+take() {
+  \mkdir -p "$1" && cd "$1"
+}
+
 
 # Preferred editor for local and remote sessions
-# if [[ -n $SSH_CONNECTION ]]; then
-#   export EDITOR='vim'
-# else
-#   export EDITOR='mvim'
-# fi
+if [[ -n $SSH_CONNECTION ]]; then
+  export EDITOR='vim'
+else
+  export EDITOR='vi'
+fi
+export VISUAL="$EDITOR"
 
 # Compilation flags
 # export ARCHFLAGS="-arch x86_64"
 
-# Set personal aliases, overriding those provided by Oh My Zsh libs,
-# plugins, and themes. Aliases can be placed here, though Oh My Zsh
-# users are encouraged to define aliases within a top-level file in
-# the $ZSH_CUSTOM folder, with .zsh extension. Examples:
-# - $ZSH_CUSTOM/aliases.zsh
-# - $ZSH_CUSTOM/macos.zsh
-# For a full list of active aliases, run `alias`.
-#
-# Example aliases
-# alias zshconfig="mate ~/.zshrc"
-# alias ohmyzsh="mate ~/.oh-my-zsh"
-alias mkcd='mkdir -p "$1" && cd "$1"'
-alias ll='ls -al'
 
-export XDG_CONFIG_HOME="/Users/kedlin/.config"
+
+export XDG_CONFIG_HOME="$HOME/.config"
+
+# Bat theme (used by bat and cat alias)
+export BAT_THEME="Catppuccin Mocha"
+
+# Privacy: disable telemetry
+export NEXT_TELEMETRY_DISABLED=1
+export VERCEL_TELEMETRY_DISABLED=1
+
+# NPM defaults
+export NPM_CONFIG_INIT_AUTHOR_NAME="Kalem Edlin"
+export NPM_CONFIG_INIT_LICENSE="MIT"
+export NPM_CONFIG_INIT_VERSION="0.1.0"
+export NPM_CONFIG_SAVE="true"
+export NPM_CONFIG_UPDATE_NOTIFIER="false"
 
 eval "$(zoxide init zsh)"
 
-# nvm
-export NVM_DIR="$HOME/.nvm"
-[ -s "$HOMEBREW_PREFIX/opt/nvm/nvm.sh" ] && \. "$HOMEBREW_PREFIX/opt/nvm/nvm.sh"
-[ -s "$HOMEBREW_PREFIX/opt/nvm/etc/bash_completion.d/nvm" ] && \. "$HOMEBREW_PREFIX/opt/nvm/etc/bash_completion.d/nvm"
+# ============================================================================
+# FZF Configuration
+# ============================================================================
 
+# Use fd instead of find (respects .gitignore, includes hidden, excludes .git)
+export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
+
+# CTRL-T: Paste selected files onto command-line
+export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
+export FZF_CTRL_T_OPTS="--preview 'bat -n --color=always {}'"
+
+# ALT-C: cd into selected directory
+export FZF_ALT_C_OPTS="--preview 'eza --tree --color=always {} | head -200'"
+
+# CTRL-R: Search command history
+export FZF_CTRL_R_OPTS="
+  --preview 'echo {}' --preview-window down:3:hidden:wrap
+  --bind 'ctrl-/:toggle-preview'
+  --bind 'ctrl-y:execute-silent(echo -n {2..} | pbcopy)+abort'
+  --color header:italic
+  --header 'Press CTRL-Y to copy command into clipboard'"
+
+# Completion settings
+export FZF_COMPLETION_TRIGGER='**'
+export FZF_COMPLETION_OPTS='--border --info=inline'
+
+# Catppuccin Mocha theme for fzf
+export FZF_DEFAULT_OPTS=" \
+--color=bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8 \
+--color=fg:#cdd6f4,header:#f38ba8,info:#cba6f7,pointer:#f5e0dc \
+--color=marker:#b4befe,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8 \
+--color=selected-bg:#45475a \
+--height 60% \
+--border rounded \
+--layout reverse \
+--prompt '▶ ' \
+--pointer '▪︎' \
+--marker '✔ ' \
+--bind 'ctrl-/:change-preview-window(hidden|)' \
+--preview-window='border-rounded' \
+--info right"
+
+# Use fd for path/directory completion (respects .gitignore)
+_fzf_compgen_path() {
+  fd --hidden --exclude ".git" . "$1"
+}
+
+_fzf_compgen_dir() {
+  fd --type d --hidden --exclude ".git" . "$1"
+}
+
+# Advanced customization of fzf options via _fzf_comprun function
+_fzf_comprun() {
+  local command=$1
+  shift
+
+  case "$command" in
+    cd)      fzf --preview 'eza --tree --color=always {} | head -200' "$@" ;;
+    export|unset) fzf --preview "eval 'echo \$'{}" "$@" ;;
+    ssh)     fzf --preview 'dig {}' "$@" ;;
+    *)       fzf --preview 'bat -n --color=always {}' "$@" ;;
+  esac
+}
+
+# Set up fzf key bindings and fuzzy completion
+source <(fzf --zsh)
+
+# fnm (Node version manager)
+eval "$(fnm env --use-on-cd --version-file-strategy=recursive)"

@@ -1,0 +1,150 @@
+# Git Configuration
+# See more: https://git-scm.com/docs/git-config
+
+[user]
+  name = Kalem Edlin
+  email = kalemedlin@gmail.com
+
+[github]
+  user = kalem-edlin
+
+[core]
+  # Use delta for beautiful diffs
+  pager = delta
+  # Ignore file creation time changes (macOS changes these during moves)
+  trustctime = false
+
+[init]
+  defaultBranch = main
+
+[apply]
+  # Detect whitespace errors when applying a patch
+  whitespace = fix
+
+[rerere]
+  # Remember how you resolved a merge conflict and automatically reapply if it sees it again
+  enabled = true
+
+[help]
+  # Correct typos (after 0.1 second delay)
+  autoCorrect = 1
+
+# Any GitHub repo with your username should be checked out r/w by default
+[url "git@github.com:kalem-edlin/"]
+  insteadOf = "git://github.com/kalem-edlin/"
+
+# When accidentally cloning the HTTPS version instead of SSH
+[url "git@github.com:kalem-edlin/"]
+  insteadOf = "https://github.com/kalem-edlin/"
+
+[protocol "file"]
+  # Always permit operations using file protocol without any restrictions or warnings
+  allow = always
+
+[commit]
+  # Include the diff of the changes at the bottom of the commit message template
+  verbose = true
+
+[log]
+  # Show branch names with git log
+  decorate = short
+
+[branch]
+  # Show most recently changed branches first
+  sort = -committerdate
+
+[push]
+  # Push only current branch to a branch of the same name
+  default = current
+  # Automatically set up upstream tracking
+  autoSetupRemote = true
+  # Automatically push relevant annotated tags when pushing branches
+  followTags = true
+  # Make `push --force-with-lease` safer by ensuring tip was actually pulled
+  useForceIfIncludes = true
+
+[fetch]
+  # Auto-delete remote-tracking branches that were deleted on remote
+  prune = true
+  pruneTags = true
+
+[merge]
+  # Better conflict markers with original code shown
+  # See: https://www.ductile.systems/zdiff3/
+  conflictStyle = zdiff3
+
+[diff]
+  # Better diff algorithm
+  algorithm = histogram
+  # Use different colors to highlight lines that have been "moved"
+  colorMoved = default
+  # Ignore indentation changes when detecting moved lines
+  colorMovedWS = allow-indentation-change
+
+[interactive]
+  # Syntax highlight code when you run `git add -p`
+  diffFilter = delta --color-only
+
+[add.interactive]
+  useBuiltin = false
+
+[delta]
+  navigate = true
+  side-by-side = true
+  light = false
+  true-color = always
+  tabs = 2
+  hyperlinks = true
+  hyperlinks-file-link-format = "cursor://file/{path}:{line}"
+
+[filter "lfs"]
+  clean = git-lfs clean -- %f
+  smudge = git-lfs smudge -- %f
+  process = git-lfs filter-process
+  required = true
+
+[alias]
+  # Commit
+  cm           = commit -m
+
+  # Branching
+  cb           = switch
+  prev         = switch -
+
+  # Status & Stash
+  s            = status
+  st           = stash
+  stp          = stash pop
+
+  # Diff
+  d            = diff
+  dc           = diff --cached
+
+  # Push & Pull
+  pu           = push
+  puf          = push --force-with-lease
+  p            = pull --recurse-submodules
+
+  # Worktree
+  wta          = worktree add
+  wtl          = worktree list
+  wtr          = worktree remove
+
+  # Info
+  whoami       = config user.email
+  aliases      = config --get-regexp 'alias.*'
+  lastcommit   = !git log --pretty=format:'%ar' | head -n 1
+  today        = diff --shortstat \"@{0 day ago}\"
+  stats        = "!git ls-files | xargs wc -l"
+  branches     = for-each-ref --sort=-committerdate refs/heads/ --format='%(color:bold)%(refname:short)%(color:reset)\t%(committerdate:relative)'
+
+  # Troubleshooting
+  wtf          = diff --name-only --diff-filter=U
+
+  # Dangerous (but useful)
+  fuck         = "!f() { git reset --hard origin/$1; }; f"
+  nuke         = !git reset --hard && git clean -fd
+  cfd          = clean -fd
+
+  # Merge main into current branch
+  mmm          = !git fetch origin main && git merge origin/main --no-edit

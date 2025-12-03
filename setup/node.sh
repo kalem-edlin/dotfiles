@@ -1,14 +1,16 @@
 #!/bin/bash
 
-# Setup nvm (requires nvm installed via brew)
-mkdir -p ~/.nvm
-export NVM_DIR="$HOME/.nvm"
-[ -s "$(brew --prefix)/opt/nvm/nvm.sh" ] && \. "$(brew --prefix)/opt/nvm/nvm.sh"
+# Setup fnm (requires fnm installed via brew)
+eval "$(fnm env --use-on-cd --shell bash)"
 
 # Install latest LTS Node
 echo "Installing Node LTS..."
-nvm install --lts
-nvm alias default 'lts/*'
+fnm install --lts
+fnm default lts-latest
+
+# Configure npm
+npm config set loglevel warn
+npm config set fund false
 
 # Install global npm packages
 echo "Installing global npm packages..."
@@ -28,5 +30,5 @@ packages=(
 
 npm install -g "${packages[@]}"
 
-echo "✓ Node LTS and global npm packages installed!"
+echo "✓ Node LTS (via fnm) and global npm packages installed!"
 
