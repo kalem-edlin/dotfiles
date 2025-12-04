@@ -1,3 +1,8 @@
+# Dotfiles directory (derived from this symlinked file)
+if [[ -L ~/.zshrc ]]; then
+  export DOTFILES="$(dirname "$(dirname "$(realpath ~/.zshrc)")")"
+fi
+
 # Path to your Oh My Zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
 
@@ -112,6 +117,8 @@ alias ....="cd ../../.."
 alias .....="cd ../../../.."
 alias ......="cd ../../../../.."
 
+# Clear screen and reload dotfiles configs
+alias clear='command clear && make -C $DOTFILES reload > /dev/null 2>&1'
 alias cl='clear'
 
 
