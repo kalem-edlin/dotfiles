@@ -24,7 +24,21 @@ setup:
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
 	@$(MAKE) brew node python macos install misc
+	@echo ""
 	@echo "✓ Setup complete!"
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "MANUAL STEPS REQUIRED:"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo ""
+	@echo "1. Disable Spotlight shortcut (Cmd+Space) for Raycast:"
+	@echo "   System Settings → Keyboard → Keyboard Shortcuts → Spotlight"
+	@echo "   → Uncheck 'Show Spotlight search'"
+	@echo ""
+	@echo "2. Grant accessibility permissions when prompted for:"
+	@echo "   - Raycast, AeroSpace, sketchybar"
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Install all dotfile configurations
 install:
@@ -33,7 +47,10 @@ install:
 	@for pkg in $(CONFIG_PACKAGES); do \
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			if [ -L ~/.config/$$pkg ]; then \
-				echo "  → $$pkg already linked"; \
+				case "$$(readlink ~/.config/$$pkg)" in \
+					"$(DOTFILES)"*) echo "  → $$pkg already linked" ;; \
+					*) echo "  → Replacing stale $$pkg symlink"; rm ~/.config/$$pkg; ln -s "$(DOTFILES)/$$pkg" ~/.config/$$pkg ;; \
+				esac; \
 			elif [ -e ~/.config/$$pkg ]; then \
 				echo "  ⚠ ~/.config/$$pkg exists (skipping)"; \
 			else \
@@ -43,14 +60,22 @@ install:
 		fi \
 	done
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
-	@# Back up any existing files that would conflict with stow
+	@# Back up and REMOVE any existing files that would conflict with stow
+	@# This ensures dotfiles repo is authoritative; after stowing, app changes
+	@# will flow back to the repo as git unstaged changes via the symlinks
 	@for pkg in $(STOW_PACKAGES); do \
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			for file in $$(find "$(DOTFILES)/$$pkg" -type f 2>/dev/null); do \
 				relpath=$${file#$(DOTFILES)/$$pkg/}; \
 				target=~/"$$relpath"; \
-				if [ -f "$$target" ] && [ ! -L "$$target" ]; then \
-					echo "  → Backing up existing $$relpath"; \
+				if [ -L "$$target" ]; then \
+					case "$$(readlink "$$target")" in \
+						"$(DOTFILES)"*) ;; \
+						*) echo "  → Removing stale symlink $$relpath"; rm "$$target" ;; \
+					esac; \
+				elif [ -e "$$target" ]; then \
+					echo "  → Backing up $$relpath"; \
+					rm -f "$$target.bak" 2>/dev/null; \
 					mv "$$target" "$$target.bak"; \
 				fi \
 			done \
@@ -152,6 +177,7 @@ reload:
 	@echo "Reloading configurations..."
 	@echo "  → aerospace"; aerospace reload-config 2>/dev/null || true
 	@echo "  → sketchybar"; sketchybar --reload 2>/dev/null || true
+	@echo "  → bat"; bat cache --build 2>/dev/null || true
 	@if [ -n "$$TMUX" ]; then \
 		echo "  → tmux"; tmux source-file ~/.config/tmux/tmux.conf 2>/dev/null || true; \
 	else \
@@ -160,6 +186,8 @@ reload:
 	@echo "  → ghostty (restart app manually)"
 	@echo "  → vim (restart app manually)"
 	@echo "  → cursor (restart app manually)"
+	@echo "  → kindavim (restart app manually)"
+	@echo "  → claude (restart app/CLI manually)"
 	@echo "✓ Configs reloaded!"
 	@echo "  → zsh (restarting shell...)"
 	@exec zsh
@@ -179,5 +207,5 @@ help:
 	@echo "  python       Install Python (pyenv)"
 	@echo "  macos        Configure macOS system preferences"
 	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
-	@echo "  reload       Reload all configs (aerospace, sketchybar, tmux, zsh)"
+	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux, zsh)"
 	@echo "  help         Show this help message"

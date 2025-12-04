@@ -96,6 +96,11 @@
   tabs = 2
   hyperlinks = true
   hyperlinks-file-link-format = "cursor://file/{path}:{line}"
+  syntax-theme = Catppuccin Mocha
+  minus-style = syntax "#3B2C37"
+  minus-emph-style = syntax "#5E3F53"
+  plus-style = syntax "#2D3B2E"
+  plus-emph-style = syntax "#3F5E40"
 
 [filter "lfs"]
   clean = git-lfs clean -- %f

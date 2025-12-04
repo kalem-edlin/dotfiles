@@ -1,9 +1,6 @@
 # Path to your Oh My Zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
 
-# Configure where vim config lies
-export VIMINIT='source $MYVIMRC'
-export MYVIMRC='~/.config/vim/.vimrc' 
 
 ZSH_THEME="robbyrussell"
 zstyle ':omz:update' mode auto      # update automatically without asking
@@ -46,26 +43,18 @@ function zvm_after_lazy_keybindings() {
   }
 }
 
-eval "$(starship init zsh)"
-# export STARSHIP_CONFIG=~/.config/starship/starship.toml
-
-source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-source $(brew --prefix)/opt/zsh-vi-mode/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
-source $(brew --prefix)/opt/zsh-autocomplete/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh
-
-
-
-# Would you like to use another custom folder than $ZSH/custom?
-# ZSH_CUSTOM=/path/to/new-custom-folder
-
 # Which plugins would you like to load?
 # Standard plugins can be found in $ZSH/plugins/
 # Custom plugins may be added to $ZSH_CUSTOM/plugins/
-# Example format: plugins=(rails git textmate ruby lighthouse)
 # Add wisely, as too many plugins slow down shell startup.
 plugins=(git)
 
 source $ZSH/oh-my-zsh.sh
+
+# Homebrew zsh plugins (loaded after oh-my-zsh)
+source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+source $(brew --prefix)/opt/zsh-vi-mode/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
+source $(brew --prefix)/opt/zsh-autocomplete/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh
 
 # export MANPATH="/usr/local/man:$MANPATH"
 

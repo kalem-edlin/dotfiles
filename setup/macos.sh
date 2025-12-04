@@ -36,10 +36,10 @@ defaults write com.apple.dock show-recents -bool false
 # Spotlight                                                                   #
 ###############################################################################
 
-# Disable Spotlight keyboard shortcut (Cmd+Space)
-# This sets it to an obscure combo: Ctrl+Shift+Option+Cmd+Period
-/usr/libexec/PlistBuddy -c "Set :AppleSymbolicHotKeys:64:enabled false" ~/Library/Preferences/com.apple.symbolichotkeys.plist 2>/dev/null || \
-/usr/libexec/PlistBuddy -c "Add :AppleSymbolicHotKeys:64:enabled bool false" ~/Library/Preferences/com.apple.symbolichotkeys.plist 2>/dev/null
+# NOTE: Disabling Spotlight shortcut (Cmd+Space) requires MANUAL configuration.
+# The plist approach below no longer works reliably on modern macOS.
+# Manual steps: System Settings → Keyboard → Keyboard Shortcuts → Spotlight
+#   → Uncheck or change "Show Spotlight search"
 
 ###############################################################################
 # General UI/UX                                                               #
