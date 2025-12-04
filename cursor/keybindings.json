@@ -1,6 +1,8 @@
 // Place your key bindings in this file to override the defaults
 // Using tmux-style chord keybindings: ctrl+a then <key>
-// Vim-style H/L navigation: [Sidebar] ←H─ [Split1] ←H─L→ [SplitN] ─L→ [AI Chat]
+// Vim-style H/J/K/L navigation:
+//   H/L = horizontal: [Sidebar] ←H─ [Split1] ←H─L→ [SplitN] ─L→ [AI Chat]
+//   J/K = vertical:   [Upper] ←K─J→ [Lower] (for vertically stacked splits)
 [
   // ============================================
   // VIM-STYLE PANEL NAVIGATION (H=left, L=right)
@@ -8,10 +10,11 @@
   // ============================================
 
   // --- FROM EDITOR (with split view support) ---
-  // ctrl+a h - Go left: to previous split, OR to sidebar if at first split
+  // ctrl+a h - Go left: to left split (directional), OR to sidebar if at first split
+  // Uses focusLeftGroup for visual left navigation (won't traverse vertical splits)
   {
     "key": "ctrl+a h",
-    "command": "workbench.action.focusPreviousGroup",
+    "command": "workbench.action.focusLeftGroup",
     "when": "editorFocus && activeEditorGroupIndex != 1"
   },
   {
@@ -19,10 +22,11 @@
     "command": "workbench.view.explorer",
     "when": "editorFocus && activeEditorGroupIndex == 1"
   },
-  // ctrl+a l - Go right: to next split, OR to AI Chat if at last split
+  // ctrl+a l - Go right: to right split (directional), OR to AI Chat if at last split
+  // Uses focusRightGroup for visual right navigation (won't traverse vertical splits)
   {
     "key": "ctrl+a l",
-    "command": "workbench.action.focusNextGroup",
+    "command": "workbench.action.focusRightGroup",
     "when": "editorFocus && !activeEditorGroupLast"
   },
   {
@@ -92,12 +96,33 @@
   },
 
   // ============================================
-  // SPLIT EDITOR (ctrl+a /)
+  // SPLIT EDITOR (ctrl+a / horizontal, ctrl+a \ vertical)
   // ============================================
-  // ctrl+a / - Split editor to the right
+  // ctrl+a / - Split editor to the right (horizontal split)
   {
     "key": "ctrl+a /",
     "command": "workbench.action.splitEditorRight"
+  },
+  // ctrl+a \ - Split editor down (vertical split)
+  {
+    "key": "ctrl+a \\",
+    "command": "workbench.action.splitEditorDown"
+  },
+
+  // ============================================
+  // VERTICAL SPLIT NAVIGATION (ctrl+a j / ctrl+a k)
+  // ============================================
+  // ctrl+a j - Focus editor group below
+  {
+    "key": "ctrl+a j",
+    "command": "workbench.action.focusBelowGroup",
+    "when": "editorFocus"
+  },
+  // ctrl+a k - Focus editor group above
+  {
+    "key": "ctrl+a k",
+    "command": "workbench.action.focusAboveGroup",
+    "when": "editorFocus"
   },
 
   // ============================================
@@ -126,6 +151,32 @@
   {
     "key": "ctrl+a w",
     "command": "workbench.action.closeAllEditors"
+  },
+
+  // ============================================
+  // FILE OPERATIONS (ctrl+a r / ctrl+a c)
+  // ============================================
+  // ctrl+a r - Rename current file (reveals in explorer and triggers rename)
+  {
+    "key": "ctrl+a r",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.files.action.showActiveFileInExplorer",
+        "renameFile"
+      ]
+    }
+  },
+  // ctrl+a c - Create new file in same directory as current file
+  {
+    "key": "ctrl+a c",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.files.action.showActiveFileInExplorer",
+        "explorer.newFile"
+      ]
+    }
   },
 
   // ============================================

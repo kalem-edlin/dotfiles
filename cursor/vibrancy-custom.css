@@ -89,6 +89,15 @@
   background-color: #313244 !important;
 }
 
+/* Status bar icons - ensure consistent color */
+.monaco-workbench .part.statusbar .codicon,
+.monaco-workbench .part.statusbar .statusbar-item a,
+.monaco-workbench .part.statusbar .statusbar-item span,
+.monaco-workbench .part.statusbar .remote-indicator,
+.monaco-workbench .part.statusbar .remote-indicator .codicon {
+  color: #cdd6f4 !important;
+}
+
 /* -----------------------------------------------------------------------------
    TITLE BAR (top) - Crust with transparency option
 ----------------------------------------------------------------------------- */
