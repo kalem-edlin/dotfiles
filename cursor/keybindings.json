@@ -1,30 +1,41 @@
 // Place your key bindings in this file to override the defaults
 // Using tmux-style chord keybindings: ctrl+a then <key>
-// Vim-style H/L navigation: [Project Tree] ←H─ [Editor] ─L→ [AI Chat]
+// Vim-style H/L navigation: [Sidebar] ←H─ [Split1] ←H─L→ [SplitN] ─L→ [AI Chat]
 [
   // ============================================
   // VIM-STYLE PANEL NAVIGATION (H=left, L=right)
+  // Supports split editor groups
   // ============================================
 
-  // --- FROM EDITOR ---
-  // ctrl+a h - Go left to Project Tree (when in editor)
+  // --- FROM EDITOR (with split view support) ---
+  // ctrl+a h - Go left: to previous split, OR to sidebar if at first split
+  {
+    "key": "ctrl+a h",
+    "command": "workbench.action.focusPreviousGroup",
+    "when": "editorFocus && activeEditorGroupIndex != 1"
+  },
   {
     "key": "ctrl+a h",
     "command": "workbench.view.explorer",
-    "when": "editorFocus"
+    "when": "editorFocus && activeEditorGroupIndex == 1"
   },
-  // ctrl+a l - Go right to AI Chat (when in editor)
+  // ctrl+a l - Go right: to next split, OR to AI Chat if at last split
+  {
+    "key": "ctrl+a l",
+    "command": "workbench.action.focusNextGroup",
+    "when": "editorFocus && !activeEditorGroupLast"
+  },
   {
     "key": "ctrl+a l",
     "command": "workbench.action.focusAuxiliaryBar",
-    "when": "editorFocus"
+    "when": "editorFocus && activeEditorGroupLast"
   },
 
   // --- FROM ANY LEFT SIDEBAR (file explorer, search, git, extensions, etc.) ---
-  // ctrl+a l - Go right to Editor (when in ANY sidebar view)
+  // ctrl+a l - Go right to FIRST editor split (when in ANY sidebar view)
   {
     "key": "ctrl+a l",
-    "command": "workbench.action.focusActiveEditorGroup",
+    "command": "workbench.action.focusFirstEditorGroup",
     "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
   },
   // ctrl+a h - Go more left = close sidebar, focus editor (when in ANY sidebar)
@@ -34,7 +45,7 @@
     "args": {
       "commands": [
         "workbench.action.toggleSidebarVisibility",
-        "workbench.action.focusActiveEditorGroup"
+        "workbench.action.focusFirstEditorGroup"
       ]
     },
     "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
@@ -54,30 +65,39 @@
     "args": {
       "commands": [
         "workbench.action.toggleSidebarVisibility",
-        "workbench.action.focusActiveEditorGroup"
+        "workbench.action.focusFirstEditorGroup"
       ]
     },
     "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
   },
 
   // --- FROM AI CHAT (right auxiliary bar) ---
-  // ctrl+a h - Go left to Editor (when in auxiliary bar)
+  // ctrl+a h - Go left to LAST editor split (when in auxiliary bar)
   {
     "key": "ctrl+a h",
-    "command": "workbench.action.focusActiveEditorGroup",
+    "command": "workbench.action.focusLastEditorGroup",
     "when": "auxiliaryBarFocus"
   },
-  // ctrl+a l - Go more right = close auxiliary bar, focus editor (when in aux bar)
+  // ctrl+a l - Go more right = close auxiliary bar, focus last editor (when in aux bar)
   {
     "key": "ctrl+a l",
     "command": "runCommands",
     "args": {
       "commands": [
         "workbench.action.toggleAuxiliaryBar",
-        "workbench.action.focusActiveEditorGroup"
+        "workbench.action.focusLastEditorGroup"
       ]
     },
     "when": "auxiliaryBarFocus"
+  },
+
+  // ============================================
+  // SPLIT EDITOR (ctrl+a /)
+  // ============================================
+  // ctrl+a / - Split editor to the right
+  {
+    "key": "ctrl+a /",
+    "command": "workbench.action.splitEditorRight"
   },
 
   // ============================================
@@ -134,5 +154,52 @@
   {
     "key": "cmd+shift+`",
     "command": "-workbench.action.terminal.focusPrevious"
+  },
+
+  // ============================================
+  // PANE RESIZING (ctrl+a , / ctrl+a .)
+  // , = grow leftward, . = grow rightward
+  // ============================================
+
+  // --- SIDEBAR (left) ---
+  // . grows sidebar rightward
+  {
+    "key": "ctrl+a .",
+    "command": "workbench.action.increaseViewSize",
+    "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
+  },
+  // , shrinks sidebar (retracts leftward)
+  {
+    "key": "ctrl+a ,",
+    "command": "workbench.action.decreaseViewSize",
+    "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
+  },
+
+  // --- EDITOR (center) ---
+  // . grows editor rightward
+  {
+    "key": "ctrl+a .",
+    "command": "workbench.action.increaseViewSize",
+    "when": "editorFocus"
+  },
+  // , shrinks editor
+  {
+    "key": "ctrl+a ,",
+    "command": "workbench.action.decreaseViewSize",
+    "when": "editorFocus"
+  },
+
+  // --- AUXILIARY BAR / AI CHAT (right) ---
+  // , grows aux bar leftward
+  {
+    "key": "ctrl+a ,",
+    "command": "workbench.action.increaseViewSize",
+    "when": "auxiliaryBarFocus"
+  },
+  // . shrinks aux bar (retracts rightward)
+  {
+    "key": "ctrl+a .",
+    "command": "workbench.action.decreaseViewSize",
+    "when": "auxiliaryBarFocus"
   }
 ]

@@ -126,6 +126,7 @@
   "workbench.editor.showTabs": "single",
   "workbench.editor.limit.enabled": true,
   "workbench.editor.limit.value": 1,
+  "workbench.editor.limit.perEditorGroup": true,
   "terminal.integrated.gpuAcceleration": "off",
   "window.systemColorTheme": "dark",
   "window.autoDetectColorScheme": false
