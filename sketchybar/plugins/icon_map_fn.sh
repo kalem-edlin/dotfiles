@@ -416,6 +416,9 @@ function icon_map() {
   "Bear")
     icon_result=":bear:"
     ;;
+  "Steam" | "Steam Remote Play" | "Steam Helper")
+    icon_result=":steam:"
+    ;;
   "System Preferences" | "System Settings" | "系统设置")
     icon_result=":gear:"
     ;;

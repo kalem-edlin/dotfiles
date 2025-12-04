@@ -20,14 +20,14 @@
     "when": "editorFocus"
   },
 
-  // --- FROM PROJECT TREE (left sidebar) ---
-  // ctrl+a l - Go right to Editor (when in sidebar)
+  // --- FROM ANY LEFT SIDEBAR (file explorer, search, git, extensions, etc.) ---
+  // ctrl+a l - Go right to Editor (when in ANY sidebar view)
   {
     "key": "ctrl+a l",
     "command": "workbench.action.focusActiveEditorGroup",
-    "when": "sideBarFocus || filesExplorerFocus || explorerViewletFocus"
+    "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
   },
-  // ctrl+a h - Go more left = close sidebar, focus editor (when in sidebar)
+  // ctrl+a h - Go more left = close sidebar, focus editor (when in ANY sidebar)
   {
     "key": "ctrl+a h",
     "command": "runCommands",
@@ -37,7 +37,27 @@
         "workbench.action.focusActiveEditorGroup"
       ]
     },
-    "when": "sideBarFocus || filesExplorerFocus || explorerViewletFocus"
+    "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
+  },
+
+  // --- QUICK EXPLORER TOGGLE ---
+  // ctrl+a ctrl+a - Toggle file explorer from anywhere
+  {
+    "key": "ctrl+a ctrl+a",
+    "command": "workbench.view.explorer",
+    "when": "editorFocus"
+  },
+  // ctrl+a ctrl+a - Close sidebar and focus editor (when sidebar is focused)
+  {
+    "key": "ctrl+a ctrl+a",
+    "command": "runCommands",
+    "args": {
+      "commands": [
+        "workbench.action.toggleSidebarVisibility",
+        "workbench.action.focusActiveEditorGroup"
+      ]
+    },
+    "when": "sideBarFocus || sideBarVisible && listFocus || explorerViewletFocus || filesExplorerFocus || searchViewletFocus || scmViewletFocus"
   },
 
   // --- FROM AI CHAT (right auxiliary bar) ---

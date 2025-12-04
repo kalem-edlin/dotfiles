@@ -39,6 +39,8 @@ setup:
 	@echo "   - Raycast, AeroSpace, sketchybar"
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo ""
+	@$(MAKE) reload
 
 # Install all dotfile configurations
 install:
@@ -93,7 +95,10 @@ install:
 		for file in settings.json keybindings.json; do \
 			if [ -f "$(DOTFILES)/cursor/$$file" ]; then \
 				if [ -L "$(CURSOR_USER_DIR)/$$file" ]; then \
-					echo "    $$file already linked"; \
+					case "$$(readlink "$(CURSOR_USER_DIR)/$$file")" in \
+						"$(DOTFILES)"*) echo "    $$file already linked" ;; \
+						*) echo "    replacing stale $$file symlink"; rm "$(CURSOR_USER_DIR)/$$file"; ln -s "$(DOTFILES)/cursor/$$file" "$(CURSOR_USER_DIR)/$$file" ;; \
+					esac; \
 				elif [ -f "$(CURSOR_USER_DIR)/$$file" ]; then \
 					echo "    backing up $$file"; \
 					mv "$(CURSOR_USER_DIR)/$$file" "$(CURSOR_USER_DIR)/$$file.bak"; \
@@ -188,6 +193,7 @@ reload:
 	@echo "  → cursor (restart app manually)"
 	@echo "  → kindavim (restart app manually)"
 	@echo "  → claude (restart app/CLI manually)"
+	@echo "  → zsh completions"; rm -f ~/.zcompdump* 2>/dev/null || true
 	@echo "✓ Configs reloaded!"
 	@echo "  → zsh (restarting shell...)"
 	@exec zsh

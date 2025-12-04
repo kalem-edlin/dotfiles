@@ -20,7 +20,7 @@ osascript -e 'tell application "System Preferences" to quit' 2>/dev/null
 # Menu Bar & Dock                                                             #
 ###############################################################################
 
-# Automatically hide menu bar (shows when cursor moves to top)
+# Automatically hide menu bar - always (shows when cursor moves to top)
 defaults write NSGlobalDomain _HIHideMenuBar -bool true
 
 # Position dock at bottom
