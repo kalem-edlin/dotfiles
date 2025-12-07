@@ -195,8 +195,6 @@ reload:
 	@echo "  → claude (restart app/CLI manually)"
 	@echo "  → zsh completions"; rm -f ~/.zcompdump* 2>/dev/null || true
 	@echo "✓ Configs reloaded!"
-	@echo "  → zsh (restarting shell...)"
-	@exec zsh
 
 help:
 	@echo "Dotfiles Management"

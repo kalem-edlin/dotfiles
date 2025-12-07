@@ -1,5 +1,7 @@
 #!/bin/bash
 
+source "$CONFIG_DIR/icon_map.sh"
+
 if [ "$SENDER" = "aerospace_workspace_change" ]; then
   space="$(echo "$INFO" | jq -r '.space')"
   apps="$(echo "$INFO" | jq -r '.apps | keys[]')"
@@ -8,7 +10,8 @@ if [ "$SENDER" = "aerospace_workspace_change" ]; then
   if [ "${apps}" != "" ]; then
     while read -r app
     do
-      icon_strip+=" $($CONFIG_DIR/plugins/icon_map_fn.sh "$app")"
+      __icon_map "$app"
+      icon_strip+=" $icon_result"
     done <<< "${apps}"
   else
     icon_strip=" —"

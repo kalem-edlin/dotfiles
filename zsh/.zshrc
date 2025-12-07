@@ -1,3 +1,8 @@
+# Fix broken stdout (can happen if shell was exec'd with redirected fd)
+if [[ ! -t 1 ]]; then
+  exec > /dev/tty
+fi
+
 # Dotfiles directory (derived from this symlinked file)
 if [[ -L ~/.zshrc ]]; then
   export DOTFILES="$(dirname "$(dirname "$(realpath ~/.zshrc)")")"
@@ -87,7 +92,7 @@ alias pmpn="pnpm"
 # Sane defaults for built-ins (verbose and interactive)
 alias cp='cp -iv'
 alias mv='mv -iv'
-alias rm='rm -iv'
+# rm is aliased to 'trash' below - use \rm for real rm
 alias grep="grep -i --color=auto"
 alias mkdir="mkdir -p"
 
@@ -97,7 +102,7 @@ alias nvm="fnm"
 alias la=tree
 alias find="fd"
 alias cat="bat --style=plain"
-alias ls="eza --no-user --hyperlink --icons=auto --group-directories-first --color-scale=age"
+alias ls="eza --no-user --icons=auto --group-directories-first --color-scale=age"
 alias mkcd='mkdir -p "$1" && cd "$1"'
 alias ll='eza -la --icons --git'
 alias lt='eza --tree --level=2 --icons'
@@ -118,7 +123,7 @@ alias .....="cd ../../../.."
 alias ......="cd ../../../../.."
 
 # Clear screen and reload dotfiles configs
-alias clear='command clear && make -C $DOTFILES reload > /dev/null 2>&1'
+alias clear='make -C $DOTFILES reload && command clear'
 alias cl='clear'
 
 

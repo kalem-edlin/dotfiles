@@ -1,17 +1,50 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
+    "DISABLE_AUTOUPDATER": "0"
+  },
+  "includeCoAuthoredBy": false,
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/ccline/ccline",
+    "padding": 0
+  },
   "alwaysThinkingEnabled": false,
   "feedbackSurveyState": {
     "lastShownTime": 1753997481824
   },
-  "includeCoAuthoredBy": false,
-  "env": {
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1"
-  },
-  "statusLine": {
-    "type": "command", 
-    "command": "~/.claude/ccline/ccline",
-    "padding": 0
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/ccnotify/ccnotify.py UserPromptSubmit"
+          }
+        ]
+      },
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/ccnotify/ccnotify.py Stop"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/ccnotify/ccnotify.py Notification"
+          }
+        ]
+      }
+    ]
   }
 }

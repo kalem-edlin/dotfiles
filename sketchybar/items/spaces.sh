@@ -1,5 +1,7 @@
 #!/bin/bash
 
+source "$CONFIG_DIR/icon_map.sh"
+
 # Add the aerospace_workspace_change event we specified in aerospace.toml
 sketchybar --add event aerospace_workspace_change
 
@@ -37,7 +39,7 @@ for sid in $ALLOWED_WORKSPACES; do
   if [ -n "$apps" ]; then
     icon_strip=" "
     while read -r app; do
-      [ -n "$app" ] && icon_strip+=" $($CONFIG_DIR/plugins/icon_map_fn.sh "$app")"
+      [ -n "$app" ] && __icon_map "$app" && icon_strip+=" $icon_result"
     done <<<"${apps}"
     sketchybar --set space.$sid label="$icon_strip" label.padding_right=15 icon.padding_right=0
   fi

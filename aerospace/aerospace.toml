@@ -96,7 +96,11 @@ run = 'layout floating'
     inner.vertical =   15
     outer.left =       15
     outer.bottom =     15
-    outer.top =        17
+    outer.top =        [
+        { monitor."built-in" = 17 },
+        { monitor."main" = 17 },
+        52
+    ]
     outer.right =      15
 
 # 'main' binding mode declaration

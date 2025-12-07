@@ -4,6 +4,7 @@
 # chmod +x ~/.config/sketchybar/plugins/aerospace.sh
 
 source "$CONFIG_DIR/colors.sh"
+source "$CONFIG_DIR/icon_map.sh"
 
 # The workspace ID passed as argument (e.g., "1", "2", etc.)
 SID="$1"
@@ -22,7 +23,7 @@ if [ -n "$apps" ]; then
     # Workspace has windows - show with icons and add right padding
     icon_strip=" "
     while read -r app; do
-        [ -n "$app" ] && icon_strip+=" $($CONFIG_DIR/plugins/icon_map_fn.sh "$app")"
+        [ -n "$app" ] && __icon_map "$app" && icon_strip+=" $icon_result"
     done <<< "$apps"
     sketchybar --set space.$SID label="$icon_strip" label.padding_right=15 icon.padding_right=0
 else

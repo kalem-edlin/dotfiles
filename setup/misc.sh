@@ -153,6 +153,8 @@ add_login_item() {
 add_login_item "/Applications/Raycast.app"
 add_login_item "/Applications/superwhisper.app"
 add_login_item "/Applications/BeardedSpice.app"
+add_login_item "/Applications/OrbStack.app"
+add_login_item "/Applications/kindaVim.app"
 
 echo ""
 echo "✓ Misc setup complete!"

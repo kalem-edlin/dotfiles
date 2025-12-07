@@ -29,7 +29,9 @@ packages=(
     @anthropic-ai/claude-code
     @cometix/ccline
     bun
+    ccexp
     eas-cli
+    happy-coder
     pnpm
     rembg
     serve
