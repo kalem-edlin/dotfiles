@@ -26,8 +26,10 @@ npm config set fund false
 # Install global npm packages
 echo "Installing global npm packages..."
 packages=(
-    @anthropic-ai/claude-code
     @cometix/ccline
+    @anthropic-ai/claude-code
+    @openai/codex
+    @mariozechner/claude-trace
     bun
     ccexp
     eas-cli
@@ -42,6 +44,8 @@ packages=(
 )
 
 npm install -g "${packages[@]}"
+
+bun install -g btca opencode-ai
 
 echo "✓ Node LTS (via fnm) and global npm packages installed!"
 

@@ -32,7 +32,8 @@ brew "ninja"
 brew "pipx"
 brew "prettyping"
 brew "pyenv"                  
-brew "rbenv"                  
+brew "rbenv"
+brew "uv"                     # Fast Python package installer                  
 brew "ripgrep"
 brew "felixkratz/formulae/sketchybar"
 brew "sl"
@@ -70,8 +71,12 @@ cask "raycast"
 cask "sf-symbols"
 cask "spotify"
 cask "superwhisper"
+cask "visual-studio-code"
 
 # VS Code / Cursor extensions
+# Note: These are installed to Cursor via setup/cursor-extensions.sh
+# The vscode entries here are kept for reference and will install to VSCode if present
+# To install only to Cursor, you can remove visual-studio-code cask above
 vscode "anthropic.claude-code"
 vscode "ms-pyright.pyright"
 vscode "bradlc.vscode-tailwindcss"
@@ -85,7 +90,6 @@ vscode "firsttris.vscode-jest-runner"
 vscode "formulahendry.code-runner"
 vscode "github.vscode-github-actions"
 vscode "github.vscode-pull-request-github"
-vscode "iganbold.yoyo-ai-versioning"
 vscode "kevinrose.vsc-python-indent"
 vscode "lokalise.i18n-ally"
 vscode "mikestead.dotenv"

@@ -147,6 +147,9 @@ brew:
 	@echo "Installing Homebrew packages from Brewfile..."
 	@chmod +x setup/brew.sh
 	@./setup/brew.sh
+	@echo "Installing Cursor extensions..."
+	@chmod +x setup/cursor-extensions.sh
+	@./setup/cursor-extensions.sh
 
 # Remove packages not in Brewfile
 brew-cleanup:
@@ -211,5 +214,5 @@ help:
 	@echo "  python       Install Python (pyenv)"
 	@echo "  macos        Configure macOS system preferences"
 	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
-	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux, zsh)"
+	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux)"
 	@echo "  help         Show this help message"

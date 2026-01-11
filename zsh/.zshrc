@@ -8,6 +8,11 @@ if [[ -L ~/.zshrc ]]; then
   export DOTFILES="$(dirname "$(dirname "$(realpath ~/.zshrc)")")"
 fi
 
+# pyenv initialization
+export PYENV_ROOT="$HOME/.pyenv"
+[[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
+eval "$(pyenv init -)"
+
 # Path to your Oh My Zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
 
@@ -109,7 +114,6 @@ alias lt='eza --tree --level=2 --icons'
 alias lsa="ls -a"
 alias lt="ls --tree --level=2 --long --header --git --git-ignore"
 alias lta="lt -a"
-alias rm="trash"
 alias top="btop"
 alias ping="prettyping --nolegend"
 alias get="curl -O -L"
@@ -179,6 +183,18 @@ function git() {
   fi
 }
 
+unalias rm 2>/dev/null  # Remove any existing alias before defining function
+function rm() {
+  local args=()
+  for arg in "$@"; do
+    case "$arg" in
+      -r|-f|-rf|-fr|-R|-Rf|-fR) ;;  # trash doesn't need these
+      *) args+=("$arg") ;;
+    esac
+  done
+  trash "${args[@]}"
+}
+
 # Cd into the directory shown by the front-most Finder window
 # Based on https://scriptingosx.com/2017/02/terminal-finder-interaction/
 cdf() {
@@ -219,6 +235,9 @@ export NPM_CONFIG_INIT_LICENSE="MIT"
 export NPM_CONFIG_INIT_VERSION="0.1.0"
 export NPM_CONFIG_SAVE="true"
 export NPM_CONFIG_UPDATE_NOTIFIER="false"
+
+# Claude Code LSP Tools
+export ENABLE_LSP_TOOL=1
 
 eval "$(zoxide init zsh)"
 
@@ -291,3 +310,13 @@ source <(fzf --zsh)
 
 # fnm (Node version manager)
 eval "$(fnm env --use-on-cd --version-file-strategy=recursive)"
+
+export PATH="/Users/kalemedlin/.bun/bin:$PATH"
+
+# Claude Code envoy CLI (added by allhands)
+[[ -f ".claude/envoy/envoy" ]] && export PATH="$PWD/.claude/envoy:$PATH"
+
+# AllHands envoy command - resolves to .claude/envoy/envoy from current directory
+envoy() {
+  "$PWD/.claude/envoy/envoy" "$@"
+}

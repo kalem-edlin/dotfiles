@@ -6,45 +6,58 @@
     "DISABLE_AUTOUPDATER": "0"
   },
   "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Read(~/.claude-code-docs/docs/*)",
+      "Bash(.claude/envoy/envoy tavily search:*)",
+      "Bash(.claude/envoy/envoy tavily extract:*)",
+      "Bash(.claude/envoy/envoy vertex ask:*)",
+      "Bash(.claude/envoy/envoy vertex validate:*)",
+      "Bash(.claude/envoy/envoy vertex review:*)",
+      "Bash(.claude/envoy/envoy vertex architect:*)",
+      "Bash(.claude/envoy/envoy plans status:*)",
+      "Bash(.claude/envoy/envoy plans capture:*)",
+      "Bash(.claude/envoy/envoy plans cleanup:*)",
+      "Bash(.claude/envoy/envoy plans create:*)",
+      "Bash(.claude/envoy/envoy plans set-status:*)",
+      "Bash(.claude/envoy/envoy plans frontmatter:*)",
+      "Bash(.claude/envoy/envoy plans clear-queries:*)",
+      "Bash(.claude/envoy/envoy xai search:*)",
+      "Bash(.claude/envoy/envoy perplexity research:*)",
+      "Bash(.claude/envoy/envoy parallel spawn:*)",
+      "Bash(.claude/envoy/envoy parallel status:*)",
+      "Bash(.claude/envoy/envoy parallel results:*)",
+      "Bash(.claude/envoy/envoy parallel cleanup:*)",
+      "SlashCommand(/parallel-discovery:*)",
+      "SlashCommand(/plan:*)",
+      "SlashCommand(/plan-checkpoint:*)",
+      "SlashCommand(/parallel-orchestration:*)",
+      "Grep",
+      "Bash(rg:*)",
+      "Bash(mkdir:*)",
+      "Bash(npx repomix@latest:*)",
+      "Bash(.claude/envoy/envoy:*)",
+      "Bash(.claude/envoy/envoy plans begin:*)",
+      "Bash(.claude/envoy/envoy plans activate-prompt:*)",
+      "Bash(.claude/envoy/envoy plans update-prompt:*)",
+      "Bash(.claude/envoy/envoy plans complete:*)",
+      "Bash(.claude/envoy/envoy plans check:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "defaultMode": "default"
+  },
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/ccline/ccline",
+    "command": "~/.claude/ccline/ccline-wrapper.sh",
     "padding": 0
   },
-  "alwaysThinkingEnabled": false,
+  "alwaysThinkingEnabled": true,
   "feedbackSurveyState": {
     "lastShownTime": 1753997481824
-  },
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/ccnotify/ccnotify.py UserPromptSubmit"
-          }
-        ]
-      },
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/ccnotify/ccnotify.py Stop"
-          }
-        ]
-      }
-    ],
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/ccnotify/ccnotify.py Notification"
-          }
-        ]
-      }
-    ]
   }
 }
