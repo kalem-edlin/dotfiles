@@ -1,11 +1,14 @@
 # Taps
+tap "cameroncooke/axe"
 tap "felixkratz/formulae"
 tap "jesseduffield/lazydocker"
 tap "nikitabobko/tap"
 tap "supabase/tap"
 
 # CLI tools
+brew "actionlint"
 brew "atac"
+brew "cameroncooke/axe/axe"
 brew "bat"                   
 brew "btop"                  
 brew "cmake"
@@ -25,6 +28,7 @@ brew "git-filter-repo"
 brew "git-gui"
 brew "git-lfs"
 brew "glow"                   
+brew "go"
 brew "httpd"
 brew "jq"                     
 brew "jesseduffield/lazydocker/lazydocker" 

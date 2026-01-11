@@ -17,3 +17,5 @@ rich
 python-dotenv
 pyyaml
 
+# Development tools
+ruff

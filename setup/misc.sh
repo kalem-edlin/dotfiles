@@ -159,3 +159,33 @@ add_login_item "/Applications/kindaVim.app"
 echo ""
 echo "✓ Misc setup complete!"
 
+###############################################################################
+# xcodemake                                                                   #
+###############################################################################
+
+echo "Configuring xcodemake..."
+
+if [ ! -f /usr/local/bin/xcodemake ]; then
+  curl -O https://raw.githubusercontent.com/johnno1962/xcodemake/main/xcodemake
+  
+  # Make it executable and move it
+  chmod +x xcodemake
+  sudo mv xcodemake /usr/local/bin/
+  
+  echo "✓ xcodemake configured!"
+else
+  echo "✓ xcodemake already exists"
+fi
+
+###############################################################################
+# Claude Code                                                                 #
+###############################################################################
+
+echo "Installing Claude Code..."
+
+if ! command -v claude-code &> /dev/null; then
+  curl -fsSL https://claude.ai/install.sh | bash
+  echo "✓ Claude Code installed!"
+else
+  echo "✓ Claude Code already installed"
+fi

@@ -320,3 +320,6 @@ export PATH="/Users/kalemedlin/.bun/bin:$PATH"
 envoy() {
   "$PWD/.claude/envoy/envoy" "$@"
 }
+
+# Incremental builds for xcodemake enabled
+export INCREMENTAL_BUILDS_ENABLED=1

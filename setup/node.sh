@@ -27,12 +27,12 @@ npm config set fund false
 echo "Installing global npm packages..."
 packages=(
     @cometix/ccline
-    @anthropic-ai/claude-code
     @openai/codex
-    @mariozechner/claude-trace
+    @sasazame/ccresume
     bun
     ccexp
     eas-cli
+    eslint
     happy-coder
     pnpm
     rembg
