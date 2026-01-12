@@ -2,7 +2,7 @@ In all interactions and commit messages, be extremely concise and sacrifice gram
 
 ## GitHub 
 
-- Your primary method for interacting with GitHub should be the GitHub CLI.
+- Your primary method for interacting with GitHub should be the gh CLI.
 
 ## Git
 

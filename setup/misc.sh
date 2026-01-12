@@ -156,8 +156,90 @@ add_login_item "/Applications/BeardedSpice.app"
 add_login_item "/Applications/OrbStack.app"
 add_login_item "/Applications/kindaVim.app"
 
-echo ""
-echo "✓ Misc setup complete!"
+###############################################################################
+# Notifier (Jamf)                                                             #
+###############################################################################
+
+echo "Installing Notifier..."
+
+NOTIFIER_APP="/Applications/Utilities/Notifier.app"
+
+if [ ! -d "$NOTIFIER_APP" ]; then
+  # Get the latest release info from GitHub API
+  LATEST_RELEASE=$(curl -s https://api.github.com/repos/jamf/Notifier/releases/latest)
+  
+  # Try to extract PKG URL using jq if available, otherwise use grep
+  if command -v jq &> /dev/null; then
+    PKG_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | endswith(".pkg")) | .browser_download_url' | head -1)
+  else
+    # Fallback to grep method
+    PKG_URL=$(echo "$LATEST_RELEASE" | grep -o '"browser_download_url": "[^"]*\.pkg[^"]*"' | head -1 | cut -d'"' -f4)
+  fi
+  
+  if [ -z "$PKG_URL" ] || [ "$PKG_URL" = "null" ]; then
+    echo "⚠ Could not find PKG download URL for Notifier"
+    echo "  You can manually install from: https://github.com/jamf/Notifier/releases"
+  else
+    # Download to temp directory
+    TEMP_DIR=$(mktemp -d)
+    PKG_FILE="$TEMP_DIR/Notifier.pkg"
+    
+    echo "  → Downloading Notifier from GitHub..."
+    curl -L -o "$PKG_FILE" "$PKG_URL"
+    
+    if [ -f "$PKG_FILE" ]; then
+      echo "  → Installing Notifier..."
+      sudo installer -pkg "$PKG_FILE" -target /
+      
+      # Clean up
+      rm -rf "$TEMP_DIR"
+      
+      if [ -d "$NOTIFIER_APP" ]; then
+        echo "✓ Notifier installed!"
+      else
+        echo "⚠ Notifier installation may have failed"
+      fi
+    else
+      echo "⚠ Failed to download Notifier"
+      rm -rf "$TEMP_DIR"
+    fi
+  fi
+else
+  echo "✓ Notifier already installed"
+fi
+
+# Check if Notifier has notification permissions and create symlink
+if [ -d "$NOTIFIER_APP" ]; then
+  NOTIFIER_BIN="$NOTIFIER_APP/Contents/MacOS/Notifier"
+  if [ -f "$NOTIFIER_BIN" ]; then
+    # Create symlink in ~/.local/bin if it doesn't exist
+    LOCAL_BIN="$HOME/.local/bin"
+    NOTIFIER_SYMLINK="$LOCAL_BIN/notifier"
+    
+    mkdir -p "$LOCAL_BIN"
+    if [ ! -L "$NOTIFIER_SYMLINK" ] && [ ! -f "$NOTIFIER_SYMLINK" ]; then
+      ln -s "$NOTIFIER_BIN" "$NOTIFIER_SYMLINK"
+      echo "  → Created symlink: notifier → $NOTIFIER_BIN"
+    elif [ -L "$NOTIFIER_SYMLINK" ]; then
+      # Check if symlink is correct
+      if [ "$(readlink "$NOTIFIER_SYMLINK")" != "$NOTIFIER_BIN" ]; then
+        rm "$NOTIFIER_SYMLINK"
+        ln -s "$NOTIFIER_BIN" "$NOTIFIER_SYMLINK"
+        echo "  → Updated symlink: notifier → $NOTIFIER_BIN"
+      fi
+    fi
+    
+    # Try to trigger permission prompt by running a test notification
+    # This will either work (if permission granted) or show the error
+    if ! "$NOTIFIER_BIN" --type banner --message "test" &>/dev/null; then
+      echo ""
+      echo "⚠ Notifier needs notification permissions:"
+      echo "  → Open System Settings → Notifications"
+      echo "  → Enable notifications for 'Notifier - Notifications' and 'Notifier - Alerts'"
+      echo "  → Or run: open 'x-apple.systempreferences:com.apple.preference.notifications'"
+    fi
+  fi
+fi
 
 ###############################################################################
 # xcodemake                                                                   #
@@ -181,11 +263,44 @@ fi
 # Claude Code                                                                 #
 ###############################################################################
 
-echo "Installing Claude Code..."
-
-if ! command -v claude-code &> /dev/null; then
-  curl -fsSL https://claude.ai/install.sh | bash
-  echo "✓ Claude Code installed!"
+# Skip Claude Code installation if SKIP_CLAUDE_CODE is set
+if [ "${SKIP_CLAUDE_CODE:-}" = "1" ]; then
+  echo "⏭ Skipping Claude Code installation (SKIP_CLAUDE_CODE=1)"
+elif ! command -v claude &> /dev/null; then
+  echo "Installing Claude Code..."
+  echo "  → Downloading Claude Code installer..."
+  # Download the installer script first to check if it's valid
+  TEMP_SCRIPT=$(mktemp)
+  
+  if curl -fsSL https://claude.ai/install.sh -o "$TEMP_SCRIPT" 2>&1; then
+    if [ -s "$TEMP_SCRIPT" ]; then
+      echo "  → Running Claude Code installer..."
+      # Run with explicit bash and show output
+      # Note: This may prompt for user interaction
+      bash "$TEMP_SCRIPT" || {
+        echo "⚠ Claude Code installation failed or was cancelled"
+        rm -f "$TEMP_SCRIPT"
+        # Don't exit - continue with rest of setup
+      }
+      rm -f "$TEMP_SCRIPT"
+      
+      if command -v claude &> /dev/null; then
+        echo "✓ Claude Code installed!"
+      else
+        echo "⚠ Claude Code installer completed but 'claude' command not found"
+      fi
+    else
+      echo "⚠ Claude Code installer script appears to be empty"
+      rm -f "$TEMP_SCRIPT"
+    fi
+  else
+    echo "⚠ Failed to download Claude Code installer"
+    rm -f "$TEMP_SCRIPT"
+  fi
 else
   echo "✓ Claude Code already installed"
 fi
+
+
+echo ""
+echo "✓ Misc setup complete!"

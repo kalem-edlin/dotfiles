@@ -38,6 +38,10 @@ setup:
 	@echo "2. Grant accessibility permissions when prompted for:"
 	@echo "   - Raycast, AeroSpace, sketchybar"
 	@echo ""
+	@echo "3. Grant notification permissions for Notifier:"
+	@echo "   System Settings → Notifications"
+	@echo "   → Enable notifications for 'Notifier - Notifications' and 'Notifier - Alerts'"
+	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
 	@$(MAKE) reload

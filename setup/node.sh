@@ -29,17 +29,21 @@ packages=(
     @cometix/ccline
     @openai/codex
     @sasazame/ccresume
+    @vtsls/language-server 
     bun
     ccexp
     eas-cli
     eslint
     happy-coder
     pnpm
+    pyright
     rembg
     serve
     tsx
     turbo
+    typescript
     vercel
+    vscode-langservers-extracted
     yarn
 )
 

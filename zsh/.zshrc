@@ -136,6 +136,12 @@ function cursor {
   open -a "/Applications/Cursor.app" "$@"
 }
 alias c='cursor'
+
+# Notifier command (Jamf Notifier)
+function notifier {
+  /Applications/Utilities/Notifier.app/Contents/MacOS/Notifier "$@"
+}
+
 alias ld="lazydocker"
 alias zshconfig="vi ~/.zshrc"
 alias ohmyzsh="vi ~/.oh-my-zsh"
@@ -237,7 +243,7 @@ export NPM_CONFIG_SAVE="true"
 export NPM_CONFIG_UPDATE_NOTIFIER="false"
 
 # Claude Code LSP Tools
-export ENABLE_LSP_TOOL=1
+export ENABLE_LSP_TOOLS=1
 
 eval "$(zoxide init zsh)"
 

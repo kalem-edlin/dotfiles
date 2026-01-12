@@ -1,10 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "env": {
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
-    "DISABLE_AUTOUPDATER": "0"
-  },
   "includeCoAuthoredBy": false,
   "permissions": {
     "allow": [],
@@ -14,9 +9,10 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "~/.claude/ccline/ccline-wrapper.sh",
+    "command": "~/.claude/ccline/ccline",
     "padding": 0
   },
+  "enabledPlugins": {},
   "alwaysThinkingEnabled": true,
   "feedbackSurveyState": {
     "lastShownTime": 1753997481824

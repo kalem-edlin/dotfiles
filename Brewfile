@@ -44,7 +44,7 @@ brew "sl"
 brew "sshs"
 brew "stow"                   
 brew "supabase/tap/supabase"
-brew "terminal-notifier"
+brew "swift"
 brew "tmux"
 brew "trash-cli", link: true 
 brew "tree"
