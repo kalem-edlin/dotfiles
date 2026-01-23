@@ -1,6 +1,7 @@
 #!/bin/bash
 
 source "$CONFIG_DIR/icon_map.sh"
+source "$CONFIG_DIR/blocklist.sh"
 
 # Add the aerospace_workspace_change event we specified in aerospace.toml
 sketchybar --add event aerospace_workspace_change
@@ -22,9 +23,9 @@ for sid in $ALLOWED_WORKSPACES; do
     background.height=24 \
     icon="$sid" \
     icon.color=$WHITE \
-    icon.padding_left=10 \
-    icon.padding_right=10 \
-    label.font="sketchybar-app-font:Regular:16.0" \
+    icon.padding_left=9 \
+    icon.padding_right=9 \
+    label.font="sketchybar-app-font:Regular:14.0" \
     label.padding_right=0 \
     label.padding_left=0 \
     label.y_offset=-1 \
@@ -39,8 +40,14 @@ for sid in $ALLOWED_WORKSPACES; do
   if [ -n "$apps" ]; then
     icon_strip=" "
     while read -r app; do
-      [ -n "$app" ] && __icon_map "$app" && icon_strip+=" $icon_result"
+      [ -z "$app" ] && continue
+      __is_blocked "$app" && continue
+      __icon_map "$app" && icon_strip+=" $icon_result"
     done <<<"${apps}"
-    sketchybar --set space.$sid label="$icon_strip" label.padding_right=15 icon.padding_right=0
+
+    # Only set if we have icons
+    if [ "$icon_strip" != " " ]; then
+      sketchybar --set space.$sid label="$icon_strip" label.padding_right=14 icon.padding_right=0
+    fi
   fi
 done

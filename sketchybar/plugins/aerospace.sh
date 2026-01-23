@@ -5,6 +5,7 @@
 
 source "$CONFIG_DIR/colors.sh"
 source "$CONFIG_DIR/icon_map.sh"
+source "$CONFIG_DIR/blocklist.sh"
 
 # The workspace ID passed as argument (e.g., "1", "2", etc.)
 SID="$1"
@@ -23,10 +24,16 @@ if [ -n "$apps" ]; then
     # Workspace has windows - show with icons and add right padding
     icon_strip=" "
     while read -r app; do
-        [ -n "$app" ] && __icon_map "$app" && icon_strip+=" $icon_result"
+        [ -z "$app" ] && continue
+        __is_blocked "$app" && continue
+        __icon_map "$app" && icon_strip+=" $icon_result"
     done <<< "$apps"
-    sketchybar --set space.$SID label="$icon_strip" label.padding_right=15 icon.padding_right=0
+    if [ "$icon_strip" != " " ]; then
+        sketchybar --set space.$SID label="$icon_strip" label.padding_right=14 icon.padding_right=0
+    else
+        sketchybar --set space.$SID label="" label.padding_right=0 icon.padding_right=9
+    fi
 else
     # Workspace is empty - symmetric padding around the number
-    sketchybar --set space.$SID label="" label.padding_right=0 icon.padding_right=10
+    sketchybar --set space.$SID label="" label.padding_right=0 icon.padding_right=9
 fi

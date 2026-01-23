@@ -16,9 +16,9 @@ if ! command -v pyenv &> /dev/null; then
 fi
 eval "$(pyenv init -)"
 
-# Install latest Python
-echo "Installing Python latest..."
-LATEST_PYTHON=$(pyenv install --list | grep -E '^\s*[0-9]+\.[0-9]+\.[0-9]+$' | tail -1 | tr -d ' ')
+# Install latest stable Python 3.11.x (excludes release candidates, betas, and alphas)
+echo "Installing latest stable Python 3.11..."
+LATEST_PYTHON=$(pyenv install --list | grep -E '^\s*3\.11\.[0-9]+$' | grep -v -E '(rc|b|a|dev)' | tail -1 | tr -d ' ')
 pyenv install -s "$LATEST_PYTHON"
 pyenv global "$LATEST_PYTHON"
 echo "✓ Python $LATEST_PYTHON installed!"

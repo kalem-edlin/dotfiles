@@ -7,6 +7,7 @@ tap "supabase/tap"
 
 # CLI tools
 brew "actionlint"
+brew "ast-grep"
 brew "atac"
 brew "cameroncooke/axe/axe"
 brew "bat"                   
@@ -48,6 +49,7 @@ brew "swift"
 brew "tmux"
 brew "trash-cli", link: true 
 brew "tree"
+brew "universal-ctags"
 brew "watchman"
 brew "webp" 
 brew "yarn"

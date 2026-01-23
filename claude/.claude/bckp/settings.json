@@ -7,8 +7,5 @@
     "enabled": true,
     "auto_reindex_threshold": 10,
     "model": "bge-large-en-v1.5"
-  },
-  "enabledPlugins": {
-    "pyright-lsp@claude-plugins-official": true
   }
 }

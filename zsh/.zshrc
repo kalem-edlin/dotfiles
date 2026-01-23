@@ -329,3 +329,15 @@ envoy() {
 
 # Incremental builds for xcodemake enabled
 export INCREMENTAL_BUILDS_ENABLED=1
+source /Users/kalemedlin/.daytona.completion_script.zsh
+export GIT_WORKTREE_PARENT="/Users/kalemedlin/Developer/content-engine-trees"
+
+# qlty completions
+[ -s "/opt/homebrew/share/zsh/site-functions/_qlty" ] && source "/opt/homebrew/share/zsh/site-functions/_qlty"
+
+# qlty
+export QLTY_INSTALL="$HOME/.qlty"
+export PATH="$QLTY_INSTALL/bin:$PATH"
+
+# Continuous-Claude OPC directory (for skills to find scripts)
+export CLAUDE_OPC_DIR="/Users/kalemedlin/Developer/Agentic/Continuous-Claude-v3/opc"

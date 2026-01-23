@@ -134,6 +134,7 @@
   "workbench.settings.enableNaturalLanguageSearch": false,
   "terminal.integrated.gpuAcceleration": "off",
   "window.systemColorTheme": "dark",
-  "window.autoDetectColorScheme": false
+  "window.autoDetectColorScheme": false,
+  "python.defaultInterpreterPath": "/opt/homebrew/bin/python3"
 }
 
