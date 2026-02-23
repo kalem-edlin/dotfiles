@@ -15,6 +15,7 @@ STOW_PACKAGES := claude git kindavim ssh vim zsh
 
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User
+OBSIDIAN_DIR := $(HOME)/Library/Mobile Documents/iCloud~md~obsidian/Documents/brain/.obsidian
 
 all: help
 
@@ -113,6 +114,45 @@ install:
 			fi \
 		done \
 	fi
+	@# Obsidian settings
+	@if [ -d "$(DOTFILES)/obsidian" ]; then \
+		echo "  → Linking obsidian settings"; \
+		mkdir -p "$(OBSIDIAN_DIR)"; \
+		for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
+			if [ -f "$(DOTFILES)/obsidian/$$file" ]; then \
+				if [ -L "$(OBSIDIAN_DIR)/$$file" ]; then \
+					case "$$(readlink "$(OBSIDIAN_DIR)/$$file")" in \
+						"$(DOTFILES)"*) echo "    $$file already linked" ;; \
+						*) echo "    replacing stale $$file symlink"; rm "$(OBSIDIAN_DIR)/$$file"; ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file" ;; \
+					esac; \
+				elif [ -f "$(OBSIDIAN_DIR)/$$file" ]; then \
+					echo "    backing up $$file"; \
+					mv "$(OBSIDIAN_DIR)/$$file" "$(OBSIDIAN_DIR)/$$file.bak"; \
+					ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file"; \
+				else \
+					ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file"; \
+				fi \
+			fi \
+		done; \
+		for plugdir in $(DOTFILES)/obsidian/plugins/*/; do \
+			plug=$$(basename "$$plugdir"); \
+			mkdir -p "$(OBSIDIAN_DIR)/plugins/$$plug"; \
+			if [ -f "$$plugdir/data.json" ]; then \
+				if [ -L "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
+					case "$$(readlink "$(OBSIDIAN_DIR)/plugins/$$plug/data.json")" in \
+						"$(DOTFILES)"*) echo "    plugins/$$plug/data.json already linked" ;; \
+						*) echo "    replacing stale plugins/$$plug/data.json symlink"; rm "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ;; \
+					esac; \
+				elif [ -f "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
+					echo "    backing up plugins/$$plug/data.json"; \
+					mv "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak"; \
+					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+				else \
+					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+				fi \
+			fi \
+		done \
+	fi
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Dotfiles installed!"
 
@@ -129,6 +169,27 @@ uninstall:
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			echo "  → Unstowing $$pkg"; \
 			stow -D -t ~ $$pkg 2>/dev/null || true; \
+		fi \
+	done
+	@# Obsidian settings
+	@echo "  → Removing obsidian settings symlinks"
+	@for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
+		if [ -L "$(OBSIDIAN_DIR)/$$file" ]; then \
+			rm "$(OBSIDIAN_DIR)/$$file"; \
+			if [ -f "$(OBSIDIAN_DIR)/$$file.bak" ]; then \
+				mv "$(OBSIDIAN_DIR)/$$file.bak" "$(OBSIDIAN_DIR)/$$file"; \
+				echo "    restored $$file from backup"; \
+			fi \
+		fi \
+	done
+	@for plugdir in $(DOTFILES)/obsidian/plugins/*/; do \
+		plug=$$(basename "$$plugdir"); \
+		if [ -L "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
+			rm "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+			if [ -f "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak" ]; then \
+				mv "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+				echo "    restored plugins/$$plug/data.json from backup"; \
+			fi \
 		fi \
 	done
 	@# Cursor settings
@@ -198,6 +259,7 @@ reload:
 	@echo "  → ghostty (restart app manually)"
 	@echo "  → vim (restart app manually)"
 	@echo "  → cursor (restart app manually)"
+	@echo "  → obsidian (restart app manually)"
 	@echo "  → kindavim (restart app manually)"
 	@echo "  → claude (restart app/CLI manually)"
 	@echo "  → zsh completions"; rm -f ~/.zcompdump* 2>/dev/null || true

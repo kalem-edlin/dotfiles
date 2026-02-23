@@ -341,3 +341,9 @@ export PATH="$QLTY_INSTALL/bin:$PATH"
 
 # Continuous-Claude OPC directory (for skills to find scripts)
 export CLAUDE_OPC_DIR="/Users/kalemedlin/Developer/Agentic/Continuous-Claude-v3/opc"
+
+# The next line updates PATH for the Google Cloud SDK.
+if [ -f '/Users/kalemedlin/Developer/utils/google-cloud-sdk/path.zsh.inc' ]; then . '/Users/kalemedlin/Developer/utils/google-cloud-sdk/path.zsh.inc'; fi
+
+# The next line enables shell command completion for gcloud.
+if [ -f '/Users/kalemedlin/Developer/utils/google-cloud-sdk/completion.zsh.inc' ]; then . '/Users/kalemedlin/Developer/utils/google-cloud-sdk/completion.zsh.inc'; fi

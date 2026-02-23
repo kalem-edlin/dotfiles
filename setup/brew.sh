@@ -20,4 +20,8 @@ brew update
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 brew bundle --file="$DOTFILES_DIR/Brewfile"
 
+# Post-install steps
+echo "Linking libpq..."
+brew link --force libpq 2>/dev/null || true
+
 echo "✓ Homebrew packages installed!"

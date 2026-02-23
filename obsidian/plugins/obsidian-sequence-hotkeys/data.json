@@ -1,0 +1,46 @@
+{
+  "hotkeys": [
+    {
+      "command": "file-explorer:open",
+      "chords": [
+        "C-KeyA",
+        "KeyH"
+      ]
+    },
+    {
+      "command": "editor:focus",
+      "chords": [
+        "C-KeyA",
+        "KeyL"
+      ]
+    },
+    {
+      "command": "workspace:edit-file-title",
+      "chords": [
+        "C-KeyA",
+        "KeyR"
+      ]
+    },
+    {
+      "command": "app:delete-file",
+      "chords": [
+        "C-KeyA",
+        "KeyD"
+      ]
+    },
+    {
+      "command": "app:go-back",
+      "chords": [
+        "C-KeyA",
+        "KeyP"
+      ]
+    },
+    {
+      "command": "app:go-forward",
+      "chords": [
+        "C-KeyA",
+        "KeyN"
+      ]
+    }
+  ]
+}

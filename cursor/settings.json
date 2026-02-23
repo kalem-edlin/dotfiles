@@ -3,7 +3,7 @@
   "vim.useSystemClipboard": true,
   "typescript.tsserver.experimental.enableProjectDiagnostics": true,
   "editor.codeActionsOnSave": {
-    "source.organizeImports": "explicit"
+    "source.organizeImports": "explicit",
   },
   "typescript.updateImportsOnFileMove.enabled": "always",
   "git.decorations.enabled": false,
@@ -21,7 +21,7 @@
   "markdown-preview-enhanced.breakOnSingleNewLine": true,
   "editor.accessibilitySupport": "off",
   "[markdown]": {
-    "diffEditor.ignoreTrimWhitespace": true
+    "diffEditor.ignoreTrimWhitespace": true,
   },
   "git.openRepositoryInParentFolders": "never",
   "typescript.tsserver.watchOptions": "vscode",
@@ -39,10 +39,10 @@
     "editor.insertSpaces": true,
     "editor.tabSize": 2,
     "editor.autoIndent": "advanced",
-    "editor.defaultFormatter": "redhat.vscode-yaml"
+    "editor.defaultFormatter": "redhat.vscode-yaml",
   },
   "[github-actions-workflow]": {
-    "editor.defaultFormatter": "redhat.vscode-yaml"
+    "editor.defaultFormatter": "redhat.vscode-yaml",
   },
   "cursorpyright.analysis.diagnosticMode": "workspace",
   "cursorpyright.analysis.typeCheckingMode": "standard",
@@ -64,8 +64,8 @@
       "editor.background": "#00000000",
       "editorGutter.background": "#00000000",
       "breadcrumb.background": "#00000000",
-      "breadcrumbPicker.background": "#1e1e2e"
-    }
+      "breadcrumbPicker.background": "#1e1e2e",
+    },
   },
   "workbench.colorCustomizations": {
     "[Catppuccin Mocha]": {
@@ -132,9 +132,8 @@
   "workbench.sideBar.location": "right",
   "workbench.enableExperiments": false,
   "workbench.settings.enableNaturalLanguageSearch": false,
+  "python.defaultInterpreterPath": "/opt/homebrew/bin/python3",
   "terminal.integrated.gpuAcceleration": "off",
   "window.systemColorTheme": "dark",
   "window.autoDetectColorScheme": false,
-  "python.defaultInterpreterPath": "/opt/homebrew/bin/python3"
 }
-

@@ -81,6 +81,10 @@ if.app-name-regex-substring = 'spotify'
 run = 'layout floating'
 
 [[on-window-detected]]
+if.app-name-regex-substring = 'preview'
+run = 'layout floating'
+
+[[on-window-detected]]
 if.app-name-regex-substring = 'docker'
 run = 'layout floating'
 
