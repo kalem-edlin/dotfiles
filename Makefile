@@ -16,6 +16,7 @@ STOW_PACKAGES := claude git kindavim ssh vim zsh
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User
 OBSIDIAN_DIR := $(HOME)/Library/Mobile Documents/iCloud~md~obsidian/Documents/brain/.obsidian
+OBSIDIAN_VAULT := $(HOME)/Library/Mobile Documents/iCloud~md~obsidian/Documents/brain
 
 all: help
 
@@ -153,6 +154,21 @@ install:
 			fi \
 		done \
 	fi
+	@# Obsidian vimrc (lives in vault root, not .obsidian/)
+	@if [ -f "$(DOTFILES)/obsidian/.obsidian.vimrc" ]; then \
+		if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+			case "$$(readlink "$(OBSIDIAN_VAULT)/.obsidian.vimrc")" in \
+				"$(DOTFILES)"*) echo "    .obsidian.vimrc already linked" ;; \
+				*) echo "    replacing stale .obsidian.vimrc symlink"; rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ;; \
+			esac; \
+		elif [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+			echo "    backing up .obsidian.vimrc"; \
+			mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak"; \
+			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+		else \
+			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+		fi \
+	fi
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Dotfiles installed!"
 
@@ -192,6 +208,14 @@ uninstall:
 			fi \
 		fi \
 	done
+	@# Obsidian vimrc
+	@if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+		rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+		if [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak" ]; then \
+			mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+			echo "    restored .obsidian.vimrc from backup"; \
+		fi \
+	fi
 	@# Cursor settings
 	@echo "  → Removing cursor settings symlinks"
 	@for file in settings.json keybindings.json; do \

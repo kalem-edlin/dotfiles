@@ -27,6 +27,10 @@
   "typescript.tsserver.watchOptions": "vscode",
   "typescript.enablePromptUseWorkspaceTsdk": true,
   "vim.commandLineModeKeyBindings": [],
+  "vim.normalModeKeyBindingsNonRecursive": [
+    {"before": ["j"], "after": ["g", "j"]},
+    {"before": ["k"], "after": ["g", "k"]}
+  ],
   "workbench.colorTheme": "Catppuccin Mocha",
   "editor.fontWeight": "bold",
   "workbench.iconTheme": "material-icon-theme",
