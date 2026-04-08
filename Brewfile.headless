@@ -53,3 +53,6 @@ brew "zoxide"
 brew "zsh-autocomplete"
 brew "zsh-autosuggestions"
 brew "zsh-vi-mode"
+
+# Networking
+cask "tailscale"
