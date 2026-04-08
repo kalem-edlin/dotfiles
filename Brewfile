@@ -78,7 +78,7 @@ cask "raycast"
 cask "sf-symbols"
 cask "spotify"
 cask "superwhisper"
-cask "tailscale"
+cask "tailscale-app"
 cask "visual-studio-code"
 
 # VS Code / Cursor extensions

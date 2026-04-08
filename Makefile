@@ -55,6 +55,9 @@ setup-headless:
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
 	@$(MAKE) misc-headless brew-headless node python macos install-headless
 	@echo ""
+	@echo "Cleaning up non-headless packages..."
+	@brew bundle cleanup --file="$(DOTFILES)/Brewfile.headless" --force 2>/dev/null || true
+	@echo ""
 	@echo "✓ Headless setup complete!"
 	@echo ""
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
