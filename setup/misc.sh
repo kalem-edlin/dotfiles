@@ -65,7 +65,29 @@ if ! xcode-select -p &> /dev/null; then
 
   echo "✓ Xcode Command Line Tools installed!"
 else
-  echo "✓ Xcode Command Line Tools already installed"
+  # Check if tools are outdated by verifying pkgutil receipt matches available OS
+  CLT_VERSION=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables 2>/dev/null | grep version | awk '{print $2}')
+  OS_VERSION=$(sw_vers -productVersion)
+  OS_MAJOR=$(echo "$OS_VERSION" | cut -d. -f1)
+
+  if [ -n "$CLT_VERSION" ]; then
+    CLT_MAJOR=$(echo "$CLT_VERSION" | cut -d. -f1)
+    if [ "$CLT_MAJOR" -lt "$OS_MAJOR" ]; then
+      echo "Xcode Command Line Tools are outdated (v$CLT_VERSION for macOS $OS_VERSION). Reinstalling..."
+      sudo rm -rf /Library/Developer/CommandLineTools
+      xcode-select --install &> /dev/null
+
+      until xcode-select -p &> /dev/null; do
+        sleep 5
+      done
+
+      echo "✓ Xcode Command Line Tools updated!"
+    else
+      echo "✓ Xcode Command Line Tools up to date (v$CLT_VERSION)"
+    fi
+  else
+    echo "✓ Xcode Command Line Tools already installed"
+  fi
 fi
 
 ###############################################################################

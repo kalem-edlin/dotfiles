@@ -18,7 +18,12 @@ brew update
 
 # Install everything from Brewfile
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-brew bundle --file="$DOTFILES_DIR/Brewfile"
+if [ "${BREWFILE_HEADLESS:-}" = "1" ]; then
+  echo "Using headless Brewfile (CLI tools only)..."
+  brew bundle --file="$DOTFILES_DIR/Brewfile.headless"
+else
+  brew bundle --file="$DOTFILES_DIR/Brewfile"
+fi
 
 # Post-install steps
 echo "Linking libpq..."

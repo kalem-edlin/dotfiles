@@ -53,7 +53,7 @@ setup-headless:
 	@echo "Requesting sudo access..."
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew node python macos install-headless misc-headless
+	@$(MAKE) misc-headless brew-headless node python macos install-headless
 	@echo ""
 	@echo "✓ Headless setup complete!"
 	@echo ""
@@ -360,6 +360,14 @@ brew:
 	@echo "Installing Cursor extensions..."
 	@chmod +x setup/cursor-extensions.sh
 	@./setup/cursor-extensions.sh
+
+# Install Homebrew CLI-only packages (no GUI casks)
+brew-headless:
+	@sudo -v
+	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
+	@echo "Installing Homebrew CLI packages (headless)..."
+	@chmod +x setup/brew.sh
+	@BREWFILE_HEADLESS=1 ./setup/brew.sh
 
 # Remove packages not in Brewfile
 brew-cleanup:
