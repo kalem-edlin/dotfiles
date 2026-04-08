@@ -3,6 +3,10 @@ if [[ ! -t 1 ]]; then
   exec > /dev/tty
 fi
 
+# Terminal settings (fixes backspace over SSH, ensures color support)
+export TERM="${TERM:-xterm-256color}"
+stty erase ^? 2>/dev/null
+
 # Dotfiles directory (derived from this symlinked file)
 if [[ -L ~/.zshrc ]]; then
   export DOTFILES="$(dirname "$(dirname "$(realpath ~/.zshrc)")")"
