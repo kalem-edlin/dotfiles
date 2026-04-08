@@ -1,4 +1,4 @@
-.PHONY: all setup install brew brew-cleanup node python macos misc uninstall reload help
+.PHONY: all setup setup-headless install install-headless brew brew-cleanup node python macos misc misc-headless uninstall reload help
 
 # Dotfiles directory (absolute path)
 DOTFILES := $(shell pwd)
@@ -47,6 +47,20 @@ setup:
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 	@echo ""
 	@$(MAKE) reload
+
+# Headless setup for server/agentic hub (no GUI apps, services, or login items)
+setup-headless:
+	@echo "Requesting sudo access..."
+	@sudo -v
+	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
+	@$(MAKE) brew node python macos install-headless misc-headless
+	@echo ""
+	@echo "✓ Headless setup complete!"
+	@echo ""
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo "This machine is configured for headless/SSH access."
+	@echo "Skipped: SketchyBar, AeroSpace, Login Items, Notifier"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Install all dotfile configurations
 install:
@@ -172,6 +186,113 @@ install:
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Dotfiles installed!"
 
+# Install dotfiles for headless setup (CLI-only configs, no GUI apps)
+install-headless:
+	@echo "Installing headless dotfile configurations..."
+	@mkdir -p ~/.config
+	@# Only link tmux (skip aerospace, ghostty, sketchybar)
+	@if [ -d "$(DOTFILES)/tmux" ]; then \
+		if [ -L ~/.config/tmux ]; then \
+			case "$$(readlink ~/.config/tmux)" in \
+				"$(DOTFILES)"*) echo "  → tmux already linked" ;; \
+				*) echo "  → Replacing stale tmux symlink"; rm ~/.config/tmux; ln -s "$(DOTFILES)/tmux" ~/.config/tmux ;; \
+			esac; \
+		elif [ -e ~/.config/tmux ]; then \
+			echo "  ⚠ ~/.config/tmux exists (skipping)"; \
+		else \
+			echo "  → Linking tmux → ~/.config/tmux"; \
+			ln -s "$(DOTFILES)/tmux" ~/.config/tmux; \
+		fi \
+	fi
+	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
+	@# Only stow CLI packages (skip kindavim)
+	@for pkg in claude git ssh vim zsh; do \
+		if [ -d "$(DOTFILES)/$$pkg" ]; then \
+			for file in $$(find "$(DOTFILES)/$$pkg" -type f 2>/dev/null); do \
+				relpath=$${file#$(DOTFILES)/$$pkg/}; \
+				target=~/"$$relpath"; \
+				if [ -L "$$target" ]; then \
+					case "$$(readlink "$$target")" in \
+						"$(DOTFILES)"*) ;; \
+						*) echo "  → Removing stale symlink $$relpath"; rm "$$target" ;; \
+					esac; \
+				elif [ -e "$$target" ]; then \
+					echo "  → Backing up $$relpath"; \
+					rm -f "$$target.bak" 2>/dev/null; \
+					mv "$$target" "$$target.bak"; \
+				fi \
+			done \
+		fi \
+	done
+	@for pkg in claude git ssh vim zsh; do \
+		if [ -d "$(DOTFILES)/$$pkg" ]; then \
+			echo "  → Stowing $$pkg"; \
+			stow --no-folding --restow -t ~ $$pkg; \
+		fi \
+	done
+	@# Obsidian settings
+	@if [ -d "$(DOTFILES)/obsidian" ]; then \
+		echo "  → Linking obsidian settings"; \
+		mkdir -p "$(OBSIDIAN_DIR)"; \
+		for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
+			if [ -f "$(DOTFILES)/obsidian/$$file" ]; then \
+				if [ -L "$(OBSIDIAN_DIR)/$$file" ]; then \
+					case "$$(readlink "$(OBSIDIAN_DIR)/$$file")" in \
+						"$(DOTFILES)"*) echo "    $$file already linked" ;; \
+						*) echo "    replacing stale $$file symlink"; rm "$(OBSIDIAN_DIR)/$$file"; ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file" ;; \
+					esac; \
+				elif [ -f "$(OBSIDIAN_DIR)/$$file" ]; then \
+					echo "    backing up $$file"; \
+					mv "$(OBSIDIAN_DIR)/$$file" "$(OBSIDIAN_DIR)/$$file.bak"; \
+					ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file"; \
+				else \
+					ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file"; \
+				fi \
+			fi \
+		done; \
+		for plugdir in $(DOTFILES)/obsidian/plugins/*/; do \
+			plug=$$(basename "$$plugdir"); \
+			mkdir -p "$(OBSIDIAN_DIR)/plugins/$$plug"; \
+			if [ -f "$$plugdir/data.json" ]; then \
+				if [ -L "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
+					case "$$(readlink "$(OBSIDIAN_DIR)/plugins/$$plug/data.json")" in \
+						"$(DOTFILES)"*) echo "    plugins/$$plug/data.json already linked" ;; \
+						*) echo "    replacing stale plugins/$$plug/data.json symlink"; rm "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ;; \
+					esac; \
+				elif [ -f "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
+					echo "    backing up plugins/$$plug/data.json"; \
+					mv "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak"; \
+					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+				else \
+					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+				fi \
+			fi \
+		done \
+	fi
+	@# Obsidian vimrc (lives in vault root, not .obsidian/)
+	@if [ -f "$(DOTFILES)/obsidian/.obsidian.vimrc" ]; then \
+		if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+			case "$$(readlink "$(OBSIDIAN_VAULT)/.obsidian.vimrc")" in \
+				"$(DOTFILES)"*) echo "    .obsidian.vimrc already linked" ;; \
+				*) echo "    replacing stale .obsidian.vimrc symlink"; rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ;; \
+			esac; \
+		elif [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+			echo "    backing up .obsidian.vimrc"; \
+			mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak"; \
+			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+		else \
+			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+		fi \
+	fi
+	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
+	@echo "✓ Headless dotfiles installed!"
+
+# Run headless misc setup (no GUI services or login items)
+misc-headless:
+	@echo "Running headless miscellaneous setup..."
+	@chmod +x setup/misc-headless.sh
+	@./setup/misc-headless.sh
+
 # Uninstall all dotfile configurations
 uninstall:
 	@echo "Removing dotfile configurations..."
@@ -295,9 +416,10 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
-	@echo "  setup        Full setup (brew + node + python + macos + install + misc)"
-	@echo "  install      Symlink dotfiles to ~/.config/, ~, and app settings"
-	@echo "  uninstall    Remove dotfile symlinks"
+	@echo "  setup           Full setup (brew + node + python + macos + install + misc)"
+	@echo "  setup-headless  Headless setup for servers (no GUI apps/services)"
+	@echo "  install         Symlink dotfiles to ~/.config/, ~, and app settings"
+	@echo "  uninstall       Remove dotfile symlinks"
 	@echo "  brew         Install Homebrew + all packages from Brewfile"
 	@echo "  brew-cleanup Remove packages not in Brewfile"
 	@echo "  node         Install Node.js (fnm) and global npm packages"
