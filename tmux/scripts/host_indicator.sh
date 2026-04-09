@@ -15,5 +15,5 @@ case "$hostname" in
 esac
 
 tmux set -g @catppuccin_host_color "$color"
-tmux set -g @catppuccin_host_icon "󰍹"
+tmux set -g @catppuccin_host_icon "󰒋"
 tmux set -g @catppuccin_host_text "$hostname"
