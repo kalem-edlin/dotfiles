@@ -8,7 +8,7 @@ fi
 if ! infocmp "$TERM" &>/dev/null 2>&1; then
   export TERM="xterm-256color"
 fi
-stty erase ^? 2>/dev/null
+stty erase '^?' 2>/dev/null
 
 # Dotfiles directory (derived from this symlinked file)
 if [[ -L ~/.zshrc ]]; then
