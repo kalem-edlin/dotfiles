@@ -84,6 +84,18 @@ install:
 			fi \
 		fi \
 	done
+	@# Install TPM (tmux plugin manager) if not present
+	@if [ ! -d ~/.config/tmux/plugins/tpm ]; then \
+		echo "  → Installing TPM (tmux plugin manager)"; \
+		git clone https://github.com/tmux-plugins/tpm ~/.config/tmux/plugins/tpm; \
+	else \
+		echo "  → TPM already installed"; \
+	fi
+	@# Install tmux plugins non-interactively
+	@if [ -x ~/.config/tmux/plugins/tpm/bin/install_plugins ]; then \
+		echo "  → Installing tmux plugins"; \
+		~/.config/tmux/plugins/tpm/bin/install_plugins; \
+	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Back up and REMOVE any existing files that would conflict with stow
 	@# This ensures dotfiles repo is authoritative; after stowing, app changes
@@ -206,6 +218,18 @@ install-headless:
 			echo "  → Linking tmux → ~/.config/tmux"; \
 			ln -s "$(DOTFILES)/tmux" ~/.config/tmux; \
 		fi \
+	fi
+	@# Install TPM (tmux plugin manager) if not present
+	@if [ ! -d ~/.config/tmux/plugins/tpm ]; then \
+		echo "  → Installing TPM (tmux plugin manager)"; \
+		git clone https://github.com/tmux-plugins/tpm ~/.config/tmux/plugins/tpm; \
+	else \
+		echo "  → TPM already installed"; \
+	fi
+	@# Install tmux plugins non-interactively
+	@if [ -x ~/.config/tmux/plugins/tpm/bin/install_plugins ]; then \
+		echo "  → Installing tmux plugins"; \
+		~/.config/tmux/plugins/tpm/bin/install_plugins; \
 	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Only stow CLI packages (skip kindavim)
