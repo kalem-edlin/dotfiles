@@ -96,6 +96,12 @@ install:
 		echo "  → Installing tmux plugins"; \
 		TMUX_PLUGIN_MANAGER_PATH=~/.config/tmux/plugins/ ~/.config/tmux/plugins/tpm/bin/install_plugins || true; \
 	fi
+	@# TPM can't clone commit-pinned plugins on fresh installs — handle manually
+	@if [ ! -d ~/.config/tmux/plugins/tmux-sessionx ]; then \
+		echo "  → Installing tmux-sessionx (pinned commit)"; \
+		git clone https://github.com/omerxx/tmux-sessionx ~/.config/tmux/plugins/tmux-sessionx && \
+		cd ~/.config/tmux/plugins/tmux-sessionx && git checkout 3a1911e; \
+	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Back up and REMOVE any existing files that would conflict with stow
 	@# This ensures dotfiles repo is authoritative; after stowing, app changes
@@ -226,10 +232,16 @@ install-headless:
 	else \
 		echo "  → TPM already installed"; \
 	fi
-	@# Install tmux plugins via TPM (requires a tmux server)
+	@# Install tmux plugins via TPM
 	@if [ -d ~/.config/tmux/plugins/tpm ]; then \
 		echo "  → Installing tmux plugins"; \
 		TMUX_PLUGIN_MANAGER_PATH=~/.config/tmux/plugins/ ~/.config/tmux/plugins/tpm/bin/install_plugins || true; \
+	fi
+	@# TPM can't clone commit-pinned plugins on fresh installs — handle manually
+	@if [ ! -d ~/.config/tmux/plugins/tmux-sessionx ]; then \
+		echo "  → Installing tmux-sessionx (pinned commit)"; \
+		git clone https://github.com/omerxx/tmux-sessionx ~/.config/tmux/plugins/tmux-sessionx && \
+		cd ~/.config/tmux/plugins/tmux-sessionx && git checkout 3a1911e; \
 	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Only stow CLI packages (skip kindavim)
