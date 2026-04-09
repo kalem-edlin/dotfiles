@@ -91,10 +91,10 @@ install:
 	else \
 		echo "  → TPM already installed"; \
 	fi
-	@# Install tmux plugins non-interactively
-	@if [ -x ~/.config/tmux/plugins/tpm/bin/install_plugins ]; then \
+	@# Install tmux plugins via TPM
+	@if [ -d ~/.config/tmux/plugins/tpm ]; then \
 		echo "  → Installing tmux plugins"; \
-		~/.config/tmux/plugins/tpm/bin/install_plugins; \
+		TMUX_PLUGIN_MANAGER_PATH=~/.config/tmux/plugins/ ~/.config/tmux/plugins/tpm/bin/install_plugins || true; \
 	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Back up and REMOVE any existing files that would conflict with stow
@@ -226,10 +226,10 @@ install-headless:
 	else \
 		echo "  → TPM already installed"; \
 	fi
-	@# Install tmux plugins non-interactively
-	@if [ -x ~/.config/tmux/plugins/tpm/bin/install_plugins ]; then \
+	@# Install tmux plugins via TPM (requires a tmux server)
+	@if [ -d ~/.config/tmux/plugins/tpm ]; then \
 		echo "  → Installing tmux plugins"; \
-		~/.config/tmux/plugins/tpm/bin/install_plugins; \
+		TMUX_PLUGIN_MANAGER_PATH=~/.config/tmux/plugins/ ~/.config/tmux/plugins/tpm/bin/install_plugins || true; \
 	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Only stow CLI packages (skip kindavim)
