@@ -7,7 +7,10 @@ input=$(cat)
 if [ -n "$SSH_TTY" ]; then
   # Over SSH: send OSC 52 wrapped in DCS passthrough for tmux
   encoded=$(printf '%s' "$input" | base64 | tr -d '\n')
-  printf '\ePtmux;\e\e]52;c;%s\a\e\\' "$encoded" > "$SSH_TTY"
+  # Use current tty (SSH_TTY can go stale after tmux restarts)
+  target=$(tty)
+  [ "$target" = "not a tty" ] && target="$SSH_TTY"
+  printf '\ePtmux;\e\e]52;c;%s\a\e\\' "$encoded" > "$target"
 else
   # Local: use pbcopy
   printf '%s' "$input" | pbcopy
