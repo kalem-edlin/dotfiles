@@ -76,7 +76,9 @@ source $ZSH/oh-my-zsh.sh
 # Homebrew zsh plugins (loaded after oh-my-zsh)
 source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
 source $(brew --prefix)/opt/zsh-vi-mode/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
-source $(brew --prefix)/opt/zsh-autocomplete/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh
+# zsh-autocomplete disabled — conflicts with autosuggestions and fzf tab handling
+# source $(brew --prefix)/opt/zsh-autocomplete/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh
+
 
 # export MANPATH="/usr/local/man:$MANPATH"
 
@@ -318,8 +320,24 @@ _fzf_comprun() {
   esac
 }
 
-# Set up fzf key bindings and fuzzy completion
+# Set up fzf key bindings (Ctrl+R history, Ctrl+T files)
 source <(fzf --zsh)
+
+# Tab completion with visual menu
+zmodload zsh/complist
+zstyle ':completion:*' menu select
+_tab_accept() {
+  zle autosuggest-clear
+  zle expand-or-complete
+}
+zle -N _tab_accept
+bindkey '\t' _tab_accept
+# Inside the menu: tab accepts, Ctrl+N/P cycle laterally
+bindkey -M menuselect '\t' .accept-line
+bindkey -M menuselect '\r' .accept-line
+bindkey -M menuselect '^N' menu-complete
+bindkey -M menuselect '^P' reverse-menu-complete
+
 
 # fnm (Node version manager)
 eval "$(fnm env --use-on-cd --version-file-strategy=recursive)"
