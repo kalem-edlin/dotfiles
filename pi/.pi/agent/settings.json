@@ -1,0 +1,26 @@
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "medium",
+  "theme": "personal",
+  "treeFilterMode": "default",
+  "doubleEscapeAction": "fork",
+  "quietStartup": false,
+  "hideThinkingBlock": false,
+  "steeringMode": "one-at-a-time",
+  "followUpMode": "one-at-a-time",
+  "images": {
+    "blockImages": false
+  },
+  "packages": [
+    "npm:@burneikis/pi-vim",
+    "npm:@burneikis/pi-fzfp"
+  ],
+  "extensions": [
+    "extensions"
+  ],
+  "themes": [
+    "themes"
+  ],
+  "lastChangelogVersion": "0.70.6"
+}

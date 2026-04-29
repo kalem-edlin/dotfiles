@@ -26,10 +26,13 @@ npm config set fund false
 # Install global npm packages
 echo "Installing global npm packages..."
 packages=(
+    @burneikis/pi-fzfp
+    @burneikis/pi-vim
     @cometix/ccline
+    @mariozechner/pi-coding-agent
     @openai/codex
     @sasazame/ccresume
-    @vtsls/language-server 
+    @vtsls/language-server
     bun
     ccexp
     eas-cli

@@ -11,7 +11,7 @@ export PATH := $(BREW_PREFIX)/bin:$(PATH)
 CONFIG_PACKAGES := aerospace ghostty sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~)
-STOW_PACKAGES := claude git kindavim ssh vim zsh
+STOW_PACKAGES := claude git kindavim pi ssh vim zsh
 
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User
@@ -245,7 +245,7 @@ install-headless:
 	fi
 	@mkdir -p ~/.ssh && chmod 700 ~/.ssh
 	@# Only stow CLI packages (skip kindavim)
-	@for pkg in claude git ssh vim zsh; do \
+	@for pkg in claude git pi ssh vim zsh; do \
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			for file in $$(find "$(DOTFILES)/$$pkg" -type f 2>/dev/null); do \
 				relpath=$${file#$(DOTFILES)/$$pkg/}; \
@@ -263,7 +263,7 @@ install-headless:
 			done \
 		fi \
 	done
-	@for pkg in claude git ssh vim zsh; do \
+	@for pkg in claude git pi ssh vim zsh; do \
 		if [ -d "$(DOTFILES)/$$pkg" ]; then \
 			echo "  → Stowing $$pkg"; \
 			stow --no-folding --restow -t ~ $$pkg; \
