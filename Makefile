@@ -1,4 +1,4 @@
-.PHONY: all setup setup-headless install install-headless brew brew-cleanup node python macos misc misc-headless uninstall reload help
+.PHONY: all setup setup-headless install install-headless brew brew-cleanup neovim node python macos misc misc-headless uninstall reload help
 
 # Dotfiles directory (absolute path)
 DOTFILES := $(shell pwd)
@@ -8,7 +8,7 @@ BREW_PREFIX := $(shell if [ -f /opt/homebrew/bin/brew ]; then echo /opt/homebrew
 export PATH := $(BREW_PREFIX)/bin:$(PATH)
 
 # Packages that go to ~/.config/
-CONFIG_PACKAGES := aerospace ghostty sketchybar tmux
+CONFIG_PACKAGES := aerospace ghostty nvim sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~)
 STOW_PACKAGES := claude git kindavim pi ssh vim zsh
@@ -25,7 +25,7 @@ setup:
 	@echo "Requesting sudo access..."
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew node python macos install misc
+	@$(MAKE) brew neovim node python macos install misc
 	@echo ""
 	@echo "✓ Setup complete!"
 	@echo ""
@@ -53,7 +53,7 @@ setup-headless:
 	@echo "Requesting sudo access..."
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) misc-headless brew-headless node python macos install-headless
+	@$(MAKE) misc-headless brew-headless neovim node python macos install-headless
 	@echo ""
 	@echo "Cleaning up non-headless packages..."
 	@brew bundle cleanup --file="$(DOTFILES)/Brewfile.headless" --force 2>/dev/null || true
@@ -211,20 +211,22 @@ install:
 install-headless:
 	@echo "Installing headless dotfile configurations..."
 	@mkdir -p ~/.config
-	@# Only link tmux (skip aerospace, ghostty, sketchybar)
-	@if [ -d "$(DOTFILES)/tmux" ]; then \
-		if [ -L ~/.config/tmux ]; then \
-			case "$$(readlink ~/.config/tmux)" in \
-				"$(DOTFILES)"*) echo "  → tmux already linked" ;; \
-				*) echo "  → Replacing stale tmux symlink"; rm ~/.config/tmux; ln -s "$(DOTFILES)/tmux" ~/.config/tmux ;; \
-			esac; \
-		elif [ -e ~/.config/tmux ]; then \
-			echo "  ⚠ ~/.config/tmux exists (skipping)"; \
-		else \
-			echo "  → Linking tmux → ~/.config/tmux"; \
-			ln -s "$(DOTFILES)/tmux" ~/.config/tmux; \
+	@# Only link CLI config packages (skip aerospace, ghostty, sketchybar)
+	@for pkg in nvim tmux; do \
+		if [ -d "$(DOTFILES)/$$pkg" ]; then \
+			if [ -L ~/.config/$$pkg ]; then \
+				case "$$(readlink ~/.config/$$pkg)" in \
+					"$(DOTFILES)"*) echo "  → $$pkg already linked" ;; \
+					*) echo "  → Replacing stale $$pkg symlink"; rm ~/.config/$$pkg; ln -s "$(DOTFILES)/$$pkg" ~/.config/$$pkg ;; \
+				esac; \
+			elif [ -e ~/.config/$$pkg ]; then \
+				echo "  ⚠ ~/.config/$$pkg exists (skipping)"; \
+			else \
+				echo "  → Linking $$pkg → ~/.config/$$pkg"; \
+				ln -s "$(DOTFILES)/$$pkg" ~/.config/$$pkg; \
+			fi \
 		fi \
-	fi
+	done
 	@# Install TPM (tmux plugin manager) if not present
 	@if [ ! -d ~/.config/tmux/plugins/tpm ]; then \
 		echo "  → Installing TPM (tmux plugin manager)"; \
@@ -413,6 +415,12 @@ brew-cleanup:
 	@echo "Removing packages not in Brewfile..."
 	@brew bundle cleanup --file="$(DOTFILES)/Brewfile" --force
 
+# Install Neovim Python provider and verify tmux/neovim prerequisites
+neovim:
+	@echo "Setting up Neovim support..."
+	@chmod +x setup/neovim.sh
+	@./setup/neovim.sh
+
 # Install Node.js via fnm and global npm packages
 node:
 	@echo "Installing Node.js and npm packages..."
@@ -449,6 +457,7 @@ reload:
 		echo "  → tmux (skipped, not in session)"; \
 	fi
 	@echo "  → ghostty (restart app manually)"
+	@echo "  → neovim (restart app manually)"
 	@echo "  → vim (restart app manually)"
 	@echo "  → cursor (restart app manually)"
 	@echo "  → obsidian (restart app manually)"
@@ -469,6 +478,7 @@ help:
 	@echo "  uninstall       Remove dotfile symlinks"
 	@echo "  brew         Install Homebrew + all packages from Brewfile"
 	@echo "  brew-cleanup Remove packages not in Brewfile"
+	@echo "  neovim      Install pynvim provider and verify Neovim/tmux"
 	@echo "  node         Install Node.js (fnm) and global npm packages"
 	@echo "  python       Install Python (pyenv)"
 	@echo "  macos        Configure macOS system preferences"
