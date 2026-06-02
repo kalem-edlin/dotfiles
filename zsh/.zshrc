@@ -373,5 +373,6 @@ if [ -f "$HOME/Developer/utils/google-cloud-sdk/path.zsh.inc" ]; then . "$HOME/D
 # The next line enables shell command completion for gcloud.
 if [ -f "$HOME/Developer/utils/google-cloud-sdk/completion.zsh.inc" ]; then . "$HOME/Developer/utils/google-cloud-sdk/completion.zsh.inc"; fi
 
-# OpenClaw Completion
-source "$HOME/.openclaw/completions/openclaw.zsh"
+
+# Figma CLI
+alias fig-start='/Users/kalemedlin/Developer/figma-cli/figma-cli/bin/fig-start'
