@@ -18,7 +18,9 @@ fi
 # pyenv initialization
 export PYENV_ROOT="$HOME/.pyenv"
 [[ -d $PYENV_ROOT/bin ]] && export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
+if command -v pyenv >/dev/null 2>&1; then
+  eval "$(pyenv init -)"
+fi
 
 # Path to your Oh My Zsh installation.
 export ZSH="$HOME/.oh-my-zsh"
@@ -71,11 +73,25 @@ function zvm_after_lazy_keybindings() {
 # Add wisely, as too many plugins slow down shell startup.
 plugins=(git)
 
-source $ZSH/oh-my-zsh.sh
+if [[ -r "$ZSH/oh-my-zsh.sh" ]]; then
+  source "$ZSH/oh-my-zsh.sh"
+fi
 
-# Homebrew zsh plugins (loaded after oh-my-zsh)
-source $(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh
-source $(brew --prefix)/opt/zsh-vi-mode/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
+source_if_exists() {
+  [[ -r "$1" ]] && source "$1"
+}
+
+# zsh plugins (Homebrew on macOS/Linuxbrew, distro packages on Linux)
+if command -v brew >/dev/null 2>&1; then
+  BREW_PREFIX="$(brew --prefix)"
+  source_if_exists "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+  source_if_exists "$BREW_PREFIX/opt/zsh-vi-mode/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh"
+fi
+source_if_exists /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+source_if_exists /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
+source_if_exists /usr/share/zsh-vi-mode/zsh-vi-mode.plugin.zsh
+source_if_exists /usr/share/zsh/plugins/zsh-vi-mode/zsh-vi-mode.plugin.zsh
+source_if_exists "$HOME/.zsh/zsh-vi-mode/zsh-vi-mode.plugin.zsh"
 # zsh-autocomplete disabled — conflicts with autosuggestions and fzf tab handling
 # source $(brew --prefix)/opt/zsh-autocomplete/share/zsh-autocomplete/zsh-autocomplete.plugin.zsh
 
@@ -99,7 +115,9 @@ export SAVEHIST="$HISTSIZE"
 alias gut="git"
 alias gti="git"
 alias mdkir="mkdir"
-alias brwe="brew"
+if command -v brew >/dev/null 2>&1; then
+  alias brwe="brew"
+fi
 alias pmpm="pnpm"
 alias pmpn="pnpm"
 
@@ -112,19 +130,35 @@ alias mkdir="mkdir -p"
 
 # Enhancements
 alias python="python3"
+alias vi="nvim"
+alias vim="nvim"
+alias view="nvim -R"
+alias vimdiff="nvim -d"
 alias nvm="fnm"
-alias la=tree
-alias find="fd"
-alias cat="bat --style=plain"
-alias ls="eza --no-user --icons=auto --group-directories-first --color-scale=age"
+command -v tree >/dev/null 2>&1 && alias la=tree
+if command -v fd >/dev/null 2>&1; then
+  alias find="fd"
+elif command -v fdfind >/dev/null 2>&1; then
+  alias find="fdfind"
+fi
+if command -v bat >/dev/null 2>&1; then
+  alias cat="bat --style=plain"
+elif command -v batcat >/dev/null 2>&1; then
+  alias cat="batcat --style=plain"
+fi
+if command -v eza >/dev/null 2>&1; then
+  alias ls="eza --no-user --icons=auto --group-directories-first --color-scale=age"
+fi
 alias mkcd='mkdir -p "$1" && cd "$1"'
-alias ll='eza -la --icons --git'
-alias lt='eza --tree --level=2 --icons'
+command -v eza >/dev/null 2>&1 && alias ll='eza -la --icons --git'
+command -v eza >/dev/null 2>&1 && alias lt='eza --tree --level=2 --icons'
 alias lsa="ls -a"
-alias lt="ls --tree --level=2 --long --header --git --git-ignore"
+if command -v eza >/dev/null 2>&1; then
+  alias lt="ls --tree --level=2 --long --header --git --git-ignore"
+fi
 alias lta="lt -a"
-alias top="btop"
-alias ping="prettyping --nolegend"
+command -v btop >/dev/null 2>&1 && alias top="btop"
+command -v prettyping >/dev/null 2>&1 && alias ping="prettyping --nolegend"
 alias get="curl -O -L"
 alias path='echo -e ${PATH//:/\\n}'
 
@@ -135,25 +169,43 @@ alias ....="cd ../../.."
 alias .....="cd ../../../.."
 alias ......="cd ../../../../.."
 
-# Clear screen and reload dotfiles configs
-alias clear='make -C $DOTFILES reload && command clear'
+reload-dotfiles() {
+  if [[ -n "${DOTFILES:-}" ]] && command -v make >/dev/null 2>&1; then
+    make -C "$DOTFILES" reload
+  fi
+}
+
+# Clear screen and reload dotfiles configs when make is available
+alias clear='reload-dotfiles; command clear'
 alias cl='clear'
 
 
 # Open Code editor at current directory
 function cursor {
-  open -a "/Applications/Cursor.app" "$@"
+  if (( $+commands[cursor] )); then
+    command cursor "$@"
+  elif [[ "$OSTYPE" == darwin* ]]; then
+    open -a "/Applications/Cursor.app" "$@"
+  else
+    echo "Cursor GUI is not available in this headless shell."
+    return 127
+  fi
 }
 alias c='cursor'
 
 # Notifier command (Jamf Notifier)
 function notifier {
-  /Applications/Utilities/Notifier.app/Contents/MacOS/Notifier "$@"
+  if [[ "$OSTYPE" == darwin* ]]; then
+    /Applications/Utilities/Notifier.app/Contents/MacOS/Notifier "$@"
+  else
+    echo "Notifier is only available on macOS."
+    return 127
+  fi
 }
 
 alias ld="lazydocker"
-alias zshconfig="vi ~/.zshrc"
-alias ohmyzsh="vi ~/.oh-my-zsh"
+alias zshconfig='$EDITOR ~/.zshrc'
+alias ohmyzsh='$EDITOR ~/.oh-my-zsh'
 
 # Git
 alias gc="git commit -m"
@@ -174,7 +226,7 @@ alias gre='git reset'
 
 function git() {
   # Clone a GitHub repo and cd into the created directory
-  if [ $1 = "clone" ];
+  if [[ "${1:-}" = "clone" ]];
   then
     command git clone "${@:2}"
 
@@ -200,6 +252,17 @@ function git() {
 
 unalias rm 2>/dev/null  # Remove any existing alias before defining function
 function rm() {
+  local trash_cmd=""
+
+  if command -v trash >/dev/null 2>&1; then
+    trash_cmd="trash"
+  elif command -v trash-put >/dev/null 2>&1; then
+    trash_cmd="trash-put"
+  else
+    command rm "$@"
+    return
+  fi
+
   local args=()
   for arg in "$@"; do
     case "$arg" in
@@ -207,13 +270,18 @@ function rm() {
       *) args+=("$arg") ;;
     esac
   done
-  trash "${args[@]}"
+  "$trash_cmd" "${args[@]}"
 }
 
 # Cd into the directory shown by the front-most Finder window
 # Based on https://scriptingosx.com/2017/02/terminal-finder-interaction/
 cdf() {
-  cd "$(osascript -e 'tell app "Finder" to POSIX path of (insertion location as alias)')"
+  if [[ "$OSTYPE" == darwin* ]]; then
+    cd "$(osascript -e 'tell app "Finder" to POSIX path of (insertion location as alias)')"
+  else
+    echo "cdf is only available on macOS."
+    return 127
+  fi
 }
 
 # Make a new directory and cd into it
@@ -223,12 +291,10 @@ take() {
 
 
 # Preferred editor for local and remote sessions
-if [[ -n $SSH_CONNECTION ]]; then
-  export EDITOR='vim'
-else
-  export EDITOR='vi'
-fi
+export EDITOR="nvim"
 export VISUAL="$EDITOR"
+export SUDO_EDITOR="$EDITOR"
+export FCEDIT="$EDITOR"
 
 # Compilation flags
 # export ARCHFLAGS="-arch x86_64"
@@ -254,29 +320,72 @@ export NPM_CONFIG_UPDATE_NOTIFIER="false"
 # Claude Code LSP Tools
 export ENABLE_LSP_TOOLS=1
 
-eval "$(zoxide init zsh)"
+if command -v zoxide >/dev/null 2>&1; then
+  eval "$(zoxide init zsh)"
+fi
 
 # ============================================================================
 # FZF Configuration
 # ============================================================================
 
+if command -v fd >/dev/null 2>&1; then
+  FZF_FD_CMD="fd"
+elif command -v fdfind >/dev/null 2>&1; then
+  FZF_FD_CMD="fdfind"
+fi
+
+if command -v bat >/dev/null 2>&1; then
+  FZF_BAT_CMD="bat"
+elif command -v batcat >/dev/null 2>&1; then
+  FZF_BAT_CMD="batcat"
+fi
+
+if [[ -n "${FZF_BAT_CMD:-}" ]]; then
+  FZF_FILE_PREVIEW="$FZF_BAT_CMD -n --color=always {}"
+else
+  FZF_FILE_PREVIEW="sed -n 1,200p {}"
+fi
+
+if command -v eza >/dev/null 2>&1; then
+  FZF_TREE_PREVIEW='eza --tree --color=always {} | head -200'
+else
+  FZF_TREE_PREVIEW='find {} -maxdepth 2 -print | head -200'
+fi
+
+if command -v pbcopy >/dev/null 2>&1; then
+  FZF_COPY_CMD='pbcopy'
+elif command -v wl-copy >/dev/null 2>&1; then
+  FZF_COPY_CMD='wl-copy'
+elif command -v xclip >/dev/null 2>&1; then
+  FZF_COPY_CMD='xclip -selection clipboard'
+elif command -v xsel >/dev/null 2>&1; then
+  FZF_COPY_CMD='xsel --clipboard --input'
+fi
+
 # Use fd instead of find (respects .gitignore, includes hidden, excludes .git)
-export FZF_DEFAULT_COMMAND='fd --type f --hidden --exclude .git'
+if [[ -n "${FZF_FD_CMD:-}" ]]; then
+  export FZF_DEFAULT_COMMAND="$FZF_FD_CMD --type f --hidden --exclude .git"
+else
+  export FZF_DEFAULT_COMMAND="find . -path '*/.git' -prune -o -type f -print"
+fi
 
 # CTRL-T: Paste selected files onto command-line
 export FZF_CTRL_T_COMMAND="$FZF_DEFAULT_COMMAND"
-export FZF_CTRL_T_OPTS="--preview 'bat -n --color=always {}'"
+export FZF_CTRL_T_OPTS="--preview '$FZF_FILE_PREVIEW'"
 
 # ALT-C: cd into selected directory
-export FZF_ALT_C_OPTS="--preview 'eza --tree --color=always {} | head -200'"
+export FZF_ALT_C_OPTS="--preview '$FZF_TREE_PREVIEW'"
 
 # CTRL-R: Search command history
 export FZF_CTRL_R_OPTS="
   --preview 'echo {}' --preview-window down:3:hidden:wrap
   --bind 'ctrl-/:toggle-preview'
-  --bind 'ctrl-y:execute-silent(echo -n {2..} | pbcopy)+abort'
   --color header:italic
   --header 'Press CTRL-Y to copy command into clipboard'"
+if [[ -n "${FZF_COPY_CMD:-}" ]]; then
+  export FZF_CTRL_R_OPTS="$FZF_CTRL_R_OPTS
+  --bind 'ctrl-y:execute-silent(echo -n {2..} | $FZF_COPY_CMD)+abort'"
+fi
 
 # Completion settings
 export FZF_COMPLETION_TRIGGER='**'
@@ -300,11 +409,19 @@ export FZF_DEFAULT_OPTS=" \
 
 # Use fd for path/directory completion (respects .gitignore)
 _fzf_compgen_path() {
-  fd --hidden --exclude ".git" . "$1"
+  if [[ -n "${FZF_FD_CMD:-}" ]]; then
+    "$FZF_FD_CMD" --hidden --exclude ".git" . "$1"
+  else
+    find "$1" -path "*/.git" -prune -o -type f -print
+  fi
 }
 
 _fzf_compgen_dir() {
-  fd --type d --hidden --exclude ".git" . "$1"
+  if [[ -n "${FZF_FD_CMD:-}" ]]; then
+    "$FZF_FD_CMD" --type d --hidden --exclude ".git" . "$1"
+  else
+    find "$1" -path "*/.git" -prune -o -type d -print
+  fi
 }
 
 # Advanced customization of fzf options via _fzf_comprun function
@@ -313,15 +430,17 @@ _fzf_comprun() {
   shift
 
   case "$command" in
-    cd)      fzf --preview 'eza --tree --color=always {} | head -200' "$@" ;;
+    cd)      fzf --preview "$FZF_TREE_PREVIEW" "$@" ;;
     export|unset) fzf --preview "eval 'echo \$'{}" "$@" ;;
     ssh)     fzf --preview 'dig {}' "$@" ;;
-    *)       fzf --preview 'bat -n --color=always {}' "$@" ;;
+    *)       fzf --preview "$FZF_FILE_PREVIEW" "$@" ;;
   esac
 }
 
 # Set up fzf key bindings (Ctrl+R history, Ctrl+T files)
-source <(fzf --zsh)
+if command -v fzf >/dev/null 2>&1; then
+  source <(fzf --zsh)
+fi
 
 # Tab completion with visual menu
 zmodload zsh/complist
@@ -340,7 +459,9 @@ bindkey -M menuselect '^P' reverse-menu-complete
 
 
 # fnm (Node version manager)
-eval "$(fnm env --use-on-cd --version-file-strategy=recursive)"
+if command -v fnm >/dev/null 2>&1; then
+  eval "$(fnm env --use-on-cd --version-file-strategy=recursive)"
+fi
 
 export PATH="$HOME/.bun/bin:$PATH"
 
@@ -375,4 +496,6 @@ if [ -f "$HOME/Developer/utils/google-cloud-sdk/completion.zsh.inc" ]; then . "$
 
 
 # Figma CLI
-alias fig-start='/Users/kalemedlin/Developer/figma-cli/figma-cli/bin/fig-start'
+if [[ -x "/Users/kalemedlin/Developer/figma-cli/figma-cli/bin/fig-start" ]]; then
+  alias fig-start='/Users/kalemedlin/Developer/figma-cli/figma-cli/bin/fig-start'
+fi

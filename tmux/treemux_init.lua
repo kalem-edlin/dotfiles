@@ -33,10 +33,127 @@ if plugin_count ~= 1 then
   error("Could not replace treemux tokyonight plugin spec")
 end
 
+local icon_count
+source, icon_count = source:gsub('"nvim%-tree/nvim%-web%-devicons"', '"DaikyXendo/nvim-material-icon"')
+if icon_count == 0 then
+  error("Could not replace treemux devicons plugin")
+end
+
 local colorscheme_count
 source, colorscheme_count = source:gsub("vim%.cmd%(%[%[ colorscheme tokyonight%-night %]%]%)", 'vim.cmd.colorscheme("catppuccin-mocha")', 1)
 if colorscheme_count ~= 1 then
   error("Could not replace treemux colorscheme")
+end
+
+local nvim_tree_filter_count
+source, nvim_tree_filter_count = source:gsub(
+  'filters = {%s*\n%s*custom = { "%.git" },%s*\n%s*},',
+  [[filters = {
+          git_ignored = false,
+          dotfiles = false,
+          custom = {
+            ".git",
+            ".DS_Store",
+            "node_modules",
+            "dist",
+            "build",
+            "out",
+            "target",
+            "coverage",
+            ".next",
+            ".nuxt",
+            ".svelte-kit",
+            ".turbo",
+            ".vite",
+            ".cache",
+            ".parcel-cache",
+            ".pytest_cache",
+            "__pycache__",
+            ".mypy_cache",
+            ".ruff_cache",
+            ".venv",
+            "venv",
+          },
+        },]],
+  1
+)
+if nvim_tree_filter_count ~= 1 then
+  error("Could not patch treemux nvim-tree filters")
+end
+
+local neo_tree_filter_count
+source, neo_tree_filter_count = source:gsub(
+  'filesystem = {%s*\n%s*hijack_netrw_behavior = "disabled",',
+  [[filesystem = {
+          hijack_netrw_behavior = "disabled",
+          filtered_items = {
+            visible = true,
+            hide_dotfiles = false,
+            hide_gitignored = true,
+            hide_ignored = false,
+            always_show = {
+              ".env",
+              ".env.local",
+              ".env.development",
+              ".env.production",
+              ".env.test",
+              ".npmrc",
+              ".nvmrc",
+              ".node-version",
+              ".python-version",
+              ".ruby-version",
+            },
+            always_show_by_pattern = {
+              ".env.*",
+              ".yarnrc*",
+            },
+            never_show = {
+              ".git",
+              ".DS_Store",
+              "node_modules",
+              "dist",
+              "build",
+              "out",
+              "target",
+              "coverage",
+              ".next",
+              ".nuxt",
+              ".svelte-kit",
+              ".turbo",
+              ".vite",
+              ".cache",
+              ".parcel-cache",
+              ".pytest_cache",
+              "__pycache__",
+              ".mypy_cache",
+              ".ruff_cache",
+              ".venv",
+              "venv",
+            },
+          },]],
+  1
+)
+if neo_tree_filter_count ~= 1 then
+  error("Could not patch treemux neo-tree filters")
+end
+
+local neo_tree_git_mapping_count
+source, neo_tree_git_mapping_count = source:gsub(
+  '%["q"%] = "noop",',
+  [[["q"] = "noop",
+              ["z"] = "noop",
+              ["zz"] = { function() vim.cmd("normal! zz") end, desc = "center row" },
+              ["zt"] = { function() vim.cmd("normal! zt") end, desc = "row to top" },
+              ["zb"] = { function() vim.cmd("normal! zb") end, desc = "row to bottom" },
+              ["g"] = { "show_help", nowait = false, config = { title = "Git", prefix_key = "g" } },
+              ["ga"] = { "git_add_file", desc = "stage" },
+              ["gu"] = { "git_unstage_file", desc = "unstage" },
+              ["gt"] = { "git_toggle_file_stage", desc = "toggle stage" },
+              ["gr"] = { "git_revert_file", desc = "revert" },]],
+  1
+)
+if neo_tree_git_mapping_count ~= 1 then
+  error("Could not patch treemux neo-tree git mappings")
 end
 
 local chunk, err = load(source, "@treemux_init_with_catppuccin")
@@ -44,6 +161,64 @@ if not chunk then
   error(err)
 end
 chunk()
+
+local neo_tree_events = require("neo-tree.events")
+
+neo_tree_events.subscribe({
+  event = neo_tree_events.GIT_EVENT,
+  id = "treemux_force_filesystem_git_refresh",
+  handler = function()
+    vim.defer_fn(function()
+      local ok_manager, manager = pcall(require, "neo-tree.sources.manager")
+      local ok_git, git = pcall(require, "neo-tree.git")
+      if not ok_manager or not ok_git then
+        return
+      end
+
+      manager._for_each_state("filesystem", function(state)
+        if state.path then
+          pcall(git.status, state.path, state.git_base_by_worktree, false)
+        end
+      end)
+      pcall(manager.refresh, "filesystem")
+      vim.defer_fn(function()
+        pcall(manager.redraw, "filesystem")
+      end, 100)
+    end, 20)
+  end,
+})
+
+require("nvim-web-devicons").setup({
+  color_icons = true,
+  default = true,
+})
+
+neo_tree_events.subscribe({
+  event = neo_tree_events.NEO_TREE_POPUP_INPUT_READY,
+  id = "treemux_select_popup_input",
+  handler = function(args)
+    vim.schedule(function()
+      local winid = args and args.winid
+      local bufnr = args and args.bufnr
+      if not winid or not bufnr or not vim.api.nvim_win_is_valid(winid) then
+        return
+      end
+
+      vim.api.nvim_set_current_win(winid)
+      vim.cmd("stopinsert")
+
+      local line = vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] or ""
+      local start_col = line:match("^ ") and 1 or 0
+      if #line <= start_col then
+        vim.api.nvim_win_set_cursor(winid, { 1, start_col })
+        return
+      end
+
+      vim.api.nvim_win_set_cursor(winid, { 1, start_col })
+      vim.cmd("normal! v$")
+    end)
+  end,
+})
 
 local function clear_background()
   local groups = {
@@ -72,6 +247,8 @@ local function clear_background()
   for _, group in ipairs(groups) do
     vim.api.nvim_set_hl(0, group, { bg = "NONE" })
   end
+
+  vim.api.nvim_set_hl(0, "NeoTreeGitIgnored", { fg = "#585b70", bg = "NONE" })
 end
 
 clear_background()

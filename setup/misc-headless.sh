@@ -1,7 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -u
 
 # Headless variant of misc.sh — skips GUI services, login items, and notifications.
-# Used for Mac Mini server / agentic hub setup.
+# Used for Mac Mini server / agentic hub setup and Linux SSH hosts.
+
+OS_NAME="$(uname -s)"
+SETUP_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 
 # Ensure Homebrew is in PATH (required after fresh install)
 if [[ -f /opt/homebrew/bin/brew ]]; then
@@ -22,6 +27,24 @@ else
   echo "✓ Oh My Zsh already installed"
 fi
 
+if command -v zsh &> /dev/null; then
+  ZSH_PATH="$(command -v zsh)"
+  if [[ "${SHELL:-}" != "$ZSH_PATH" ]] && command -v chsh &> /dev/null; then
+    echo "Setting zsh as the login shell..."
+    if [[ "$OS_NAME" = "Darwin" ]]; then
+      grep -qxF "$ZSH_PATH" /etc/shells || echo "$ZSH_PATH" | sudo tee -a /etc/shells >/dev/null
+    fi
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+      chsh -s "$ZSH_PATH" "$SETUP_USER" 2>/dev/null || echo "⚠ Could not change shell automatically; run: chsh -s $ZSH_PATH"
+    elif command -v sudo &> /dev/null; then
+      sudo chsh -s "$ZSH_PATH" "$SETUP_USER" 2>/dev/null || echo "⚠ Could not change shell automatically; run: chsh -s $ZSH_PATH"
+    else
+      chsh -s "$ZSH_PATH" "$SETUP_USER" 2>/dev/null || echo "⚠ Could not change shell automatically; run: chsh -s $ZSH_PATH"
+    fi
+  fi
+fi
+
 ###############################################################################
 # SSH Key                                                                     #
 ###############################################################################
@@ -36,7 +59,11 @@ if [ ! -f "$SSH_KEY" ]; then
   ssh-keygen -t ed25519 -C "$(git config user.email || echo 'user@machine')" -f "$SSH_KEY" -N ""
 
   eval "$(ssh-agent -s)"
-  ssh-add --apple-use-keychain "$SSH_KEY"
+  if [[ "$OS_NAME" = "Darwin" ]]; then
+    ssh-add --apple-use-keychain "$SSH_KEY"
+  else
+    ssh-add "$SSH_KEY"
+  fi
 
   echo "✓ SSH key generated!"
   echo ""
@@ -49,42 +76,46 @@ else
 fi
 
 ###############################################################################
-# Xcode Command Line Tools                                                    #
+# Platform build tools                                                        #
 ###############################################################################
 
-if ! xcode-select -p &> /dev/null; then
-  echo "Installing Xcode Command Line Tools..."
-  xcode-select --install &> /dev/null
+if [[ "$OS_NAME" = "Darwin" ]]; then
+  if ! xcode-select -p &> /dev/null; then
+    echo "Installing Xcode Command Line Tools..."
+    xcode-select --install &> /dev/null
 
-  until xcode-select -p &> /dev/null; do
-    sleep 5
-  done
+    until xcode-select -p &> /dev/null; do
+      sleep 5
+    done
 
-  echo "✓ Xcode Command Line Tools installed!"
-else
-  # Check if tools are outdated by verifying pkgutil receipt matches available OS
-  CLT_VERSION=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables 2>/dev/null | grep version | awk '{print $2}')
-  OS_VERSION=$(sw_vers -productVersion)
-  OS_MAJOR=$(echo "$OS_VERSION" | cut -d. -f1)
-
-  if [ -n "$CLT_VERSION" ]; then
-    CLT_MAJOR=$(echo "$CLT_VERSION" | cut -d. -f1)
-    if [ "$CLT_MAJOR" -lt "$OS_MAJOR" ]; then
-      echo "Xcode Command Line Tools are outdated (v$CLT_VERSION for macOS $OS_VERSION). Reinstalling..."
-      sudo rm -rf /Library/Developer/CommandLineTools
-      xcode-select --install &> /dev/null
-
-      until xcode-select -p &> /dev/null; do
-        sleep 5
-      done
-
-      echo "✓ Xcode Command Line Tools updated!"
-    else
-      echo "✓ Xcode Command Line Tools up to date (v$CLT_VERSION)"
-    fi
+    echo "✓ Xcode Command Line Tools installed!"
   else
-    echo "✓ Xcode Command Line Tools already installed"
+    # Check if tools are outdated by verifying pkgutil receipt matches available OS
+    CLT_VERSION=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables 2>/dev/null | grep version | awk '{print $2}')
+    OS_VERSION=$(sw_vers -productVersion)
+    OS_MAJOR=$(echo "$OS_VERSION" | cut -d. -f1)
+
+    if [ -n "$CLT_VERSION" ]; then
+      CLT_MAJOR=$(echo "$CLT_VERSION" | cut -d. -f1)
+      if [ "$CLT_MAJOR" -lt "$OS_MAJOR" ]; then
+        echo "Xcode Command Line Tools are outdated (v$CLT_VERSION for macOS $OS_VERSION). Reinstalling..."
+        sudo rm -rf /Library/Developer/CommandLineTools
+        xcode-select --install &> /dev/null
+
+        until xcode-select -p &> /dev/null; do
+          sleep 5
+        done
+
+        echo "✓ Xcode Command Line Tools updated!"
+      else
+        echo "✓ Xcode Command Line Tools up to date (v$CLT_VERSION)"
+      fi
+    else
+      echo "✓ Xcode Command Line Tools already installed"
+    fi
   fi
+else
+  echo "✓ Linux build tools are managed by setup/linux-headless.sh"
 fi
 
 ###############################################################################
@@ -118,7 +149,9 @@ echo "⏭ Skipping Notifier (GUI)"
 
 echo "Configuring xcodemake..."
 
-if [ ! -f /usr/local/bin/xcodemake ]; then
+if [[ "$OS_NAME" != "Darwin" ]]; then
+  echo "⏭ Skipping xcodemake (macOS/Xcode only)"
+elif [ ! -f /usr/local/bin/xcodemake ]; then
   curl -O https://raw.githubusercontent.com/johnno1962/xcodemake/main/xcodemake
 
   chmod +x xcodemake

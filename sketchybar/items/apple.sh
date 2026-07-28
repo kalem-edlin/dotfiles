@@ -3,7 +3,7 @@
 # Add the Apple logo item to the left side
 sketchybar \
   --add item apple.logo left \
-  --set apple.logo icon=󰀵 \
+  --set apple.logo icon= \
   icon.font="SF Pro:Semibold:18.0" \
   icon.padding_left=5 \
   icon.padding_right=5 \

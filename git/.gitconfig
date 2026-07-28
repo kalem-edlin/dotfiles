@@ -9,6 +9,7 @@
   user = kalem-edlin
 
 [core]
+  editor = nvim
   # Use delta for beautiful diffs
   pager = delta
   # Ignore file creation time changes (macOS changes these during moves)

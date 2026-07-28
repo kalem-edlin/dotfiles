@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -9,11 +11,20 @@ elif [[ -f /usr/local/bin/brew ]]; then
     eval "$(/usr/local/bin/brew shellenv)"
 fi
 
-# Setup pyenv (requires pyenv installed via brew)
+# Setup pyenv. On macOS this is installed by Brewfile; on Linux it may need to
+# bootstrap itself after build dependencies are installed.
 if ! command -v pyenv &> /dev/null; then
-    echo "Error: pyenv not found. Run 'make brew' first."
+    echo "pyenv not found; installing pyenv..."
+    curl -fsSL https://pyenv.run | bash
+    export PYENV_ROOT="$HOME/.pyenv"
+    export PATH="$PYENV_ROOT/bin:$PATH"
+fi
+
+if ! command -v pyenv &> /dev/null; then
+    echo "Error: pyenv not found after installation."
     exit 1
 fi
+
 eval "$(pyenv init -)"
 
 # Install latest stable Python 3.11.x (excludes release candidates, betas, and alphas)
@@ -39,4 +50,3 @@ pipx ensurepath
 # Install useful system-wide CLI tools
 pipx install httpie  # Better curl for API testing
 echo "✓ pipx configured!"
-

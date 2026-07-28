@@ -7,7 +7,7 @@ source "$CONFIG_DIR/blocklist.sh"
 sketchybar --add event aerospace_workspace_change
 
 # Define allowed workspaces in keyboard order (matches your aerospace.toml keybindings)
-ALLOWED_WORKSPACES="1 2 3 4 5 7 8 9 0"
+ALLOWED_WORKSPACES="1 2 3 4 5 6 7 8 9 0"
 
 # Create space items for all allowed workspaces
 for sid in $ALLOWED_WORKSPACES; do

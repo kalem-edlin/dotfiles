@@ -1,11 +1,10 @@
 [
   "obsidian-importer",
+  "obsidian42-brat",
   "obsidian-excalidraw-plugin",
   "obsidian-electron-window-tweaker",
   "obsidian-sequence-hotkeys",
-  "obsidian42-brat",
   "sidebar-keyboard-navigation",
   "obsidian-vimrc-support",
-  "obsidian-languagetool-plugin",
-  "smart-connections"
+  "obsidian-languagetool-plugin"
 ]

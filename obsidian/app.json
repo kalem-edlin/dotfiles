@@ -3,5 +3,6 @@
   "attachmentFolderPath": "Assets",
   "newFileLocation": "current",
   "alwaysUpdateLinks": true,
-  "promptDelete": false
+  "promptDelete": false,
+  "readableLineLength": false
 }

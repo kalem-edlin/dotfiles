@@ -1,4 +1,4 @@
-.PHONY: all setup setup-headless install install-headless brew brew-cleanup neovim node python macos misc misc-headless uninstall reload help
+.PHONY: all setup setup-headless setup-linux-headless install install-headless brew brew-headless brew-cleanup neovim node python macos obsidian obsidian-cli misc misc-headless uninstall reload help
 
 # Dotfiles directory (absolute path)
 DOTFILES := $(shell pwd)
@@ -25,7 +25,7 @@ setup:
 	@echo "Requesting sudo access..."
 	@sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew neovim node python macos install misc
+	@$(MAKE) brew neovim node obsidian python macos install misc
 	@echo ""
 	@echo "✓ Setup complete!"
 	@echo ""
@@ -50,20 +50,33 @@ setup:
 
 # Headless setup for server/agentic hub (no GUI apps, services, or login items)
 setup-headless:
-	@echo "Requesting sudo access..."
-	@sudo -v
-	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) misc-headless brew-headless neovim node python macos install-headless
-	@echo ""
-	@echo "Cleaning up non-headless packages..."
-	@brew bundle cleanup --file="$(DOTFILES)/Brewfile.headless" --force 2>/dev/null || true
-	@echo ""
-	@echo "✓ Headless setup complete!"
-	@echo ""
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-	@echo "This machine is configured for headless/SSH access."
-	@echo "Skipped: SketchyBar, AeroSpace, Login Items, Notifier"
-	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@if [ "$$(uname -s)" = "Linux" ]; then \
+		$(MAKE) setup-linux-headless; \
+	elif [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "Requesting sudo access..."; \
+		sudo -v; \
+		while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null & \
+		$(MAKE) misc-headless brew-headless python neovim node obsidian install-headless; \
+		echo ""; \
+		echo "Cleaning up non-headless packages..."; \
+		brew bundle cleanup --file="$(DOTFILES)/Brewfile.headless" --force 2>/dev/null || true; \
+		echo ""; \
+		echo "✓ Headless setup complete!"; \
+		echo ""; \
+		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
+		echo "This machine is configured for headless/SSH access."; \
+		echo "Skipped: SketchyBar, AeroSpace, Login Items, Notifier"; \
+		echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; \
+	else \
+		echo "Unsupported platform: $$(uname -s)"; \
+		exit 1; \
+	fi
+
+# Linux headless setup without Homebrew or GUI dependencies
+setup-linux-headless:
+	@echo "Running Linux headless setup..."
+	@chmod +x setup/linux-headless.sh
+	@./setup/linux-headless.sh
 
 # Install all dotfile configurations
 install:
@@ -148,10 +161,10 @@ install:
 					ln -s "$(DOTFILES)/cursor/$$file" "$(CURSOR_USER_DIR)/$$file"; \
 				fi \
 			fi \
-		done \
-	fi
-	@# Obsidian settings
-	@if [ -d "$(DOTFILES)/obsidian" ]; then \
+			done \
+		fi
+	@# Obsidian desktop settings (macOS iCloud vault only)
+	@if [ "$$(uname -s)" = "Darwin" ] && [ -d "$(DOTFILES)/obsidian" ]; then \
 		echo "  → Linking obsidian settings"; \
 		mkdir -p "$(OBSIDIAN_DIR)"; \
 		for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
@@ -170,7 +183,8 @@ install:
 				fi \
 			fi \
 		done; \
-		for plugdir in $(DOTFILES)/obsidian/plugins/*/; do \
+		for plugdir in "$(DOTFILES)"/obsidian/plugins/*/; do \
+			[ -d "$$plugdir" ] || continue; \
 			plug=$$(basename "$$plugdir"); \
 			mkdir -p "$(OBSIDIAN_DIR)/plugins/$$plug"; \
 			if [ -f "$$plugdir/data.json" ]; then \
@@ -187,21 +201,20 @@ install:
 					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
 				fi \
 			fi \
-		done \
-	fi
-	@# Obsidian vimrc (lives in vault root, not .obsidian/)
-	@if [ -f "$(DOTFILES)/obsidian/.obsidian.vimrc" ]; then \
-		if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
-			case "$$(readlink "$(OBSIDIAN_VAULT)/.obsidian.vimrc")" in \
-				"$(DOTFILES)"*) echo "    .obsidian.vimrc already linked" ;; \
-				*) echo "    replacing stale .obsidian.vimrc symlink"; rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ;; \
-			esac; \
-		elif [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
-			echo "    backing up .obsidian.vimrc"; \
-			mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak"; \
-			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
-		else \
-			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+		done; \
+		if [ -f "$(DOTFILES)/obsidian/.obsidian.vimrc" ]; then \
+			if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+				case "$$(readlink "$(OBSIDIAN_VAULT)/.obsidian.vimrc")" in \
+					"$(DOTFILES)"*) echo "    .obsidian.vimrc already linked" ;; \
+					*) echo "    replacing stale .obsidian.vimrc symlink"; rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ;; \
+				esac; \
+			elif [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+				echo "    backing up .obsidian.vimrc"; \
+				mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak"; \
+				ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+			else \
+				ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+			fi; \
 		fi \
 	fi
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
@@ -271,60 +284,6 @@ install-headless:
 			stow --no-folding --restow -t ~ $$pkg; \
 		fi \
 	done
-	@# Obsidian settings
-	@if [ -d "$(DOTFILES)/obsidian" ]; then \
-		echo "  → Linking obsidian settings"; \
-		mkdir -p "$(OBSIDIAN_DIR)"; \
-		for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
-			if [ -f "$(DOTFILES)/obsidian/$$file" ]; then \
-				if [ -L "$(OBSIDIAN_DIR)/$$file" ]; then \
-					case "$$(readlink "$(OBSIDIAN_DIR)/$$file")" in \
-						"$(DOTFILES)"*) echo "    $$file already linked" ;; \
-						*) echo "    replacing stale $$file symlink"; rm "$(OBSIDIAN_DIR)/$$file"; ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file" ;; \
-					esac; \
-				elif [ -f "$(OBSIDIAN_DIR)/$$file" ]; then \
-					echo "    backing up $$file"; \
-					mv "$(OBSIDIAN_DIR)/$$file" "$(OBSIDIAN_DIR)/$$file.bak"; \
-					ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file"; \
-				else \
-					ln -s "$(DOTFILES)/obsidian/$$file" "$(OBSIDIAN_DIR)/$$file"; \
-				fi \
-			fi \
-		done; \
-		for plugdir in $(DOTFILES)/obsidian/plugins/*/; do \
-			plug=$$(basename "$$plugdir"); \
-			mkdir -p "$(OBSIDIAN_DIR)/plugins/$$plug"; \
-			if [ -f "$$plugdir/data.json" ]; then \
-				if [ -L "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
-					case "$$(readlink "$(OBSIDIAN_DIR)/plugins/$$plug/data.json")" in \
-						"$(DOTFILES)"*) echo "    plugins/$$plug/data.json already linked" ;; \
-						*) echo "    replacing stale plugins/$$plug/data.json symlink"; rm "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ;; \
-					esac; \
-				elif [ -f "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
-					echo "    backing up plugins/$$plug/data.json"; \
-					mv "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak"; \
-					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
-				else \
-					ln -s "$$plugdir/data.json" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
-				fi \
-			fi \
-		done \
-	fi
-	@# Obsidian vimrc (lives in vault root, not .obsidian/)
-	@if [ -f "$(DOTFILES)/obsidian/.obsidian.vimrc" ]; then \
-		if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
-			case "$$(readlink "$(OBSIDIAN_VAULT)/.obsidian.vimrc")" in \
-				"$(DOTFILES)"*) echo "    .obsidian.vimrc already linked" ;; \
-				*) echo "    replacing stale .obsidian.vimrc symlink"; rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ;; \
-			esac; \
-		elif [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
-			echo "    backing up .obsidian.vimrc"; \
-			mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak"; \
-			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
-		else \
-			ln -s "$(DOTFILES)/obsidian/.obsidian.vimrc" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
-		fi \
-	fi
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Headless dotfiles installed!"
 
@@ -349,33 +308,47 @@ uninstall:
 			stow -D -t ~ $$pkg 2>/dev/null || true; \
 		fi \
 	done
-	@# Obsidian settings
-	@echo "  → Removing obsidian settings symlinks"
-	@for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
-		if [ -L "$(OBSIDIAN_DIR)/$$file" ]; then \
-			rm "$(OBSIDIAN_DIR)/$$file"; \
-			if [ -f "$(OBSIDIAN_DIR)/$$file.bak" ]; then \
-				mv "$(OBSIDIAN_DIR)/$$file.bak" "$(OBSIDIAN_DIR)/$$file"; \
-				echo "    restored $$file from backup"; \
-			fi \
-		fi \
-	done
-	@for plugdir in $(DOTFILES)/obsidian/plugins/*/; do \
-		plug=$$(basename "$$plugdir"); \
-		if [ -L "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
-			rm "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
-			if [ -f "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak" ]; then \
-				mv "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
-				echo "    restored plugins/$$plug/data.json from backup"; \
-			fi \
-		fi \
-	done
-	@# Obsidian vimrc
-	@if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
-		rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
-		if [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak" ]; then \
-			mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
-			echo "    restored .obsidian.vimrc from backup"; \
+	@# Obsidian desktop settings (macOS iCloud vault only)
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "  → Removing obsidian settings symlinks"; \
+		for file in app.json appearance.json core-plugins.json community-plugins.json daily-notes.json hotkeys.json; do \
+			if [ -L "$(OBSIDIAN_DIR)/$$file" ]; then \
+				case "$$(readlink "$(OBSIDIAN_DIR)/$$file")" in \
+					"$(DOTFILES)"*) \
+						rm "$(OBSIDIAN_DIR)/$$file"; \
+						if [ -f "$(OBSIDIAN_DIR)/$$file.bak" ]; then \
+							mv "$(OBSIDIAN_DIR)/$$file.bak" "$(OBSIDIAN_DIR)/$$file"; \
+							echo "    restored $$file from backup"; \
+						fi \
+						;; \
+				esac; \
+			fi; \
+		done; \
+		for plugdir in "$(DOTFILES)"/obsidian/plugins/*/; do \
+			[ -d "$$plugdir" ] || continue; \
+			plug=$$(basename "$$plugdir"); \
+			if [ -L "$(OBSIDIAN_DIR)/plugins/$$plug/data.json" ]; then \
+				case "$$(readlink "$(OBSIDIAN_DIR)/plugins/$$plug/data.json")" in \
+					"$(DOTFILES)"*) \
+						rm "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+						if [ -f "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak" ]; then \
+							mv "$(OBSIDIAN_DIR)/plugins/$$plug/data.json.bak" "$(OBSIDIAN_DIR)/plugins/$$plug/data.json"; \
+							echo "    restored plugins/$$plug/data.json from backup"; \
+						fi \
+						;; \
+				esac; \
+			fi; \
+		done; \
+		if [ -L "$(OBSIDIAN_VAULT)/.obsidian.vimrc" ]; then \
+			case "$$(readlink "$(OBSIDIAN_VAULT)/.obsidian.vimrc")" in \
+				"$(DOTFILES)"*) \
+					rm "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+					if [ -f "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak" ]; then \
+						mv "$(OBSIDIAN_VAULT)/.obsidian.vimrc.bak" "$(OBSIDIAN_VAULT)/.obsidian.vimrc"; \
+						echo "    restored .obsidian.vimrc from backup"; \
+					fi \
+					;; \
+			esac; \
 		fi \
 	fi
 	@# Cursor settings
@@ -439,6 +412,15 @@ macos:
 	@chmod +x setup/macos.sh
 	@./setup/macos.sh
 
+# Configure Obsidian Headless tooling
+obsidian:
+	@echo "Configuring Obsidian Headless tooling..."
+	@chmod +x setup/obsidian.sh
+	@./setup/obsidian.sh
+
+# Backward-compatible alias
+obsidian-cli: obsidian
+
 # Miscellaneous setup (Xcode tools, npm config, GitHub CLI check)
 misc:
 	@echo "Running miscellaneous setup..."
@@ -460,7 +442,6 @@ reload:
 	@echo "  → neovim (restart app manually)"
 	@echo "  → vim (restart app manually)"
 	@echo "  → cursor (restart app manually)"
-	@echo "  → obsidian (restart app manually)"
 	@echo "  → kindavim (restart app manually)"
 	@echo "  → claude (restart app/CLI manually)"
 	@echo "  → zsh completions"; rm -f ~/.zcompdump* 2>/dev/null || true
@@ -473,7 +454,8 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  setup           Full setup (brew + node + python + macos + install + misc)"
-	@echo "  setup-headless  Headless setup for servers (no GUI apps/services)"
+	@echo "  setup-headless  Platform-aware headless setup for macOS or Linux"
+	@echo "  setup-linux-headless  Linux headless setup without Homebrew or GUI apps"
 	@echo "  install         Symlink dotfiles to ~/.config/, ~, and app settings"
 	@echo "  uninstall       Remove dotfile symlinks"
 	@echo "  brew         Install Homebrew + all packages from Brewfile"
@@ -482,6 +464,7 @@ help:
 	@echo "  node         Install Node.js (fnm) and global npm packages"
 	@echo "  python       Install Python (pyenv)"
 	@echo "  macos        Configure macOS system preferences"
+	@echo "  obsidian     Configure Obsidian Headless (ob)"
 	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
 	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux)"
 	@echo "  help         Show this help message"

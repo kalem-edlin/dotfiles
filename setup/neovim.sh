@@ -8,39 +8,30 @@ elif [[ -f /usr/local/bin/brew ]]; then
     eval "$(/usr/local/bin/brew shellenv)"
 fi
 
-if ! command -v brew &> /dev/null; then
-    echo "Error: brew not found. Run 'make brew' first."
-    exit 1
-fi
-
 if ! command -v nvim &> /dev/null; then
-    echo "Error: nvim not found. Run 'make brew' first."
+    echo "Error: nvim not found. Install Neovim first."
     exit 1
 fi
 
 if ! command -v tmux &> /dev/null; then
-    echo "Error: tmux not found. Run 'make brew' first."
+    echo "Error: tmux not found. Install tmux first."
     exit 1
 fi
 
-if ! brew list --versions python@3.12 >/dev/null 2>&1; then
-    echo "Error: Homebrew python@3.12 is not installed. Run 'make brew' first."
-    exit 1
+if command -v brew >/dev/null 2>&1 && brew list --versions python@3.12 >/dev/null 2>&1; then
+    PYTHON_PREFIX="$(brew --prefix python@3.12)"
+    PYTHON_BIN="$PYTHON_PREFIX/bin/python3.12"
+else
+    PYTHON_BIN=""
 fi
-
-PYTHON_PREFIX="$(brew --prefix python@3.12)"
-PYTHON_BIN="$PYTHON_PREFIX/bin/python3.12"
 PYNVIM_VENV="$HOME/.local/share/nvim/pynvim-venv"
 
 python_usable() {
     local python_bin="$1"
 
     "$python_bin" - <<'PY' >/dev/null 2>&1
-import platform
+import venv
 from xml.parsers import expat
-
-if not platform.mac_ver()[0]:
-    raise SystemExit("platform.mac_ver() returned empty")
 PY
 }
 
@@ -63,6 +54,9 @@ add_python_candidate "$PYTHON_BIN"
 if command -v pyenv >/dev/null 2>&1; then
     PYENV_PYTHON="$(pyenv which python3 2>/dev/null || true)"
     add_python_candidate "$PYENV_PYTHON"
+fi
+if command -v python3.12 >/dev/null 2>&1; then
+    add_python_candidate "$(command -v python3.12)"
 fi
 if command -v python3 >/dev/null 2>&1; then
     add_python_candidate "$(command -v python3)"
