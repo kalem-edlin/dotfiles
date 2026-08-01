@@ -23,11 +23,21 @@ tmux set-hook -g session-created \
 
 # Backfill already-running sessions at plugin load (covers `prefix C-r`
 # config reloads and the very first load against pre-existing sessions).
-while IFS=$'\t' read -r sid sname suuid; do
+#
+# NOTE: session_id/session_name/@session-uuid are fetched with one
+# single-field `-F` call each rather than a TAB-joined `list-sessions -F`
+# format, because tmux (observed: Homebrew 3.7b) sanitizes control
+# characters -- including TAB -- to `_` in command output. That silently
+# collapses a delimited multi-field record into one field and corrupts the
+# split (see tmux-workspace-resurrect/scripts/save.sh for the incident this
+# mirrors). A single #{...} format has nothing to delimit, so it's immune.
+while IFS= read -r sid; do
   [ -n "$sid" ] || continue
+  suuid="$(tmux show-option -t "$sid" -qv @session-uuid 2>/dev/null || true)"
   [ -n "$suuid" ] && continue
+  sname="$(tmux display-message -t "$sid" -F '#{session_name}' 2>/dev/null || true)"
   bash "$PLUGIN_DIR/scripts/session-created-hook.sh" "$sid" "$sname"
-done < <(tmux list-sessions -F '#{session_id}	#{session_name}	#{@session-uuid}' 2>/dev/null || true)
+done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null || true)
 
 # --- Per-pane remote-host status line --------------------------------------
 # host_indicator.sh (tmux/scripts/host_indicator.sh) sets a single

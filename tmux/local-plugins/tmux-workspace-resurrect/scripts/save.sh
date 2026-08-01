@@ -36,10 +36,55 @@ force_neovim_session_save() {
   fi
 }
 
-pane_delimiter=$'\t'
-pane_format="#{session_name}${pane_delimiter}#{window_index}${pane_delimiter}#{pane_index}${pane_delimiter}#{pane_id}${pane_delimiter}#{pane_pid}${pane_delimiter}#{pane_current_command}${pane_delimiter}#{pane_current_path}${pane_delimiter}#{pane_title}"
+# NOTE: pane fields are fetched one-at-a-time via `display-message -F` with
+# a single #{...} substitution per call, never via a multi-field
+# tab/control-char-delimited `list-panes -F` format string. tmux (observed:
+# Homebrew 3.7b) sanitizes control characters -- including the TAB this
+# script used to join fields with -- to `_` in command output, which
+# silently collapses a whole delimited record into one field and corrupts
+# downstream parsing (see workspace-resurrect.log history / task write-up
+# for the incident this fixes). A single #{...} format has nothing to
+# delimit, so it survives unaffected regardless of tmux version. This costs
+# extra `tmux` round trips per pane, but save.sh runs on a periodic timer,
+# not in a hot path.
+tmux_pane_field() {
+  tmux display-message -pt "$1" -F "$2" 2>/dev/null || true
+}
 
-while IFS="$pane_delimiter" read -r session_name window_index pane_index pane_id pane_pid pane_command pane_path pane_title; do
+while IFS= read -r pane_id; do
+  [ -n "$pane_id" ] || continue
+
+  session_name="$(tmux_pane_field "$pane_id" '#{session_name}')"
+  window_index="$(tmux_pane_field "$pane_id" '#{window_index}')"
+  pane_index="$(tmux_pane_field "$pane_id" '#{pane_index}')"
+  pane_pid="$(tmux_pane_field "$pane_id" '#{pane_pid}')"
+  pane_command="$(tmux_pane_field "$pane_id" '#{pane_current_command}')"
+  pane_path="$(tmux_pane_field "$pane_id" '#{pane_current_path}')"
+  pane_title="$(tmux_pane_field "$pane_id" '#{pane_title}')"
+
+  # Defense in depth: the fields below feed jq --argjson and MUST be
+  # numeric. A malformed/vanished pane (or any future sanitization
+  # surprise) must skip just this one pane, not abort the whole save via
+  # set -euo pipefail killing jq underneath us.
+  case "$window_index" in
+    '' | *[!0-9]*)
+      workspace_log "save: skipping pane $pane_id - non-numeric window_index '$window_index'"
+      continue
+      ;;
+  esac
+  case "$pane_index" in
+    '' | *[!0-9]*)
+      workspace_log "save: skipping pane $pane_id - non-numeric pane_index '$pane_index'"
+      continue
+      ;;
+  esac
+  case "$pane_pid" in
+    '' | *[!0-9]*)
+      workspace_log "save: skipping pane $pane_id - non-numeric pane_pid '$pane_pid'"
+      continue
+      ;;
+  esac
+
   logical_id="${session_name}:${window_index}.${pane_index}"
   last_command="$(tmux show-option -pt "$pane_id" -qv @workspace-last-command 2>/dev/null || true)"
   pending_buffer="$(tmux show-option -pt "$pane_id" -qv @workspace-pending-buffer 2>/dev/null || true)"
@@ -143,7 +188,7 @@ while IFS="$pane_delimiter" read -r session_name window_index pane_index pane_id
       fi
     fi
   fi
-done < <(tmux list-panes -a -F "$pane_format")
+done < <(tmux list-panes -a -F '#{pane_id}')
 
 snapshot=""
 if [ -L "$resurrect_dir/last" ]; then

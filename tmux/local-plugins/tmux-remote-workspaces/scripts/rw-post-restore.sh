@@ -128,10 +128,28 @@ for f in "$endpoints_dir"/*.json; do
   # NOTE: unlike has-session/list-panes -s above, tmux's `display-message
   # -t` target parser does NOT honor the "=name" exact-match session syntax
   # (verified empirically -- it silently resolves to nothing). Resolve the
-  # exact session id ourselves from `list-sessions` instead of trusting
-  # tmux's own (fuzzy, prefix-matching) plain-name target resolution here.
-  session_id="$(tmux list-sessions -F '#{session_id}	#{session_name}' 2>/dev/null |
-    awk -F'\t' -v n="$session_name" '$2 == n { print $1; exit }')"
+  # exact session id ourselves by scanning `list-sessions` session ids one
+  # at a time and comparing names, instead of trusting tmux's own (fuzzy,
+  # prefix-matching) plain-name target resolution here.
+  #
+  # Deliberately NOT a TAB-joined `list-sessions -F '#{session_id}\t#{session_name}'`
+  # parsed with `awk -F'\t'`: tmux (observed: Homebrew 3.7b) sanitizes
+  # control characters -- including TAB -- to `_` in command output, which
+  # silently collapses the whole delimited record into one field and makes
+  # `$2 == n` never match (see tmux-workspace-resurrect/scripts/save.sh for
+  # the incident this mirrors). Since this script runs on the laptop at
+  # restore time, it can hit the exact same tmux version as the mini
+  # worker. A single #{...} format per call has nothing to delimit, so it's
+  # immune regardless of tmux version.
+  session_id=""
+  while IFS= read -r cand_session_id; do
+    [ -n "$cand_session_id" ] || continue
+    cand_session_name="$(tmux display-message -t "$cand_session_id" -F '#{session_name}' 2>/dev/null || true)"
+    if [ "$cand_session_name" = "$session_name" ]; then
+      session_id="$cand_session_id"
+      break
+    fi
+  done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null)
   if [ -n "$session_id" ]; then
     current_uuid="$(tmux show-option -t "$session_id" -qv @session-uuid 2>/dev/null || true)"
     if [ "$current_uuid" != "$old_uuid" ]; then
@@ -142,15 +160,23 @@ for f in "$endpoints_dir"/*.json; do
   fi
 
   # --- Step 2: resolve the pane by cwd match, narrowing on ambiguity -----
-  pane_delimiter=$'\t'
-  pane_format="#{pane_id}${pane_delimiter}#{pane_current_path}${pane_delimiter}#{window_index}${pane_delimiter}#{pane_index}"
+  # NOTE: pane fields are fetched one field per `display-message` call
+  # (immune to tmux's control-character sanitization, see Step 1 above)
+  # rather than a single TAB-joined `list-panes -F` format string parsed by
+  # `read`. The array elements built below (`cand_pane$'\t'cand_window...`)
+  # are safe to split on TAB even so: that TAB is inserted by this script
+  # itself from already-parsed, always-numeric window/pane index values --
+  # it never passes through tmux's own stdout sanitization.
   candidates=()
-  while IFS="$pane_delimiter" read -r cand_pane cand_path cand_window cand_index; do
+  while IFS= read -r cand_pane; do
     [ -n "$cand_pane" ] || continue
+    cand_path="$(tmux display-message -pt "$cand_pane" -F '#{pane_current_path}' 2>/dev/null || true)"
     [ "$cand_path" = "$focus_path" ] || continue
     grep -Fqx "$cand_pane" "$claimed_panes_file" 2>/dev/null && continue
+    cand_window="$(tmux display-message -pt "$cand_pane" -F '#{window_index}' 2>/dev/null || true)"
+    cand_index="$(tmux display-message -pt "$cand_pane" -F '#{pane_index}' 2>/dev/null || true)"
     candidates+=("$cand_pane"$'\t'"$cand_window"$'\t'"$cand_index")
-  done < <(tmux list-panes -s -t "=$session_name" -F "$pane_format" 2>/dev/null)
+  done < <(tmux list-panes -s -t "=$session_name" -F '#{pane_id}' 2>/dev/null)
 
   resolved_pane=""
   if [ "${#candidates[@]}" -eq 1 ]; then
