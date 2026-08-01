@@ -18,6 +18,10 @@ criteria this runbook implements.
   scripts do not expect.
 - Incoming SSH is already enabled and reachable on the worker. This is a
   stated VPS precondition — setup does not provision an SSH server for you.
+- `git` and `make` are installed. `make setup-headless` is the sole entry
+  point, and minimal VPS images (observed: Ubuntu 24.04 on `agents-roll`,
+  2026-08-01) ship without `make`. On Debian/Ubuntu:
+  `apt-get update && apt-get install -y make`.
 
 ## Provision
 

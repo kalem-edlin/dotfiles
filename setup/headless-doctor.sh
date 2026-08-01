@@ -109,6 +109,32 @@ else
   SETUP_REMEDIATION="run make setup-headless"
 fi
 
+# This doctor is invoked directly by `make` (a plain bash process inheriting
+# the caller's bare PATH), which never sources zsh/.zshenv. fnm-managed
+# tools (node/npm/pi/codex/ob) and ~/.local/bin-installed tools (claude) are
+# genuinely on disk after a successful install, but this process's PATH has
+# no way to see them unless it activates fnm and adds ~/.local/bin itself —
+# exactly what setup/lib.sh's activate_fnm does for setup/linux-headless.sh
+# after setup/node.sh runs as a separate child process (see lib.sh's
+# activate_fnm doc comment). Doing the same here keeps section 2 below an
+# honest check of "is this actually installed", not an artifact of make's
+# minimal PATH. This is still read-only: it only mutates this process's own
+# PATH/env, never touches disk. If fnm/the tools genuinely aren't installed,
+# activate_fnm silently no-ops and the checks below still fail honestly.
+if [ -n "$TARGET_HOME" ]; then
+  case ":$PATH:" in
+    *":$TARGET_HOME/.local/bin:"*) ;;
+    *) PATH="$TARGET_HOME/.local/bin:$PATH" ;;
+  esac
+  export PATH
+
+  if [ -f "$DOTFILES_DIR/setup/lib.sh" ]; then
+    # shellcheck source=setup/lib.sh
+    . "$DOTFILES_DIR/setup/lib.sh"
+    activate_fnm >/dev/null 2>&1 || true
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Reporting helpers
 # ---------------------------------------------------------------------------
@@ -197,8 +223,15 @@ under_dotfiles() {
 }
 
 # get_perms <path> -> octal perms, portable across BSD/GNU stat
+#
+# Try GNU's -c form FIRST, not BSD's -f form: GNU stat treats -f as "report
+# on the containing filesystem" (a different, always-succeeding mode) rather
+# than rejecting it, so `stat -f "%Lp" path` on Linux exits 0 but prints
+# garbled filesystem info instead of falling through to the -c branch. BSD
+# stat has no -c flag at all and reliably exits nonzero for it, so trying -c
+# first and falling back to -f is safe in both directions.
 get_perms() {
-  stat -f "%Lp" "$1" 2>/dev/null || stat -c "%a" "$1" 2>/dev/null
+  stat -c "%a" "$1" 2>/dev/null || stat -f "%Lp" "$1" 2>/dev/null
 }
 
 if [ "$QUIET" -eq 0 ]; then

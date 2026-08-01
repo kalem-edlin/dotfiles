@@ -591,11 +591,11 @@ Agent execution rules:
 - Saves are non-destructive; never run a resurrect *restore* on a worker.
 - Stop at the first failed REQUIRED step and report; do not improvise
   remediation beyond what the step names.
-- Setup runs as the alias's login user (`mini` → `alfierobertson`,
-  `agents-roll` → currently `root` per `ssh/.ssh/config`), never via
-  `sudo make`. Note: running as root on `agents-roll` means `$HOME=/root`,
-  root linger, and root-owned services — accepted for that VPS, but record it
-  in the run report.
+- Setup runs as the alias's login user (`mini` → `admin` since 2026-08-01,
+  with NOPASSWD sudo; `agents-roll` → currently `root` per
+  `ssh/.ssh/config`), never via `sudo make`. Note: running as root on
+  `agents-roll` means `$HOME=/root`, root linger, and root-owned services —
+  accepted for that VPS, but record it in the run report.
 - **Assume no remote services are authenticated yet.** The only assumed
   credential is a working Git-host SSH key on each worker (git fetch/clone
   over SSH works). Tailscale, `claude`, `codex`, and `pi` are NOT logged in
