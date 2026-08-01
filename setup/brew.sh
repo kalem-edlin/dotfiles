@@ -24,6 +24,23 @@ if [ "${BREWFILE_HEADLESS:-}" = "1" ]; then
 else
   BUNDLE_FILE="$DOTFILES_DIR/Brewfile"
 fi
+# Newer Homebrew refuses to load formulae/casks from third-party taps unless
+# they are trusted (per-machine state in ~/.homebrew/trust.json), so a fresh
+# worker fails `brew bundle` on every non-official tap the Brewfile uses.
+# Trust each tap the bundle file references — both explicit `tap "..."` lines
+# and fully-qualified `brew "user/repo/formula"` names — before bundling.
+if brew trust --help &> /dev/null; then
+  {
+    sed -n 's/^tap "\([^"]*\)".*/\1/p' "$BUNDLE_FILE"
+    sed -n 's/^brew "\([^"/]*\/[^"/]*\)\/[^"]*".*/\1/p' "$BUNDLE_FILE"
+    sed -n 's/^cask "\([^"/]*\/[^"/]*\)\/[^"]*".*/\1/p' "$BUNDLE_FILE"
+  } | sort -u | while read -r tap; do
+    [ -n "$tap" ] || continue
+    echo "Trusting tap: $tap"
+    brew trust --tap "$tap" || echo "⚠ could not trust tap $tap (continuing)" >&2
+  done
+fi
+
 if ! brew bundle --file="$BUNDLE_FILE"; then
   echo "✗ brew bundle failed for $BUNDLE_FILE — packages are missing; aborting." >&2
   exit 1
