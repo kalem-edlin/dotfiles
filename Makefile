@@ -40,7 +40,7 @@ all: help
 # Full setup for a new machine
 setup:
 	@echo "Requesting sudo access..."
-	@sudo -v
+	@sudo -n true 2>/dev/null || sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
 	@$(MAKE) brew neovim node obsidian python macos install misc
 	@echo ""
@@ -307,7 +307,7 @@ uninstall:
 
 # Install Homebrew and all packages from Brewfile
 brew:
-	@sudo -v
+	@sudo -n true 2>/dev/null || sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
 	@echo "Installing Homebrew packages from Brewfile..."
 	@chmod +x setup/brew.sh
@@ -318,7 +318,7 @@ brew:
 
 # Install Homebrew CLI-only packages (no GUI casks)
 brew-headless:
-	@sudo -v
+	@sudo -n true 2>/dev/null || sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
 	@echo "Installing Homebrew CLI packages (headless)..."
 	@chmod +x setup/brew.sh

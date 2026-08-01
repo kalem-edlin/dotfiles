@@ -43,8 +43,15 @@ run_make_target() {
   "$MAKE_BIN" -C "$DOTFILES_DIR" "$1"
 }
 
+# Prime sudo. `sudo -v` alone is NOT safe here: on macOS 26 the validate-only
+# path goes through a PAM conversation (pam_smartcard before pam_opendirectory)
+# that demands a TTY even when NOPASSWD sudoers is configured — observed on the
+# mini worker 2026-08-01, where `sudo -n true` succeeded while `sudo -v` and
+# `sudo -n -v` both failed without a terminal. Try the noninteractive real
+# command first so NOPASSWD/cached-timestamp environments stay headless, and
+# fall back to the interactive validate for ordinary local runs.
 echo "Requesting sudo access (used by brew/Xcode CLT steps below)..."
-sudo -v
+sudo -n true 2>/dev/null || sudo -v
 (
   while true; do
     sudo -n true
