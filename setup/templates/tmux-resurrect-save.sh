@@ -108,4 +108,13 @@ if [ ! -f "$SAVE_SCRIPT" ]; then
   exit 1
 fi
 
+# tmux-resurrect's internal scripts (helpers.sh, check_tmux_version.sh,
+# save.sh) call bare `tmux`, which is unresolvable under launchd/systemd's
+# minimal PATH even though $TMUX_BIN itself is absolute — producing empty
+# snapshots and never firing the workspace sidecar hook. Put the resolved
+# tmux's directory on PATH before handing off.
+TMUX_BIN_ABS="$(command -v "$TMUX_BIN")"
+PATH="$(dirname "$TMUX_BIN_ABS"):$PATH"
+export PATH
+
 exec bash "$SAVE_SCRIPT" quiet

@@ -577,7 +577,12 @@ elif [ "$PROFILE" = "headless-macos" ]; then
     wrapper_path="$(sed -n '/<key>ProgramArguments<\/key>/,/<\/array>/{s#.*<string>\(.*\)</string>.*#\1#p;}' "$PLIST_PATH" 2>/dev/null | head -1)"
     if [ -n "$wrapper_path" ] && [ -f "$wrapper_path" ]; then
       if grep -q -- '--check' "$wrapper_path" 2>/dev/null; then
-        if env -i HOME="$TARGET_HOME" PATH=/usr/bin:/bin "$wrapper_path" --check >/dev/null 2>&1; then
+        # Pass the plist's rendered tmux path exactly as launchd would —
+        # without it the wrapper's --check fails on Homebrew-only tmux and
+        # this check reports a false negative for a correctly installed job.
+        if env -i HOME="$TARGET_HOME" PATH=/usr/bin:/bin \
+          TMUX_RESURRECT_SAVE_TMUX_BIN="$tmux_bin_value" \
+          "$wrapper_path" --check >/dev/null 2>&1; then
           c_pass "timer:wrapper-check" "$wrapper_path --check succeeded"
         else
           c_fail "timer:wrapper-check" "$wrapper_path --check failed" "$SETUP_REMEDIATION"
