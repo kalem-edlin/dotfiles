@@ -44,16 +44,26 @@
 #
 #   install_tmux_plugins
 #     Clones/updates TPM, then pins tmux-sessionx to commit
-#     $TMUX_SESSIONX_PIN (single authority for that pin) BEFORE running
-#     TPM's install_plugins — TPM's own clone helper runs `git clone -b
-#     <ref> --single-branch`, and -b never accepts a raw commit SHA, so on a
-#     fresh install TPM's attempt to clone tmux-sessionx always fails and
-#     install_plugins exits nonzero before ever reaching a fallback placed
-#     after it. Pre-cloning/checking out the pin first makes TPM's
-#     plugin_already_installed check short-circuit its own broken clone
-#     attempt for that one plugin, while every other plugin still goes
-#     through TPM normally and install_plugins FAILS (nonzero return) — same
-#     as before — if it exits nonzero for any genuine reason. Afterwards asserts
+#     $TMUX_SESSIONX_PIN and tmux-resurrect to commit $TMUX_RESURRECT_PIN
+#     (single authority for each pin) BEFORE running TPM's install_plugins
+#     — TPM's own clone helper runs `git clone -b <ref> --single-branch`,
+#     and -b never accepts a raw commit SHA, so on a fresh install TPM's
+#     attempt to clone either plugin always fails and install_plugins exits
+#     nonzero before ever reaching a fallback placed after it. Pre-cloning/
+#     checking out each pin first makes TPM's plugin_already_installed
+#     check short-circuit its own broken clone attempt for those two
+#     plugins, while every other plugin still goes through TPM normally and
+#     install_plugins FAILS (nonzero return) — same as before — if it exits
+#     nonzero for any genuine reason. Immediately after pinning
+#     tmux-resurrect, idempotently applies
+#     setup/patches/tmux-resurrect-tmux37-delimiter.patch (tmux >= 3.7
+#     sanitizes the literal-tab field delimiter resurrect's save.sh sends
+#     through `-F`/`display-message -p` format strings, silently corrupting
+#     every save with no upstream fix) — detected via
+#     $TMUX_RESURRECT_PATCH_MARKER already being present in save.sh, so a
+#     rerun neither fails nor double-applies; any genuine apply failure is
+#     FATAL, since a worker with unpatched tmux-resurrect on tmux >= 3.7 has
+#     a silently broken save/restore safety net. Afterwards asserts
 #     ~/.config/tmux/plugins/tmux-resurrect/scripts/save.sh exists and is
 #     executable, and that the repo-owned local-plugins entrypoints
 #     ($DOTFILES_DIR/tmux/local-plugins/*/*.tmux) are readable. Requires
@@ -82,6 +92,26 @@ fi
 # manages that one plugin's checkout manually. Keep in sync with the
 # `@plugin 'omerxx/tmux-sessionx#...'` line in tmux/tmux.conf.
 TMUX_SESSIONX_PIN="3a1911e"
+
+# Single authority for the tmux-resurrect pin and its local patch. tmux >=
+# 3.7 sanitizes C0 control characters — including the literal tab
+# tmux-resurrect's save.sh uses as a field delimiter inside `-F`/
+# `display-message -p` format strings — to "_" in command output, with no
+# off-switch. That silently corrupts every resurrect save on tmux 3.7+
+# (confirmed on the mini worker, tmux 3.7b: an 8-byte "state__" file and
+# zero-byte pane/window dumps). Upstream has no fix, so this repo carries
+# its own patch (setup/patches/tmux-resurrect-tmux37-delimiter.patch),
+# generated against — and only guaranteed to apply cleanly against —
+# $TMUX_RESURRECT_PIN. Keep the pin in sync with the
+# `@plugin 'tmux-plugins/tmux-resurrect#...'` line in tmux/tmux.conf, and
+# regenerate the patch if the pin ever moves.
+TMUX_RESURRECT_PIN="cff343cf9e81983d3da0c8562b01616f12e8d548"
+TMUX_RESURRECT_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-tmux37-delimiter.patch"
+# String unique to the applied patch (the helper function it adds to
+# save.sh). `git apply` is not idempotent — reapplying an already-applied
+# patch fails — so this marker, not exit-code alone, is what makes patch
+# application idempotent across reruns.
+TMUX_RESURRECT_PATCH_MARKER="resurrect_detokenize"
 
 activate_fnm() {
   if [ -d /opt/homebrew/bin ]; then
@@ -180,7 +210,8 @@ stow_packages() {
 install_tmux_plugins() {
   tpm_dir="$HOME/.config/tmux/plugins/tpm"
   sessionx_dir="$HOME/.config/tmux/plugins/tmux-sessionx"
-  resurrect_save="$HOME/.config/tmux/plugins/tmux-resurrect/scripts/save.sh"
+  resurrect_dir="$HOME/.config/tmux/plugins/tmux-resurrect"
+  resurrect_save="$resurrect_dir/scripts/save.sh"
 
   if [ ! -d "$tpm_dir" ]; then
     echo "  -> installing TPM (tmux plugin manager)"
@@ -231,6 +262,72 @@ install_tmux_plugins() {
     else
       echo "  -> tmux-sessionx already at pin $TMUX_SESSIONX_PIN"
     fi
+  fi
+
+  # Same TPM limitation, same workaround, for tmux-resurrect: pin it to the
+  # exact commit setup/patches/tmux-resurrect-tmux37-delimiter.patch was
+  # generated against, BEFORE calling TPM's install_plugins below, so TPM's
+  # plugin_already_installed check skips its own (always-failing) clone
+  # attempt for this plugin too.
+  if [ ! -d "$resurrect_dir" ]; then
+    echo "  -> installing tmux-resurrect (pinned commit $TMUX_RESURRECT_PIN)"
+    if ! git clone https://github.com/tmux-plugins/tmux-resurrect "$resurrect_dir"; then
+      echo "ERROR: failed to clone tmux-resurrect." >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git checkout "$TMUX_RESURRECT_PIN"); then
+      echo "ERROR: failed to check out tmux-resurrect pin $TMUX_RESURRECT_PIN." >&2
+      return 1
+    fi
+  else
+    # Idempotent re-pin — see the identical tmux-sessionx comment above for
+    # rationale (detached HEAD is fine; we always check out a commit).
+    current_rev="$(cd "$resurrect_dir" && git rev-parse HEAD 2>/dev/null)"
+    pinned_rev="$(cd "$resurrect_dir" && git rev-parse "$TMUX_RESURRECT_PIN" 2>/dev/null)"
+    if [ -z "$pinned_rev" ]; then
+      echo "  -> fetching tmux-resurrect (pin $TMUX_RESURRECT_PIN not present locally)"
+      if ! (cd "$resurrect_dir" && git fetch --quiet origin "$TMUX_RESURRECT_PIN"); then
+        echo "ERROR: failed to fetch tmux-resurrect pin $TMUX_RESURRECT_PIN." >&2
+        return 1
+      fi
+      pinned_rev="$(cd "$resurrect_dir" && git rev-parse "$TMUX_RESURRECT_PIN" 2>/dev/null)"
+    fi
+    if [ "$current_rev" != "$pinned_rev" ] || [ -z "$current_rev" ]; then
+      echo "  -> checking out tmux-resurrect pin $TMUX_RESURRECT_PIN (was $current_rev)"
+      if ! (cd "$resurrect_dir" && git checkout "$TMUX_RESURRECT_PIN"); then
+        echo "ERROR: failed to check out tmux-resurrect pin $TMUX_RESURRECT_PIN." >&2
+        return 1
+      fi
+    else
+      echo "  -> tmux-resurrect already at pin $TMUX_RESURRECT_PIN"
+    fi
+  fi
+
+  # Apply the tmux 3.7 delimiter-sanitization patch. A worker running with
+  # an unpatched tmux-resurrect on tmux >= 3.7 has a silently broken safety
+  # net (saves produce a corrupt/empty resurrect file with no error), so
+  # any failure here is FATAL, matching this repo's doctrine of never
+  # leaving that failure mode silent.
+  if grep -q "$TMUX_RESURRECT_PATCH_MARKER" "$resurrect_save" 2>/dev/null; then
+    echo "  -> tmux-resurrect tmux37 delimiter patch already applied"
+  else
+    if [ ! -f "$TMUX_RESURRECT_PATCH" ]; then
+      echo "ERROR: tmux-resurrect patch not found: $TMUX_RESURRECT_PATCH" >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply --check "$TMUX_RESURRECT_PATCH") 2>/dev/null; then
+      echo "ERROR: tmux-resurrect tmux37 delimiter patch does not apply cleanly against pin $TMUX_RESURRECT_PIN (checked out at $resurrect_dir). A worker with unpatched tmux-resurrect on tmux >= 3.7 has a silently broken save/restore safety net — refusing to continue." >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply "$TMUX_RESURRECT_PATCH"); then
+      echo "ERROR: tmux-resurrect tmux37 delimiter patch check passed but apply failed." >&2
+      return 1
+    fi
+    if ! grep -q "$TMUX_RESURRECT_PATCH_MARKER" "$resurrect_save" 2>/dev/null; then
+      echo "ERROR: tmux-resurrect tmux37 delimiter patch applied but marker '$TMUX_RESURRECT_PATCH_MARKER' not found in $resurrect_save afterwards." >&2
+      return 1
+    fi
+    echo "  -> tmux-resurrect tmux37 delimiter patch applied"
   fi
 
   echo "  -> installing tmux plugins via TPM"

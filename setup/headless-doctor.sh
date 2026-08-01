@@ -517,6 +517,20 @@ else
   c_fail "tmux:resurrect-save" "$RESURRECT_SAVE missing or not executable" "$SETUP_REMEDIATION"
 fi
 
+# tmux >= 3.7 sanitizes the literal-tab field delimiter tmux-resurrect's
+# save.sh sends through `-F`/`display-message -p` format strings, silently
+# corrupting every save with no upstream fix (see
+# setup/patches/tmux-resurrect-tmux37-delimiter.patch). install_tmux_plugins
+# (setup/lib.sh) always applies that patch regardless of the installed tmux
+# version, so its marker should always be present here -- this is a
+# required check, not a version-gated one, because an unpatched
+# tmux-resurrect on tmux >= 3.7 is a silently broken safety net.
+if [ -f "$RESURRECT_SAVE" ] && grep -q "resurrect_detokenize" "$RESURRECT_SAVE" 2>/dev/null; then
+  c_pass "tmux:resurrect-tmux37-patch" "$RESURRECT_SAVE has the tmux37 delimiter patch applied"
+else
+  c_fail "tmux:resurrect-tmux37-patch" "$RESURRECT_SAVE missing the tmux37 delimiter patch (resurrect_detokenize marker not found)" "$SETUP_REMEDIATION"
+fi
+
 # glob_has <pattern> -> 0 if at least one file matches
 glob_has() {
   for f in $1; do

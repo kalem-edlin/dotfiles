@@ -1,0 +1,82 @@
+diff --git a/scripts/save.sh b/scripts/save.sh
+index 01edcde..ce94cc6 100755
+--- a/scripts/save.sh
++++ b/scripts/save.sh
+@@ -8,7 +8,45 @@ source "$CURRENT_DIR/spinner_helpers.sh"
+ 
+ # delimiters
+ d=$'\t'
+-delimiter=$'\t'
++# tmux >= 3.7 sanitizes C0 control characters -- including a literal tab
++# (0x09) -- embedded in the output of `-F <format>` and `display-message -p
++# <format>`, replacing each one with "_" (tmux-plugins/tmux 4999, "Sanitize
++# pane titles and window and session names more consistently and
++# strictly"; no off-switch). That breaks every format string below that
++# used to rely on a literal tab as a field separator: on 3.7+, each
++# "${delimiter}" boundary tmux itself renders comes back as "_" instead of
++# a tab, corrupting dump_panes_raw/dump_windows_raw/dump_grouped_sessions/
++# dump_state output before `IFS=$d read` (or anything else) ever sees it --
++# see setup/patches/tmux-resurrect-tmux37-delimiter.patch in the
++# kalemedlin/dotfiles repo for the incident writeup.
++#
++# Fix: use a printable, deliberately obscure sentinel string in place of a
++# literal tab *only* inside these tmux-rendered format strings (printable
++# text is never touched by tmux's C0 sanitizer), then translate the
++# sentinel back to a real tab via resurrect_detokenize() immediately after
++# capturing each raw tmux call's output -- before anything else parses or
++# writes it. Every other use of a delimiter in this file (the lines this
++# script itself writes with "$d", and every "IFS=$d read" that parses
++# already-detokenized tmux output) is untouched and still deals only in
++# real tabs, so the resurrect file this script writes to disk is
++# byte-for-byte identical to upstream's, on every tmux version. The
++# sentinel is a 17-character literal with no BRE/ERE-special characters
++# (only letters, "-", "<", ">"), so resurrect_detokenize()'s `sed` needs no
++# escaping and treats it as a plain string; colliding with it would
++# require a session/window name, pane title, path, or command to contain
++# that exact 17-character substring verbatim, which is astronomically
++# unlikely and no worse than the original literal-tab design already
++# assumed (a literal tab in one of those fields would have broken the
++# pre-3.7 parsing the same way).
++delimiter='<<RESURRECT-TAB>>'
++
++# Replace the format-string sentinel with a real tab in tmux's raw -F /
++# display-message output. A no-op pass-through on tmux < 3.7 too, since the
++# sentinel (being printable) survives there unmolested either way and never
++# legitimately appears in tmux's own output.
++resurrect_detokenize() {
++	sed "s/${delimiter}/${d}/g"
++}
+ 
+ # if "quiet" script produces no output
+ SCRIPT_OUTPUT="$1"
+@@ -82,11 +120,11 @@ state_format() {
+ }
+ 
+ dump_panes_raw() {
+-	tmux list-panes -a -F "$(pane_format)"
++	tmux list-panes -a -F "$(pane_format)" | resurrect_detokenize
+ }
+ 
+ dump_windows_raw(){
+-	tmux list-windows -a -F "$(window_format)"
++	tmux list-windows -a -F "$(window_format)" | resurrect_detokenize
+ }
+ 
+ toggle_window_zoom() {
+@@ -160,6 +198,7 @@ dump_grouped_sessions() {
+ 	local current_session_group=""
+ 	local original_session
+ 	tmux list-sessions -F "$(grouped_sessions_format)" |
++		resurrect_detokenize |
+ 		grep "^1" |
+ 		cut -c 3- |
+ 		sort |
+@@ -215,7 +254,7 @@ dump_windows() {
+ }
+ 
+ dump_state() {
+-	tmux display-message -p "$(state_format)"
++	tmux display-message -p "$(state_format)" | resurrect_detokenize
+ }
+ 
+ dump_pane_contents() {
