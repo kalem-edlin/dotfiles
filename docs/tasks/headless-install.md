@@ -586,8 +586,10 @@ Agent execution rules:
 - **Never run any tmux command against the focus machine's tmux server.**
   All tmux interaction happens on the worker over SSH, only ever creating and
   killing sessions named `smoke-*`, and only killing sessions this test
-  created (`kill-session -t =smoke-headless` — the `=` forces exact match so
-  prefix matching can never select another session).
+  created (`kill-session -t '=smoke-headless'` — the `=` forces exact match so
+  prefix matching can never select another session; QUOTE the argument, since
+  a zsh login shell on the worker otherwise intercepts the bare `=word` token
+  as zsh EQUALS command-path expansion and tmux never sees it).
 - Saves are non-destructive; never run a resurrect *restore* on a worker.
 - Stop at the first failed REQUIRED step and report; do not improvise
   remediation beyond what the step names.

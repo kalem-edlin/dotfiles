@@ -12,11 +12,17 @@ elif [[ -f /usr/local/bin/brew ]]; then
 fi
 
 # Setup pyenv. On macOS this is installed by Brewfile; on Linux it may need to
-# bootstrap itself after build dependencies are installed.
+# bootstrap itself after build dependencies are installed. A prior run's
+# ~/.pyenv install is only on PATH inside that run's process, so activate any
+# existing install first — the upstream installer hard-refuses when ~/.pyenv
+# already exists, which broke rerun idempotency.
+export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
+if [[ -d "$PYENV_ROOT/bin" ]]; then
+    export PATH="$PYENV_ROOT/bin:$PATH"
+fi
 if ! command -v pyenv &> /dev/null; then
     echo "pyenv not found; installing pyenv..."
     curl -fsSL https://pyenv.run | bash
-    export PYENV_ROOT="$HOME/.pyenv"
     export PATH="$PYENV_ROOT/bin:$PATH"
 fi
 
