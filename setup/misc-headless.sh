@@ -126,11 +126,12 @@ fi
 # GitHub CLI                                                                  #
 ###############################################################################
 
+# Auth is a manual operator step on headless workers — never start an
+# interactive login here. `gh auth login` blocks a headless provision on a
+# device-code prompt no one can answer (observed hanging the mini smoke run).
 if command -v gh &> /dev/null; then
   if ! gh auth status &> /dev/null; then
-    echo ""
-    echo "GitHub CLI: Logging in..."
-    gh auth login
+    echo "⚠ GitHub CLI installed but not authenticated — run 'gh auth login' manually when needed"
   else
     echo "✓ GitHub CLI authenticated"
   fi
