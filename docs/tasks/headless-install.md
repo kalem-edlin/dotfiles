@@ -1,7 +1,17 @@
 # Headless Installation Readiness Plan
 
-Status: implemented and pushed to main (2026-08-01); on-host smoke test below
-in progress (see "AI-agent smoke test")
+Status: COMPLETE (2026-08-02). The AI-agent smoke test below was executed in
+full against both workers: `agents-roll` (Linux, root) passed doctor 61/61
+with the detached save-chain proven and three idempotent provisions;
+`mini` (macOS, admin) passed doctor 62/62 with the detached save-chain
+proven end-to-end under launchd and full rerun idempotency. `rw doctor`
+(Phase C) passes for both workers. Nine real installer/plugin defects were
+found and fixed by the smoke campaign (sudo -v PAM/TTY, silent brew-bundle
+failure, untrusted taps, gh auth login hang, pyenv rerun, save-wrapper
+PATH, sidecar tmux-3.7 delimiter, vendored tmux-resurrect tmux-3.7
+delimiter — pinned+patched via setup/patches/, rw symlink resolution).
+Outstanding: manual auth only (worker Git-host keys, provider logins,
+`tailscale up` on agents-roll) — see runbook.
 
 Created: 2026-08-01
 
