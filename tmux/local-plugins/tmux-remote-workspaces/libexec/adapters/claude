@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+# Claude Code provider adapter.
+#
+# Verified fact (initial-plan.md, "Provider notes"): the transcript must be
+# placed under a directory whose name encodes the *destination* absolute
+# project path (slashes -> dashes) beneath ~/.claude/projects/. Never copies
+# ~/.claude.json (auth/other state; per-path trust seeding is explicitly out
+# of scope for this minimal adapter).
+#
+# Subcommands: detect, versions, export, install, resume-cmd
+# See libexec/adapters/README.md for the full contract.
+
+set -uo pipefail
+
+CA_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./common-adapter.sh
+source "$CA_SELF/common-adapter.sh"
+
+PROVIDER="claude"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  claude detect --pane <pane-id>
+  claude versions --worker <alias>
+  claude export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
+  claude install --snapshot <dir> --dest-path <path> [--worker <alias>]
+  claude resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+EOF
+}
+
+[ $# -ge 1 ] || {
+  usage >&2
+  exit 1
+}
+cmd="$1"
+shift
+
+# Claude's ~/.claude/projects/<slug> directory naming: every "/" in the
+# absolute path becomes "-". Verified against a live ~/.claude/projects/
+# entry, e.g. "/Users/k/Developer/dotfiles" -> "-Users-k-Developer-dotfiles".
+claude_slug() {
+  printf '%s' "$1" | tr '/' '-'
+}
+
+claude_projects_root_local() { printf '%s/.claude/projects\n' "$HOME"; }
+
+# ---------------------------------------------------------------------------
+# detect --pane <pane-id>
+# ---------------------------------------------------------------------------
+cmd_detect() {
+  local pane=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pane)
+        pane="${2:?--pane requires a value}"
+        shift 2
+        ;;
+      *) ca_die "detect: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$pane" "--pane"
+  ca_need_jq
+
+  # shellcheck disable=SC2046 # intentional word-splitting: each pattern
+  # line from ca_patterns_claude becomes a separate positional argument.
+  ca_pane_has_process "$pane" $(ca_patterns_claude) || {
+    ca_warn "no claude process detected in pane $pane."
+    exit 1
+  }
+
+  local state
+  state="$(ca_read_pane_agent_state "$pane" "$PROVIDER")" || {
+    ca_warn "detected a claude process in pane $pane but no recorded session (record-agent-session.sh/tmux-workspace-resurrect hook may not have fired yet, or is not installed); cannot produce a resumable handoff without a session id."
+    exit 1
+  }
+
+  local session_id project_path
+  session_id="$(jq -r '.session_id // empty' <<<"$state")"
+  project_path="$(jq -r '.cwd // empty' <<<"$state")"
+  [ -n "$session_id" ] || {
+    ca_warn "recorded claude session state for pane $pane has no session_id."
+    exit 1
+  }
+
+  jq -nc --arg provider "$PROVIDER" --arg session_id "$session_id" --arg project_path "$project_path" \
+    '{provider: $provider, session_id: $session_id, project_path: $project_path}'
+}
+
+# ---------------------------------------------------------------------------
+# versions --worker <alias>
+#
+# Claude ships side-by-side native versioned installs under
+# ~/.local/share/claude/versions (not an npm/fnm package) -- version
+# alignment is just the CLI's own semver.
+# ---------------------------------------------------------------------------
+cmd_versions() {
+  local worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --worker)
+        worker="${2:?--worker requires a value}"
+        shift 2
+        ;;
+      *) ca_die "versions: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$worker" "--worker"
+  ca_need_jq
+
+  command -v claude >/dev/null 2>&1 || ca_die "claude is not installed locally; nothing to compare." 1
+  local local_version
+  local_version="$(claude --version 2>/dev/null | awk '{print $1}')"
+  [ -n "$local_version" ] || ca_die "could not read local claude --version output." 1
+
+  local worker_version
+  worker_version="$(ca_ssh_run "$worker" 'command -v claude >/dev/null 2>&1 && claude --version' 2>/dev/null | awk '{print $1}')"
+  if [ -z "$worker_version" ]; then
+    ca_die "claude is not installed (or not on PATH) on worker '$worker'. Consume-never-provision: this adapter will not install it -- run 'make setup-headless' on '$worker', or install Claude Code there manually, then retry." 1
+  fi
+
+  local cmp policy
+  cmp="$(ca_version_cmp "$worker_version" "$local_version")"
+  if [ "$cmp" -eq 0 ]; then
+    policy="identical"
+  elif [ "$cmp" -gt 0 ]; then
+    policy="newer_worker"
+  else
+    jq -nc --arg local "$local_version" --arg worker "$worker_version" '{local: $local, worker: $worker, policy: "blocked"}'
+    ca_warn "worker claude ($worker_version) is older than local ($local_version). This adapter never updates a worker -- run on '$worker':"
+    ca_warn "  claude update"
+    exit 3
+  fi
+
+  jq -nc --arg local "$local_version" --arg worker "$worker_version" --arg policy "$policy" \
+    '{local: $local, worker: $worker, policy: $policy}'
+}
+
+# ---------------------------------------------------------------------------
+# export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
+#
+# --project-path is the SOURCE project path (used to locate the transcript
+# in provider storage on the source side -- local by default, or on
+# --worker over ssh for a return handoff). The staging dir is always local.
+# ---------------------------------------------------------------------------
+cmd_export() {
+  local session_id="" project_path="" out="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session-id)
+        session_id="${2:?}"
+        shift 2
+        ;;
+      --project-path)
+        project_path="${2:?}"
+        shift 2
+        ;;
+      --out)
+        out="${2:?}"
+        shift 2
+        ;;
+      --worker)
+        worker="${2:?}"
+        shift 2
+        ;;
+      *) ca_die "export: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$session_id" "--session-id"
+  ca_require "$project_path" "--project-path"
+  ca_require "$out" "--out"
+  ca_need_jq
+
+  mkdir -p "$out"
+  local slug src_file dest_file="$out/session.jsonl"
+  slug="$(claude_slug "$project_path")"
+
+  if [ -n "$worker" ]; then
+    src_file="\$HOME/.claude/projects/${slug}/${session_id}.jsonl"
+    if ! ca_ssh_run "$worker" "test -f \"$src_file\""; then
+      ca_warn "no claude transcript found on worker '$worker' for session $session_id at project $project_path; nothing to export."
+      exit 4
+    fi
+    if ! ca_ssh_run "$worker" "cat -- \"$src_file\""  >"$dest_file" 2>/dev/null; then
+      ca_warn "failed to read claude transcript from worker '$worker'."
+      exit 4
+    fi
+  else
+    src_file="$(claude_projects_root_local)/$slug/$session_id.jsonl"
+    [ -f "$src_file" ] || {
+      ca_warn "no local claude transcript found for session $session_id at project $project_path ($src_file); nothing to export."
+      exit 4
+    }
+    cp -p "$src_file" "$dest_file"
+  fi
+
+  # Explicitly never touched: ~/.claude.json (auth/global state).
+  ca_write_manifest "$out" "$(jq -nc \
+    --arg provider "$PROVIDER" \
+    --arg session_id "$session_id" \
+    --arg source_project_path "$project_path" \
+    --arg transcript_file "session.jsonl" \
+    --arg exported_at "$(ca_now_iso)" \
+    '{provider: $provider, session_id: $session_id, source_project_path: $source_project_path, transcript_file: $transcript_file, exported_at: $exported_at}')"
+
+  cat "$out/manifest.json"
+}
+
+# ---------------------------------------------------------------------------
+# install --snapshot <dir> --dest-path <path> [--worker <alias>]
+# ---------------------------------------------------------------------------
+cmd_install() {
+  local snapshot="" dest_path="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --snapshot)
+        snapshot="${2:?}"
+        shift 2
+        ;;
+      --dest-path)
+        dest_path="${2:?}"
+        shift 2
+        ;;
+      --worker)
+        worker="${2:?}"
+        shift 2
+        ;;
+      *) ca_die "install: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$snapshot" "--snapshot"
+  ca_require "$dest_path" "--dest-path"
+  ca_need_jq
+
+  local transcript="$snapshot/session.jsonl"
+  [ -f "$transcript" ] || ca_die "no session.jsonl in snapshot dir $snapshot." 1
+  local session_id
+  session_id="$(ca_manifest_field "$snapshot" "session_id")"
+  [ -n "$session_id" ] || ca_die "snapshot manifest.json at $snapshot is missing session_id." 1
+
+  local slug
+  slug="$(claude_slug "$dest_path")"
+
+  if [ -n "$worker" ]; then
+    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.claude/projects/${slug}\" && cat > \"\$HOME/.claude/projects/${slug}/${session_id}.jsonl\"" <"$transcript"; then
+      ca_die "failed to install claude transcript on worker '$worker'." 1
+    fi
+    printf 'installed claude transcript on %s: ~/.claude/projects/%s/%s.jsonl\n' "$worker" "$slug" "$session_id"
+  else
+    local dest_dir
+    dest_dir="$(claude_projects_root_local)/$slug"
+    mkdir -p "$dest_dir"
+    cp -p "$transcript" "$dest_dir/$session_id.jsonl"
+    printf 'installed claude transcript: %s/%s.jsonl\n' "$dest_dir" "$session_id"
+  fi
+  printf 'note: per-path trust in ~/.claude.json is not seeded by this adapter -- claude may prompt to trust %s on first launch there.\n' "$dest_path" >&2
+}
+
+# ---------------------------------------------------------------------------
+# resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+# ---------------------------------------------------------------------------
+cmd_resume_cmd() {
+  local dest_path="" session_id="" fork=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dest-path)
+        dest_path="${2:?}"
+        shift 2
+        ;;
+      --session-id)
+        session_id="${2:?}"
+        shift 2
+        ;;
+      --fork)
+        fork=1
+        shift
+        ;;
+      *) ca_die "resume-cmd: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$dest_path" "--dest-path"
+  ca_require "$session_id" "--session-id"
+
+  # Claude resolves the session by cwd-derived project slug, so the resume
+  # command must be run from dest-path.
+  if [ "$fork" -eq 1 ]; then
+    printf 'cd %q && claude --resume %q --fork-session\n' "$dest_path" "$session_id"
+  else
+    printf 'cd %q && claude --resume %q\n' "$dest_path" "$session_id"
+  fi
+}
+
+case "$cmd" in
+  detect) cmd_detect "$@" ;;
+  versions) cmd_versions "$@" ;;
+  export) cmd_export "$@" ;;
+  install) cmd_install "$@" ;;
+  resume-cmd) cmd_resume_cmd "$@" ;;
+  -h | --help) usage ;;
+  *)
+    ca_warn "unknown subcommand: $cmd"
+    usage >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+# Pi provider adapter -- the simplest of the three per initial-plan.md
+# ("Provider notes"): `pi --session <path|id>` accepts an arbitrary session
+# file path *or* a partial UUID, so no destination directory-encoding
+# mimicry is required for resume to work. This adapter still places the
+# transcript under pi's own default session-storage convention
+# ($HOME/.pi/agent/sessions/<slugified-project-path>/) purely for tidiness
+# and so it also shows up in pi's own `--resume` picker -- never load-bearing
+# for resume itself.
+#
+# Subcommands: detect, versions, export, install, resume-cmd
+# See libexec/adapters/README.md for the full contract.
+
+set -uo pipefail
+
+CA_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./common-adapter.sh
+source "$CA_SELF/common-adapter.sh"
+
+PROVIDER="pi"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pi detect --pane <pane-id>
+  pi versions --worker <alias>
+  pi export --session-id <id-or-path> --project-path <path> --out <dir> [--worker <alias>]
+  pi install --snapshot <dir> --dest-path <path> [--worker <alias>]
+  pi resume-cmd --dest-path <path> --session-id <id-or-path> [--fork]
+EOF
+}
+
+[ $# -ge 1 ] || {
+  usage >&2
+  exit 1
+}
+cmd="$1"
+shift
+
+# ---------------------------------------------------------------------------
+# pi's own session-directory slug: "-" + (path + "/") with every "/" -> "-"
+# + "-". Verified against a live ~/.pi/agent/sessions/ directory name, e.g.
+# "/Users/k/Developer/dotfiles" -> "--Users-k-Developer-dotfiles--".
+# ---------------------------------------------------------------------------
+pi_slug() {
+  local path="$1" mid
+  mid="$(printf '%s/' "$path" | tr '/' '-')"
+  printf -- '-%s-\n' "$mid"
+}
+
+pi_sessions_root_local() { printf '%s/.pi/agent/sessions\n' "$HOME"; }
+
+# ---------------------------------------------------------------------------
+# detect --pane <pane-id>
+# ---------------------------------------------------------------------------
+cmd_detect() {
+  local pane=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pane)
+        pane="${2:?--pane requires a value}"
+        shift 2
+        ;;
+      *) ca_die "detect: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$pane" "--pane"
+  ca_need_jq
+
+  # shellcheck disable=SC2046 # intentional word-splitting: each pattern
+  # line from ca_patterns_pi becomes a separate positional argument.
+  ca_pane_has_process "$pane" $(ca_patterns_pi) || {
+    ca_warn "no pi process detected in pane $pane."
+    exit 1
+  }
+
+  local state
+  state="$(ca_read_pane_agent_state "$pane" "$PROVIDER")" || {
+    ca_warn "detected a pi process in pane $pane but no recorded session (record-agent-session.sh/tmux-workspace-resurrect hook may not have fired yet, or is not installed); cannot produce a resumable handoff without a session id."
+    exit 1
+  }
+
+  # The pi extension records both session_id (uuid) and session_file (the
+  # resumable path). Prefer session_file since that's what `pi --session`
+  # is guaranteed to resolve without ambiguity; fall back to session_id.
+  local session_id project_path
+  session_id="$(jq -r '.session_file // .session_id // empty' <<<"$state")"
+  project_path="$(jq -r '.cwd // empty' <<<"$state")"
+  [ -n "$session_id" ] || {
+    ca_warn "recorded pi session state for pane $pane has neither session_file nor session_id."
+    exit 1
+  }
+
+  jq -nc --arg provider "$PROVIDER" --arg session_id "$session_id" --arg project_path "$project_path" \
+    '{provider: $provider, session_id: $session_id, project_path: $project_path}'
+}
+
+# ---------------------------------------------------------------------------
+# versions --worker <alias>
+# ---------------------------------------------------------------------------
+cmd_versions() {
+  local worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --worker)
+        worker="${2:?--worker requires a value}"
+        shift 2
+        ;;
+      *) ca_die "versions: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$worker" "--worker"
+  ca_need_jq
+
+  command -v pi >/dev/null 2>&1 || ca_die "pi is not installed locally; nothing to compare." 1
+  command -v node >/dev/null 2>&1 || ca_die "node is not installed locally; pi is an npm package and needs it." 1
+  local local_cli local_node
+  local_cli="$(pi --version 2>/dev/null | tr -d '[:space:]')"
+  local_node="$(node --version 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$local_cli" ] || ca_die "could not read local pi --version output." 1
+
+  local worker_cli worker_node
+  worker_cli="$(ca_ssh_run "$worker" 'command -v pi >/dev/null 2>&1 && pi --version' 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$worker_cli" ]; then
+    ca_die "pi is not installed (or not on PATH) on worker '$worker'. Consume-never-provision: this adapter will not install it -- run 'make setup-headless' on '$worker', or install pi there manually, then retry." 1
+  fi
+  worker_node="$(ca_ssh_run "$worker" 'command -v node >/dev/null 2>&1 && node --version' 2>/dev/null | tr -d '[:space:]')"
+
+  local cmp policy
+  cmp="$(ca_version_cmp "$worker_cli" "$local_cli")"
+  if [ "$cmp" -eq 0 ] && [ "$worker_node" = "$local_node" ]; then
+    policy="identical"
+  elif [ "$cmp" -ge 0 ]; then
+    policy="newer_worker"
+    if [ "$worker_node" != "$local_node" ]; then
+      ca_warn "notice: worker node ($worker_node) differs from local node ($local_node); pi package version is >= local, proceeding."
+    fi
+  else
+    jq -nc --arg local "$local_cli" --arg worker "$worker_cli" '{local: $local, worker: $worker, policy: "blocked"}'
+    ca_warn "worker pi ($worker_cli) is older than local ($local_cli). This adapter never updates a worker -- run on '$worker':"
+    ca_warn "  fnm use $local_node --install-if-missing && npm install -g @mariozechner/pi-coding-agent@$local_cli"
+    exit 3
+  fi
+
+  jq -nc \
+    --arg local_cli "$local_cli" --arg local_node "$local_node" \
+    --arg worker_cli "$worker_cli" --arg worker_node "$worker_node" \
+    --arg policy "$policy" \
+    '{local: {cli: $local_cli, node: $local_node}, worker: {cli: $worker_cli, node: $worker_node}, policy: $policy}'
+}
+
+# ---------------------------------------------------------------------------
+# export --session-id <id-or-path> --project-path <path> --out <dir> [--worker <alias>]
+# ---------------------------------------------------------------------------
+cmd_export() {
+  local session_id="" project_path="" out="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session-id)
+        session_id="${2:?}"
+        shift 2
+        ;;
+      --project-path)
+        project_path="${2:?}"
+        shift 2
+        ;;
+      --out)
+        out="${2:?}"
+        shift 2
+        ;;
+      --worker)
+        worker="${2:?}"
+        shift 2
+        ;;
+      *) ca_die "export: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$session_id" "--session-id"
+  ca_require "$project_path" "--project-path"
+  ca_require "$out" "--out"
+  ca_need_jq
+
+  mkdir -p "$out"
+  local dest_file="$out/session.jsonl"
+
+  if [ -n "$worker" ]; then
+    # session_id may already be an absolute worker-side path (from a prior
+    # detect on that worker); otherwise search the worker's session root by
+    # (partial) id, mirroring pi's own lookup.
+    local remote_find
+    if [[ "$session_id" == /* ]]; then
+      remote_find="$session_id"
+    else
+      remote_find="$(ca_ssh_run "$worker" "find \"\$HOME/.pi/agent/sessions\" -type f -iname '*${session_id}*.jsonl' 2>/dev/null | head -n1")"
+    fi
+    [ -n "$remote_find" ] || {
+      ca_warn "no pi transcript matching '$session_id' found on worker '$worker'; nothing to export."
+      exit 4
+    }
+    if ! ca_ssh_run "$worker" "cat -- '$remote_find'" >"$dest_file" 2>/dev/null; then
+      ca_warn "failed to read pi transcript '$remote_find' from worker '$worker'."
+      exit 4
+    fi
+  else
+    local local_find="$session_id"
+    if [[ "$session_id" != /* ]]; then
+      local_find="$(find "$(pi_sessions_root_local)" -type f -iname "*${session_id}*.jsonl" 2>/dev/null | head -n1)"
+    fi
+    [ -n "$local_find" ] && [ -f "$local_find" ] || {
+      ca_warn "no local pi transcript found for '$session_id'; nothing to export."
+      exit 4
+    }
+    cp -p "$local_find" "$dest_file"
+  fi
+
+  local resolved_id
+  resolved_id="$(jq -r '.id // empty' "$dest_file" 2>/dev/null | head -n1)"
+  [ -n "$resolved_id" ] || resolved_id="$(head -n1 "$dest_file" | jq -r '.id // empty' 2>/dev/null)"
+
+  ca_write_manifest "$out" "$(jq -nc \
+    --arg provider "$PROVIDER" \
+    --arg session_id "${resolved_id:-$session_id}" \
+    --arg source_project_path "$project_path" \
+    --arg transcript_file "session.jsonl" \
+    --arg exported_at "$(ca_now_iso)" \
+    '{provider: $provider, session_id: $session_id, source_project_path: $source_project_path, transcript_file: $transcript_file, exported_at: $exported_at}')"
+
+  cat "$out/manifest.json"
+}
+
+# ---------------------------------------------------------------------------
+# install --snapshot <dir> --dest-path <path> [--worker <alias>]
+# ---------------------------------------------------------------------------
+cmd_install() {
+  local snapshot="" dest_path="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --snapshot)
+        snapshot="${2:?}"
+        shift 2
+        ;;
+      --dest-path)
+        dest_path="${2:?}"
+        shift 2
+        ;;
+      --worker)
+        worker="${2:?}"
+        shift 2
+        ;;
+      *) ca_die "install: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$snapshot" "--snapshot"
+  ca_require "$dest_path" "--dest-path"
+  ca_need_jq
+
+  local transcript="$snapshot/session.jsonl"
+  [ -f "$transcript" ] || ca_die "no session.jsonl in snapshot dir $snapshot." 1
+
+  local slug basename_out
+  slug="$(pi_slug "$dest_path")"
+  # Keep the transcript's own original filename if we can recover it from
+  # the transcript's recorded id/timestamp; otherwise synthesize one --
+  # filename is never load-bearing for `pi --session <path>`.
+  local sid ts
+  sid="$(head -n1 "$transcript" | jq -r '.id // empty' 2>/dev/null)"
+  ts="$(head -n1 "$transcript" | jq -r '.timestamp // empty' 2>/dev/null | tr ':.' '--')"
+  if [ -n "$sid" ] && [ -n "$ts" ]; then
+    basename_out="${ts}_${sid}.jsonl"
+  else
+    basename_out="$(basename "$transcript")"
+  fi
+
+  if [ -n "$worker" ]; then
+    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.pi/agent/sessions/${slug}\" && cat > \"\$HOME/.pi/agent/sessions/${slug}/${basename_out}\"" <"$transcript"; then
+      ca_die "failed to install pi transcript on worker '$worker'." 1
+    fi
+    printf 'installed pi transcript on %s: ~/.pi/agent/sessions/%s/%s\n' "$worker" "$slug" "$basename_out"
+  else
+    local dest_dir
+    dest_dir="$(pi_sessions_root_local)/$slug"
+    mkdir -p "$dest_dir"
+    cp -p "$transcript" "$dest_dir/$basename_out"
+    printf 'installed pi transcript: %s/%s\n' "$dest_dir" "$basename_out"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# resume-cmd --dest-path <path> --session-id <id-or-path> [--fork]
+# ---------------------------------------------------------------------------
+cmd_resume_cmd() {
+  local dest_path="" session_id="" fork=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dest-path)
+        dest_path="${2:?}"
+        shift 2
+        ;;
+      --session-id)
+        session_id="${2:?}"
+        shift 2
+        ;;
+      --fork)
+        fork=1
+        shift
+        ;;
+      *) ca_die "resume-cmd: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$dest_path" "--dest-path"
+  ca_require "$session_id" "--session-id"
+
+  # pi resolves both full paths and partial UUIDs on its own -- no need to
+  # re-derive the installed path here (verified fact, initial-plan.md).
+  if [ "$fork" -eq 1 ]; then
+    printf 'pi --fork %q\n' "$session_id"
+  else
+    printf 'pi --session %q\n' "$session_id"
+  fi
+}
+
+case "$cmd" in
+  detect) cmd_detect "$@" ;;
+  versions) cmd_versions "$@" ;;
+  export) cmd_export "$@" ;;
+  install) cmd_install "$@" ;;
+  resume-cmd) cmd_resume_cmd "$@" ;;
+  -h | --help) usage ;;
+  *)
+    ca_warn "unknown subcommand: $cmd"
+    usage >&2
+    exit 1
+    ;;
+esac

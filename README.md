@@ -28,6 +28,12 @@ Or, once `make` is available:
 make setup-headless
 ```
 
+`make setup-headless` is platform-aware: it dispatches to the Linux or macOS
+headless lane automatically. See [`docs/headless-workers.md`](docs/headless-workers.md)
+for the full operator runbook — preconditions, what success/failure means,
+manual steps that stay manual, and how to register a worker with a focus
+machine so `rw` can orchestrate it.
+
 The Linux lane uses distro packages instead of Homebrew, then reuses the shared
 setup scripts and dotfiles for:
 
@@ -36,16 +42,19 @@ setup scripts and dotfiles for:
 - CLI tooling: zsh, tmux, Neovim, Git/Git LFS, Stow, fd/ripgrep/bat/fzf/jq,
   Python/pyenv/pipx, Node/fnm/npm globals, Stripe CLI, Claude Code, Pi tools,
   and `ob`
-- Optional server services: Docker by default, Tailscale only with
-  `INSTALL_TAILSCALE=1`
+- Server connectivity/services: Docker and Tailscale by default. Set
+  `INSTALL_TAILSCALE=0` only for a deliberately public/LAN-only worker;
+  Tailscale authentication (`sudo tailscale up`) remains manual.
 
 GUI/macOS-only packages are intentionally skipped on Linux: AeroSpace,
-SketchyBar, Ghostty, Cursor UI settings, KindaVim, macOS defaults, fonts/casks,
-and login items.
+SketchyBar, Ghostty, KindaVim, macOS defaults, fonts/casks, and login items.
 
-The Linux package mirror for the headless Brewfile lives in
-`setup/linux-headless.sh`, because package names differ across apt, dnf, pacman,
-zypper, and apk.
+Linux does not mirror the full headless Brewfile. It installs the required
+CLI contract shared with macOS (see `docs/tasks/headless-install.md`) plus a
+set of guarded conveniences (e.g. eza, bat/batcat, fd/fdfind, Git Delta where
+available), rather than every package listed in `Brewfile.headless`. Package
+selection lives in `setup/linux-headless.sh`, because package names differ
+across apt, dnf, pacman, zypper, and apk.
 
 ## Commands
 
@@ -77,9 +86,6 @@ dotfiles/
 ├── git/                → ~/.gitconfig            (stow)
 ├── vim/                → ~/.vimrc                (stow)
 ├── zsh/                → ~/.zshrc                (stow)
-├── cursor/             → Cursor User settings     (direct symlink)
-│   ├── settings.json   → ~/Library/Application Support/Cursor/User/settings.json
-│   └── keybindings.json → ~/Library/Application Support/Cursor/User/keybindings.json
 ├── ssh/                → ~/.ssh/config           (direct symlink)
 ├── setup/              # Setup scripts
 │   ├── brew.sh         # Homebrew installation and packages
@@ -97,11 +103,12 @@ dotfiles/
 
 - **Direct symlink**: Packages in `~/.config/` are directly symlinked
 - **Stow**: Uses GNU Stow for packages that need files in `~`
-- **Special cases**: Cursor and SSH configs are manually symlinked to specific locations
+- **Special cases**: SSH config is manually symlinked to a specific location
 
 ## New Machine Additions
 
 Look at the following links for new machine additions:
 - https://developer.apple.com/download/all/
 - https://github.com/beardedspice/beardedspice
+
   

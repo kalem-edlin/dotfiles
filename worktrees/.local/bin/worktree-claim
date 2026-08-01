@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+# worktree-claim -- generic, dotfiles-owned worktree ownership primitive.
+#
+# Records which focus/tmux responsibility owns a worktree and which host is
+# currently allowed to act as its writer (the two-level lock described in
+# docs/tasks/tmux-remote-workspaces/initial-plan.md, "Worktree claims and
+# editing ownership"). Any git repository may use it; opting a repository
+# into worktree-slot's config.json is NOT required for claim/release/status,
+# but IS required for verify-writer's enforcement (see below).
+#
+# Subcommands:
+#   claim [--label <text>] [--branch <name>] [--window <id>] [--pane <id>]
+#         [--endpoint <id>] [--force-takeover] [--path <worktree>]
+#   release [--force] [--path <worktree>]
+#   status [--json] [--path <worktree>]
+#   verify-writer [--path <worktree>]
+#   handoff-writer --host <host> [--force-takeover] [--path <worktree>]
+#   return-writer [--host <host>] [--force-takeover] [--path <worktree>]
+#
+# Exit codes (stable contract -- other tools/hooks key off these):
+#   0   ok / caller may write / success
+#   10  responsibility mismatch (claim owned by a different focus/session)
+#   11  host mismatch (caller host != claim.active_writer_host)
+#   12  no stable session identity available (outside tmux, or @session-uuid
+#       unset) -- cannot resolve caller responsibility
+#   13  claim state is "conflicted" -- blocked pending manual resolution
+#   14  no existing claim at this path (handoff-writer/return-writer only)
+#   20  usage or internal error (bad args, not a git worktree, etc.)
+
+set -uo pipefail
+
+WT_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the sibling lib dir: .local/bin/worktree-claim -> .local/lib/worktrees/common.sh
+WT_LIB="$(cd "$WT_SELF/../lib/worktrees" 2>/dev/null && pwd)"
+if [ -z "$WT_LIB" ] || [ ! -f "$WT_LIB/common.sh" ]; then
+  echo "worktree-claim: could not locate lib/worktrees/common.sh next to this script." >&2
+  exit 20
+fi
+# shellcheck source-path=SCRIPTDIR/../lib/worktrees
+# shellcheck source=/dev/null
+source "$WT_LIB/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  worktree-claim claim [--label <text>] [--branch <name>] [--window <id>]
+                        [--pane <id>] [--endpoint <id>] [--force-takeover]
+                        [--path <worktree>]
+  worktree-claim release [--force] [--path <worktree>]
+  worktree-claim status [--json] [--path <worktree>]
+  worktree-claim verify-writer [--path <worktree>]
+  worktree-claim handoff-writer --host <host> [--force-takeover] [--path <worktree>]
+  worktree-claim return-writer [--host <host>] [--force-takeover] [--path <worktree>]
+
+Exit codes: 0 ok, 10 responsibility mismatch, 11 host mismatch,
+12 no stable session identity, 13 claim conflicted, 14 no existing claim,
+20 usage/internal error.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Arg parsing
+# ---------------------------------------------------------------------------
+
+[ $# -ge 1 ] || { usage >&2; exit 20; }
+cmd="$1"; shift
+
+opt_label=""
+opt_branch=""
+opt_window=""
+opt_pane=""
+opt_endpoint=""
+opt_force_takeover=0
+opt_force=0
+opt_path=""
+opt_host=""
+opt_json=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --label) opt_label="${2:?--label requires a value}"; shift 2 ;;
+    --branch) opt_branch="${2:?--branch requires a value}"; shift 2 ;;
+    --window) opt_window="${2:?--window requires a value}"; shift 2 ;;
+    --pane) opt_pane="${2:?--pane requires a value}"; shift 2 ;;
+    --endpoint) opt_endpoint="${2:?--endpoint requires a value}"; shift 2 ;;
+    --host) opt_host="${2:?--host requires a value}"; shift 2 ;;
+    --path) opt_path="${2:?--path requires a value}"; shift 2 ;;
+    --force-takeover) opt_force_takeover=1; shift ;;
+    --force) opt_force=1; shift ;;
+    --json) opt_json=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) wt_warn "unknown argument: $1"; usage >&2; exit 20 ;;
+  esac
+done
+
+wt_need_jq
+
+# ---------------------------------------------------------------------------
+# Worktree path resolution
+# ---------------------------------------------------------------------------
+
+resolve_worktree_path() {
+  if [ -n "$opt_path" ]; then
+    local abs
+    abs="$(cd "$opt_path" 2>/dev/null && pwd)" || wt_die "--path does not exist: $opt_path" 20
+    printf '%s\n' "$abs"
+    return 0
+  fi
+  local top
+  top="$(wt_git_toplevel "$PWD")"
+  [ -n "$top" ] || wt_die "not inside a git worktree (pass --path)." 20
+  printf '%s\n' "$top"
+}
+
+WORKTREE_PATH="$(resolve_worktree_path)"
+
+repo_identity_for_worktree() {
+  local id
+  id="$(wt_git_remote_identity "$WORKTREE_PATH")"
+  printf '%s\n' "$id"
+}
+
+# ---------------------------------------------------------------------------
+# Caller identity
+# ---------------------------------------------------------------------------
+
+CALLER_FOCUS_MACHINE_ID="$(wt_caller_focus_machine_id)"
+CALLER_HOST="$(wt_caller_host)"
+
+# ---------------------------------------------------------------------------
+# claim
+# ---------------------------------------------------------------------------
+
+cmd_claim() {
+  wt_sync_claim_from_marker "$WORKTREE_PATH"
+  local session_uuid session_name existing_json existing_state
+  session_uuid="$(wt_require_session_identity)"
+  session_name="$(wt_session_name)"
+
+  existing_json="$(wt_read_claim_registry "$WORKTREE_PATH")" || existing_json=""
+  if [ -n "$existing_json" ]; then
+    existing_state="$(jq -r '.state // "local"' <<<"$existing_json")"
+    if [ "$existing_state" != "released" ]; then
+      local existing_focus existing_session
+      existing_focus="$(jq -r '.focus_machine_id // ""' <<<"$existing_json")"
+      existing_session="$(jq -r '.session_uuid // ""' <<<"$existing_json")"
+      local same_owner=0
+      [ "$existing_focus" = "$CALLER_FOCUS_MACHINE_ID" ] && [ "$existing_session" = "$session_uuid" ] && same_owner=1
+      if [ "$same_owner" -ne 1 ] && [ "$opt_force_takeover" -ne 1 ]; then
+        local prev_session_name prev_host
+        prev_session_name="$(jq -r '.session_name // "unknown"' <<<"$existing_json")"
+        prev_host="$(jq -r '.active_writer_host // "unknown"' <<<"$existing_json")"
+        wt_warn "$WORKTREE_PATH is already claimed by session '$prev_session_name' (writer host: $prev_host). Use --force-takeover to record an explicit takeover, or release it from the owning session."
+        exit 10
+      fi
+    fi
+  fi
+
+  local prev_owner_json="null"
+  local generation=0
+  if [ -n "$existing_json" ]; then
+    generation="$(jq -r '.handoff_generation // 0' <<<"$existing_json")"
+    case "$generation" in '' | *[!0-9]*) generation=0 ;; esac
+    local existing_state_for_takeover
+    existing_state_for_takeover="$(jq -r '.state // "local"' <<<"$existing_json")"
+    if [ "$opt_force_takeover" -eq 1 ] && [ "$existing_state_for_takeover" != "released" ]; then
+      generation=$((generation + 1))
+      prev_owner_json="$(jq -c '{claim_id, session_name, owning_user, focus_machine_id, session_uuid, active_writer_host}' <<<"$existing_json")"
+    fi
+  fi
+
+  local identity
+  identity="$(repo_identity_for_worktree)"
+  [ -n "$identity" ] || wt_die "$WORKTREE_PATH has no 'origin' git remote; cannot derive a normalized repo identity." 20
+
+  local branch base_commit
+  branch="${opt_branch:-$(git -C "$WORKTREE_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")}"
+  base_commit="$(git -C "$WORKTREE_PATH" rev-parse HEAD 2>/dev/null || echo "")"
+
+  local owning_user
+  owning_user="${USER:-$(git -C "$WORKTREE_PATH" config user.email 2>/dev/null || echo "unknown")}"
+
+  local claim_id now label
+  claim_id="$(wt_new_uuid)"
+  now="$(wt_now_iso)"
+  label="${opt_label:-$branch}"
+
+  local claim_json
+  claim_json="$(jq -nc \
+    --arg format_version "1" \
+    --arg claim_id "$claim_id" \
+    --arg repo_identity "$identity" \
+    --arg worktree_path "$WORKTREE_PATH" \
+    --arg label "$label" \
+    --arg owning_user "$owning_user" \
+    --arg focus_machine_id "$CALLER_FOCUS_MACHINE_ID" \
+    --arg session_uuid "$session_uuid" \
+    --arg session_name "$session_name" \
+    --arg window "$opt_window" \
+    --arg pane "$opt_pane" \
+    --arg endpoint "$opt_endpoint" \
+    --arg branch "$branch" \
+    --arg base_commit "$base_commit" \
+    --arg active_writer_host "$CALLER_HOST" \
+    --argjson handoff_generation "$generation" \
+    --arg created_at "$now" \
+    --arg updated_at "$now" \
+    --arg state "local" \
+    --argjson previous_owner "$prev_owner_json" \
+    '{
+      format_version: ($format_version | tonumber),
+      claim_id: $claim_id,
+      repo_identity: $repo_identity,
+      worktree_path: $worktree_path,
+      responsibility_label: $label,
+      owning_user: $owning_user,
+      focus_machine_id: $focus_machine_id,
+      session_uuid: $session_uuid,
+      session_name: $session_name,
+      window: (if $window == "" then null else $window end),
+      pane: (if $pane == "" then null else $pane end),
+      endpoint: (if $endpoint == "" then null else $endpoint end),
+      branch: $branch,
+      base_commit: $base_commit,
+      active_writer_host: $active_writer_host,
+      handoff_generation: $handoff_generation,
+      created_at: $created_at,
+      updated_at: $updated_at,
+      state: $state,
+      previous_owner: $previous_owner
+    }')"
+
+  wt_write_claim "$WORKTREE_PATH" "$claim_json"
+  printf 'claimed %s\n  label=%s branch=%s\n  owner=%s session=%s\n  writer_host=%s generation=%s\n' \
+    "$WORKTREE_PATH" "$label" "$branch" "$owning_user" "$session_name" "$CALLER_HOST" "$generation"
+}
+
+# ---------------------------------------------------------------------------
+# release
+# ---------------------------------------------------------------------------
+
+cmd_release() {
+  wt_sync_claim_from_marker "$WORKTREE_PATH"
+  local existing_json
+  existing_json="$(wt_read_claim_registry "$WORKTREE_PATH")" || {
+    printf '%s is already unclaimed.\n' "$WORKTREE_PATH"
+    exit 0
+  }
+  local state
+  state="$(jq -r '.state // "local"' <<<"$existing_json")"
+  if [ "$state" = "released" ]; then
+    printf '%s is already unclaimed.\n' "$WORKTREE_PATH"
+    exit 0
+  fi
+
+  if [ "$opt_force" -ne 1 ]; then
+    local session_uuid
+    session_uuid="$(wt_require_session_identity)"
+    local existing_focus existing_session existing_host
+    existing_focus="$(jq -r '.focus_machine_id // ""' <<<"$existing_json")"
+    existing_session="$(jq -r '.session_uuid // ""' <<<"$existing_json")"
+    existing_host="$(jq -r '.active_writer_host // ""' <<<"$existing_json")"
+    if [ "$existing_focus" != "$CALLER_FOCUS_MACHINE_ID" ] || [ "$existing_session" != "$session_uuid" ]; then
+      wt_warn "refusing to release: caller responsibility does not match claim owner (use --force to take over cleanup)."
+      exit 10
+    fi
+    if [ "$existing_host" != "$CALLER_HOST" ]; then
+      wt_warn "refusing to release: caller host ($CALLER_HOST) is not the active writer host ($existing_host). Use --force if you are intentionally taking over cleanup."
+      exit 11
+    fi
+  fi
+
+  local now
+  now="$(wt_now_iso)"
+  local released_json
+  released_json="$(jq -c --arg now "$now" '.state = "released" | .updated_at = $now' <<<"$existing_json")"
+  wt_write_json_atomic "$(wt_claim_registry_file "$WORKTREE_PATH")" "$released_json"
+  wt_remove_marker "$WORKTREE_PATH"
+  printf 'released %s\n' "$WORKTREE_PATH"
+}
+
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+  wt_sync_claim_from_marker "$WORKTREE_PATH"
+  local existing_json
+  existing_json="$(wt_read_claim_registry "$WORKTREE_PATH")" || existing_json=""
+  if [ -z "$existing_json" ] || [ "$(jq -r '.state' <<<"$existing_json")" = "released" ]; then
+    if wt_marker_is_legacy "$WORKTREE_PATH"; then
+      if [ "$opt_json" -eq 1 ]; then
+        jq -nc --arg path "$WORKTREE_PATH" '{worktree_path: $path, state: "legacy_unmigrated"}'
+      else
+        printf '%s: %s\n' "$WORKTREE_PATH" "$(wt_legacy_claim_label)"
+      fi
+      exit 0
+    fi
+    if [ "$opt_json" -eq 1 ]; then
+      jq -nc --arg path "$WORKTREE_PATH" '{worktree_path: $path, state: "unclaimed"}'
+    else
+      printf '%s: unclaimed\n' "$WORKTREE_PATH"
+    fi
+    exit 0
+  fi
+  if [ "$opt_json" -eq 1 ]; then
+    printf '%s\n' "$existing_json"
+  else
+    jq -r '
+      "\(.worktree_path):",
+      "  state:        \(.state)",
+      "  repo:         \(.repo_identity)",
+      "  label:        \(.responsibility_label)",
+      "  branch:       \(.branch) @ \(.base_commit[0:12])",
+      "  owner:        \(.owning_user) / session \(.session_name) (\(.session_uuid))",
+      "  focus_machine:\(.focus_machine_id)",
+      "  writer_host:  \(.active_writer_host)",
+      "  generation:   \(.handoff_generation)",
+      "  updated_at:   \(.updated_at)"
+    ' <<<"$existing_json"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# verify-writer -- the hook-called gate. Never mutates state.
+# ---------------------------------------------------------------------------
+
+cmd_verify_writer() {
+  local identity opted_in
+  identity="$(repo_identity_for_worktree)"
+  opted_in="0"
+  if [ -n "$identity" ] && wt_config_valid; then
+    local repo_cfg
+    repo_cfg="$(wt_repo_config "$identity")"
+    [ -n "$repo_cfg" ] && opted_in="1"
+  fi
+  if [ "$opted_in" != "1" ]; then
+    # "unclaimed worktree or non-opted-in repo => exit 0 (claims are
+    # optional)". A non-opted-in repo never hard-blocks, regardless of any
+    # stray claim file.
+    exit 0
+  fi
+
+  if wt_marker_is_legacy "$WORKTREE_PATH"; then
+    # Detected but never blocking: the legacy content-engine claim system
+    # had zero enforcement of its own, so treating an unmigrated marker as
+    # a hard block here would break current daily workflows that predate
+    # migration. Visibility only.
+    wt_warn "$(wt_legacy_claim_label) at $WORKTREE_PATH -- not enforced."
+  fi
+
+  wt_sync_claim_from_marker "$WORKTREE_PATH"
+  local existing_json
+  existing_json="$(wt_read_claim_registry "$WORKTREE_PATH")" || exit 0
+  local state
+  state="$(jq -r '.state // "local"' <<<"$existing_json")"
+  [ "$state" = "released" ] && exit 0
+
+  if [ "$state" = "conflicted" ]; then
+    wt_warn "claim on $WORKTREE_PATH is conflicted; blocked pending manual resolution."
+    exit 13
+  fi
+
+  local session_uuid
+  session_uuid="$(wt_session_uuid)"
+  if [ -z "$session_uuid" ]; then
+    wt_warn "no stable session identity (outside tmux, or @session-uuid unset); cannot verify claim on $WORKTREE_PATH."
+    exit 12
+  fi
+
+  local claim_focus claim_session claim_host
+  claim_focus="$(jq -r '.focus_machine_id // ""' <<<"$existing_json")"
+  claim_session="$(jq -r '.session_uuid // ""' <<<"$existing_json")"
+  claim_host="$(jq -r '.active_writer_host // ""' <<<"$existing_json")"
+
+  if [ "$claim_focus" != "$CALLER_FOCUS_MACHINE_ID" ] || [ "$claim_session" != "$session_uuid" ]; then
+    wt_warn "responsibility mismatch: $WORKTREE_PATH is claimed by a different focus/session."
+    exit 10
+  fi
+  if [ "$claim_host" != "$CALLER_HOST" ]; then
+    wt_warn "host mismatch: active writer host for $WORKTREE_PATH is $claim_host, not $CALLER_HOST."
+    exit 11
+  fi
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# handoff-writer / return-writer -- flip active_writer_host, bump generation.
+# Kept plain and scriptable for the tmux plugin to call.
+# ---------------------------------------------------------------------------
+
+# $3 (require_current_writer): 1 for handoff-writer -- you can only hand off
+# a claim you are actively holding as writer, so caller_host must equal the
+# claim's current active_writer_host. 0 for return-writer -- its entire
+# purpose is to reclaim writer status from a host that is *not* the caller,
+# so the host check is intentionally skipped; only responsibility (the
+# owning focus/session) is required to match. Both still allow
+# --force-takeover to override a genuine responsibility mismatch (a
+# different owner entirely), recording the previous owner.
+flip_writer() {
+  local target_host="$1" new_state="$2" require_current_writer="$3"
+  wt_sync_claim_from_marker "$WORKTREE_PATH"
+  local existing_json
+  existing_json="$(wt_read_claim_registry "$WORKTREE_PATH")" || {
+    wt_warn "no existing claim at $WORKTREE_PATH to hand off/return."
+    exit 14
+  }
+  local state
+  state="$(jq -r '.state // "local"' <<<"$existing_json")"
+  if [ "$state" = "released" ]; then
+    wt_warn "no existing claim at $WORKTREE_PATH to hand off/return (released)."
+    exit 14
+  fi
+  if [ "$state" = "conflicted" ] && [ "$opt_force_takeover" -ne 1 ]; then
+    wt_warn "claim on $WORKTREE_PATH is conflicted; use --force-takeover to override."
+    exit 13
+  fi
+
+  local session_uuid
+  session_uuid="$(wt_require_session_identity)"
+  local claim_focus claim_session claim_host
+  claim_focus="$(jq -r '.focus_machine_id // ""' <<<"$existing_json")"
+  claim_session="$(jq -r '.session_uuid // ""' <<<"$existing_json")"
+  claim_host="$(jq -r '.active_writer_host // ""' <<<"$existing_json")"
+
+  local mismatch=0
+  local prev_owner_json="null"
+  if [ "$claim_focus" != "$CALLER_FOCUS_MACHINE_ID" ] || [ "$claim_session" != "$session_uuid" ]; then
+    mismatch=1
+  elif [ "$require_current_writer" -eq 1 ] && [ "$claim_host" != "$CALLER_HOST" ]; then
+    mismatch=2
+  fi
+
+  if [ "$mismatch" -ne 0 ] && [ "$opt_force_takeover" -ne 1 ]; then
+    if [ "$mismatch" -eq 1 ]; then
+      wt_warn "responsibility mismatch: cannot hand off/return a claim you do not own (use --force-takeover)."
+      exit 10
+    else
+      wt_warn "host mismatch: caller host ($CALLER_HOST) is not the active writer host ($claim_host) (use --force-takeover)."
+      exit 11
+    fi
+  fi
+  if [ "$mismatch" -ne 0 ] && [ "$opt_force_takeover" -eq 1 ]; then
+    prev_owner_json="$(jq -c '{claim_id, session_name, owning_user, focus_machine_id, session_uuid, active_writer_host}' <<<"$existing_json")"
+  fi
+
+  local generation
+  generation="$(jq -r '.handoff_generation // 0' <<<"$existing_json")"
+  case "$generation" in '' | *[!0-9]*) generation=0 ;; esac
+  generation=$((generation + 1))
+
+  local now
+  now="$(wt_now_iso)"
+  local updated_json
+  updated_json="$(jq -c \
+    --arg host "$target_host" \
+    --arg state "$new_state" \
+    --arg now "$now" \
+    --argjson generation "$generation" \
+    --argjson prev_owner "$prev_owner_json" \
+    '.active_writer_host = $host
+     | .state = $state
+     | .updated_at = $now
+     | .handoff_generation = $generation
+     | (if $prev_owner != null then .previous_owner = $prev_owner else . end)' \
+    <<<"$existing_json")"
+
+  wt_write_claim "$WORKTREE_PATH" "$updated_json"
+  printf 'writer host for %s is now %s (state=%s, generation=%s)\n' "$WORKTREE_PATH" "$target_host" "$new_state" "$generation"
+}
+
+cmd_handoff_writer() {
+  [ -n "$opt_host" ] || { wt_warn "handoff-writer requires --host <host>."; exit 20; }
+  flip_writer "$opt_host" "handed-off" 1
+}
+
+cmd_return_writer() {
+  local target="${opt_host:-$CALLER_HOST}"
+  flip_writer "$target" "local" 0
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+case "$cmd" in
+  claim) cmd_claim ;;
+  release) cmd_release ;;
+  status) cmd_status ;;
+  verify-writer) cmd_verify_writer ;;
+  handoff-writer) cmd_handoff_writer ;;
+  return-writer) cmd_return_writer ;;
+  -h|--help) usage; exit 0 ;;
+  *) wt_warn "unknown subcommand: $cmd"; usage >&2; exit 20 ;;
+esac

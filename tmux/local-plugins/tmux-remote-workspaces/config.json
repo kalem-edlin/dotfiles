@@ -1,0 +1,27 @@
+{
+  "workers": [
+    {
+      "alias": "mini",
+      "platform": "darwin",
+      "notes": "Always-on macOS Mini worker; terminal, Xcode, and Simulator duties."
+    },
+    {
+      "alias": "agents-roll",
+      "platform": "linux",
+      "notes": "Linux VPS worker reached through the agents-roll OpenSSH alias."
+    }
+  ],
+  "reflected_repositories": [
+    {
+      "identity": "github.com/kalem-edlin/content-engine",
+      "focus_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>",
+      "worker_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>"
+    }
+  ],
+  "workspace_root": "~/rw-workspaces/<focus-machine-id>",
+  "ssh": {
+    "connect_timeout_seconds": 8,
+    "preflight_timeout_seconds": 10,
+    "status_timeout_seconds": 3
+  }
+}

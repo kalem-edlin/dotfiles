@@ -1,0 +1,33 @@
+# systemd user service: runs setup/templates/tmux-resurrect-save.sh once.
+# Triggered on a timer by the paired tmux-resurrect-save.timer — never run
+# directly except for manual testing (systemctl --user start
+# tmux-resurrect-save.service).
+#
+# Independent of any attached tmux client — see
+# docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
+# durability". Continuum's own status-line autosave never fires on a fully
+# detached server; this timer is the correctness net.
+#
+# This is a template: __WRAPPER_PATH__ and __TMUX_BIN__ are substituted with
+# absolute paths by setup/linux-headless.sh at install time before the
+# rendered unit is copied to ~/.config/systemd/user/. Not usable as-is.
+#
+# __TMUX_BIN__ (the absolute result of `command -v tmux` at setup time) is
+# injected as TMUX_RESURRECT_SAVE_TMUX_BIN below because systemd --user's
+# default environment may not include the directory tmux is installed in on
+# PATH — the wrapper's PATH-based `tmux` lookup would otherwise fail
+# silently under systemd even though it succeeds in an interactive/
+# provisioning shell. Mirrors the same fix for launchd on macOS, see
+# setup/templates/com.kalem.tmux-resurrect-save.plist and
+# docs/tasks/headless-install.md, "7. Fix macOS launchd execution".
+
+[Unit]
+Description=Periodic tmux-resurrect save (headless worker durability net)
+After=default.target
+
+[Service]
+Type=oneshot
+Environment=TMUX_RESURRECT_SAVE_TMUX_BIN=__TMUX_BIN__
+ExecStart=__WRAPPER_PATH__
+# The wrapper already exits 0 quietly when no tmux server is running; a
+# nonzero exit here means something unexpected (missing plugin, etc).

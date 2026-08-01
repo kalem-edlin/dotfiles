@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Resurrection reconciliation and orphan disposal.
+#
+# See docs/tasks/tmux-remote-workspaces/initial-plan.md, "Resurrection
+# reconciliation and orphan disposal" (top-level requirement) and Phase 2
+# ("Reconcile and close owned remote endpoints missing from a completed
+# local resurrection"). This is deterministic mirror reconciliation, never
+# age-based garbage collection: every closure below is justified by a
+# provably-departed local desired set, never by how long an endpoint has
+# existed.
+#
+# Usage: reconcile [--dry-run]
+#
+#   (no args)   Compute the desired set and close every worker-registered,
+#               this-focus-machine-owned endpoint absent from it. Logs every
+#               action to events.jsonl.
+#   --dry-run   Same computation, but never closes anything and never logs
+#               to events.jsonl -- used by `rw doctor` for a report-only
+#               "would close N endpoints" count, and safe to run by hand at
+#               any time.
+#
+# Invocation:
+#   - Automatic: chained onto tmux-resurrect's @resurrect-hook-post-restore-all
+#     by tmux-remote-workspaces.tmux, appended AFTER
+#     scripts/rw-post-restore.sh (session-UUID re-resolution and pane
+#     re-establishment) in that same hook. tmux-resurrect only fires
+#     post-restore-all when its own restore actually ran
+#     (`supported_tmux_version_ok && check_saved_session_exists` in
+#     tmux/plugins/tmux-resurrect/scripts/restore.sh) -- a missing resurrect
+#     snapshot never reaches this script through that path at all.
+#   - Manual: invoke this file directly at any time (e.g. `--dry-run` from
+#     `rw doctor`, or for real after fixing a worker's reachability).
+#
+# HARD SAFETY RULES (initial-plan.md):
+#   - A missing/unreadable snapshot is NOT an empty desired set. This script
+#     independently re-verifies the tmux-workspace-resurrect sidecar (not
+#     just trusting that it was hook-chained after a successful restore) and
+#     aborts WITHOUT CLOSING ANYTHING if it cannot read a valid one.
+#   - Only remote sessions matching this focus machine's own
+#     "rw-<machine-short-id>-" namespace prefix are ever inspected or
+#     touched.
+#   - Unmanaged tmux sessions (any name outside that namespace, on any
+#     worker) are invisible to this script -- never listed, never reasoned
+#     about, never touched.
+#   - A worker that cannot be reached over ssh simply contributes zero
+#     candidates for that pass. It is never treated as "everything
+#     registered there is now orphaned".
+#
+# Desired-set computation (see also the file-level comment in
+# scripts/common.sh's rw_close_endpoint_core, which this script reuses
+# rather than duplicating close/teardown logic):
+#   1. Start from every endpoint this machine currently has registered
+#      (endpoints/*.json). These are plain files on disk and are untouched
+#      by a tmux crash/restart, so their continued existence after the
+#      crash is exactly "declared by the restored local state" -- the ONLY
+#      thing that ever removes a registry entry is rw_close_endpoint_core
+#      (intentional close), never anything pane/topology-shaped. Note this
+#      deliberately does NOT require every desired endpoint to have a
+#      re-resolvable local pane after restore (initial-plan.md warns pane
+#      `@vars` are cache only, destabilized by `renumber-windows on`) --
+#      soft pane-matching failures in rw-post-restore.sh must never gate an
+#      irreversible remote deletion. If rw-post-restore.sh could not
+#      re-resolve a pane for a still-desired endpoint, that endpoint stays
+#      in the desired set here and is simply left for `rw status`/`doctor`
+#      to surface, per the plan's "never destructive when ambiguous" rule.
+#   2. Drop (and finish closing) any endpoint whose tombstone
+#      (tombstones/<id>.json) timestamp is NEWER THAN OR EQUAL TO the
+#      just-restored snapshot's saved_at. This is exactly the crash race
+#      the plan calls out: "Recording intent first prevents an older
+#      Resurrect snapshot from reviving a deliberately closed endpoint
+#      after a crash during cleanup" -- rw_close_endpoint_core always
+#      writes the tombstone before removing the registry file, so a crash
+#      between those two steps can leave both on disk simultaneously. An
+#      OLDER tombstone (strictly predating the snapshot) does NOT suppress
+#      -- per the plan, "a newer close tombstone suppresses stale local
+#      snapshot entries", not any tombstone ever written for that id (and
+#      endpoint ids are never reused, so an older tombstone next to a live
+#      registry entry of the same id cannot legitimately happen outside
+#      that same crash race, already handled by the >= case above).
+#   3. The remaining endpoint ids are the desired set.
+#
+# Orphan disposal: for each configured worker, list its live
+# "rw-<machine-short-id>-*" sessions over ssh (read-only). Any such session
+# whose endpoint id is not in the desired set is closed through
+# rw_close_endpoint_core (tombstone-first, same ordering as rw-close.sh).
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../scripts" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../scripts/common.sh
+source "$SCRIPT_DIR/common.sh"
+
+rw_need_jq
+rw_config_valid || rw_die "reconcile: config.json ($RW_CONFIG_FILE) is invalid"
+
+dry_run="false"
+if [ "${1:-}" = "--dry-run" ]; then
+  dry_run="true"
+fi
+
+# Read-only dependency on the sibling plugin's own path-resolution helpers.
+# Reconcile needs to know a local restore actually happened and exactly
+# when, but must never extend tmux-workspace-resurrect's own schema
+# (anti-monolith rule) -- this sources two pure path-computation functions
+# (workspace_resurrect_dir / workspace_sidecar_file) and writes nothing
+# there, mirroring the same sidecar tmux-workspace-resurrect's own
+# doctor.sh already inspects read-only.
+WORKSPACE_COMMON="$RW_PLUGIN_DIR/../tmux-workspace-resurrect/scripts/common.sh"
+if [ ! -f "$WORKSPACE_COMMON" ]; then
+  rw_warn "reconcile: cannot find tmux-workspace-resurrect/scripts/common.sh -- aborting without closing anything."
+  echo "rw reconcile: abort reason=workspace_resurrect_common_missing"
+  exit 0
+fi
+# shellcheck source=../../tmux-workspace-resurrect/scripts/common.sh
+source "$WORKSPACE_COMMON"
+
+sidecar="$(workspace_sidecar_file)"
+if [ ! -f "$sidecar" ] || ! jq -e '.version == 1' "$sidecar" >/dev/null 2>&1; then
+  rw_warn "reconcile: no valid workspace-resurrect sidecar at $sidecar -- a missing/unreadable snapshot is NOT an empty desired set. Aborting without closing anything."
+  [ "$dry_run" = "true" ] || rw_log_event "reconcile" "" "" "" "abort" "missing_or_invalid_sidecar"
+  echo "rw reconcile: abort reason=missing_or_invalid_sidecar"
+  exit 0
+fi
+
+snapshot_saved_at="$(jq -r '.saved_at // empty' "$sidecar")"
+if [ -z "$snapshot_saved_at" ]; then
+  rw_warn "reconcile: sidecar has no saved_at timestamp -- aborting without closing anything."
+  [ "$dry_run" = "true" ] || rw_log_event "reconcile" "" "" "" "abort" "sidecar_missing_saved_at"
+  echo "rw reconcile: abort reason=sidecar_missing_saved_at"
+  exit 0
+fi
+
+machine_id="$(rw_machine_id)"
+machine_short="$(rw_machine_short_id)"
+
+start_ts="$(rw_now_epoch)"
+
+# --- Desired set -------------------------------------------------------
+desired_ids_file="$(mktemp "${TMPDIR:-/tmp}/rw-reconcile-desired.XXXXXX")"
+orphan_ids_file="$(mktemp "${TMPDIR:-/tmp}/rw-reconcile-orphans.XXXXXX")"
+trap 'rm -f "$desired_ids_file" "$orphan_ids_file"' EXIT
+: >"$desired_ids_file"
+: >"$orphan_ids_file"
+
+finished_incomplete_close=0
+endpoints_dir="$(rw_endpoints_dir)"
+if [ -d "$endpoints_dir" ]; then
+  for f in "$endpoints_dir"/*.json; do
+    [ -f "$f" ] || continue
+    id="$(jq -r '.endpoint_id // empty' "$f" 2>/dev/null)"
+    [ -n "$id" ] || continue
+
+    if rw_tombstone_exists "$id"; then
+      tombstone_ts="$(jq -r '.ts // empty' "$(rw_tombstone_file "$id")" 2>/dev/null)"
+      if [ -n "$tombstone_ts" ] && [[ "$tombstone_ts" > "$snapshot_saved_at" || "$tombstone_ts" == "$snapshot_saved_at" ]]; then
+        # Newer-or-same-instant tombstone: this endpoint was intentionally
+        # closed at/after the restored snapshot. Finish the close
+        # rw_close_endpoint_core didn't get to (crash between the
+        # tombstone write and the registry-file removal) instead of
+        # treating a leftover file as a phantom desired endpoint.
+        finished_incomplete_close=$((finished_incomplete_close + 1))
+        if [ "$dry_run" != "true" ]; then
+          rm -f "$f"
+          rw_log_event "reconcile" "$id" "" "" "success" "finished_incomplete_close tombstone_ts=$tombstone_ts"
+        fi
+        continue
+      fi
+    fi
+
+    printf '%s\n' "$id" >>"$desired_ids_file"
+  done
+fi
+
+desired_count="$(wc -l <"$desired_ids_file" | tr -d ' ')"
+
+# --- Orphan disposal: worker-registered endpoints absent from desired set -
+closed=0
+worker_count="$(jq '.workers | length' "$RW_CONFIG_FILE" 2>/dev/null || echo 0)"
+i=0
+while [ "$i" -lt "$worker_count" ]; do
+  worker_alias="$(jq -r ".workers[$i].alias" "$RW_CONFIG_FILE")"
+  i=$((i + 1))
+  [ -n "$worker_alias" ] || continue
+
+  remote_sessions="$(rw_ssh_batch "$worker_alias" "$(rw_ssh_status_timeout)" \
+    "tmux list-sessions -F '#{session_name}' 2>/dev/null" 2>/dev/null || true)"
+  [ -n "$remote_sessions" ] || continue # unreachable/no server -- zero candidates, never "everything is orphaned"
+
+  while IFS= read -r session_name; do
+    [ -n "$session_name" ] || continue
+    case "$session_name" in
+      "rw-${machine_short}-"*) : ;;
+      *) continue ;; # not our namespace -- invisible to reconciliation
+    esac
+    id="${session_name#"rw-${machine_short}-"}"
+    [ -n "$id" ] || continue
+
+    if grep -Fqx "$id" "$desired_ids_file" 2>/dev/null; then
+      continue # still desired -- leave it alone
+    fi
+
+    printf '%s\n' "$id" >>"$orphan_ids_file"
+    if [ "$dry_run" != "true" ]; then
+      # worker_override=$worker_alias: a pure remote orphan has no local
+      # registry entry to read the worker alias back from (that absence is
+      # exactly what makes it orphaned) -- we already know it from the ssh
+      # listing loop above, so pass it through explicitly.
+      rw_close_endpoint_core "$id" "reconcile:orphan" "$worker_alias"
+    fi
+    closed=$((closed + 1))
+  done <<<"$remote_sessions"
+done
+
+duration_ms="$(rw_elapsed_ms "$start_ts")"
+
+if [ "$dry_run" = "true" ]; then
+  orphan_ids="$(paste -sd, "$orphan_ids_file" 2>/dev/null)"
+  [ -n "$orphan_ids" ] || orphan_ids="none"
+  echo "rw reconcile: dry-run desired=$desired_count would_finish_incomplete_close=$finished_incomplete_close would_close_orphans=$closed ids=$orphan_ids"
+else
+  rw_log_event "reconcile" "" "" "$duration_ms" "success" "desired=$desired_count finished_incomplete_close=$finished_incomplete_close closed=$closed machine=$machine_id"
+  echo "rw reconcile: desired=$desired_count finished_incomplete_close=$finished_incomplete_close closed=$closed"
+fi

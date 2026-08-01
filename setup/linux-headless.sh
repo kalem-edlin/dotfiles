@@ -1,9 +1,40 @@
 #!/usr/bin/env bash
+#
+# setup/linux-headless.sh — Linux orchestration for `make setup-headless`
+# (Linux branch). Adopts the shared install layer in setup/lib.sh instead of
+# maintaining its own third copy of the stow/TPM/rw logic, and stops
+# converting required failures into warnings. See
+# docs/tasks/headless-install.md, especially "3. Fix the Linux first-run
+# environment boundary", "5. Make package and postflight validation
+# authoritative", "Complete Linux tool parity", "Define the supported Linux
+# platform boundary", "Handle minimal VPS locale behavior", and "Unify the
+# shared local and headless setup contract".
+#
+# `make setup-linux-headless` runs this script and THEN gates on
+# `setup/headless-doctor.sh` (exit-propagating) — this script no longer needs
+# to be the final validator, but it must never print its own success banner
+# after a required step failed, and its own exit code must reflect reality.
 
 set -euo pipefail
 
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SETUP_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+
+# shellcheck source=setup/lib.sh
+. "$DOTFILES_DIR/setup/lib.sh"
+
+# ~/.local/bin holds `claude` (installed by misc-headless.sh below), `rw`
+# (linked by install_headless_dotfiles below via lib.sh's link_rw), and the
+# worktree-slot/worktree-claim entrypoints the `worktrees` package stows
+# later in this same script. Put it on PATH now so every later step in THIS
+# process — verify_commands in particular — can resolve them without
+# depending on a login shell having sourced zsh/.zshenv first. See
+# docs/tasks/headless-install.md, "2. Fix noninteractive PATH on both
+# platforms".
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
 
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   SUDO=()
@@ -18,6 +49,45 @@ fi
 run_sudo() {
   "${SUDO[@]}" "$@"
 }
+
+# ---------------------------------------------------------------------------
+# Platform / init-system boundary
+# ---------------------------------------------------------------------------
+
+# v1 supports only systemd-based Linux workers: the durability timer
+# (install_tmux_resurrect_save_timer below) requires a working `systemd
+# --user` instance plus linger. Fail EARLY and clearly — before installing
+# any package — rather than let an Alpine/OpenRC host or a userless
+# container reach package installation and only discover the durability gap
+# at the very end. apk stays in the package-manager mapping below for a
+# possible future non-systemd implementation, but this script does not
+# pretend to support it today. See docs/tasks/headless-install.md, "Define
+# the supported Linux platform boundary".
+check_systemd_support() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "Error: systemctl not found." >&2
+    echo "This installer supports only systemd-based Linux distributions (v1 boundary)." >&2
+    echo "Alpine/OpenRC and other non-systemd init systems are out of contract." >&2
+    echo "See docs/tasks/headless-install.md, 'Define the supported Linux platform boundary'." >&2
+    exit 1
+  fi
+
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "Error: 'systemctl --user show-environment' could not connect to a systemd user instance." >&2
+    echo "This usually means no systemd --user manager is running for this account (e.g. a" >&2
+    echo "container without a real login session, or an account that has never completed a" >&2
+    echo "full PAM login session)." >&2
+    echo "This installer requires a working systemd --user instance; unsupported init/user-service" >&2
+    echo "environments are out of contract for v1. Try logging in via a real interactive SSH" >&2
+    echo "session (not 'su'/'docker exec' without a session), or have an already-privileged" >&2
+    echo "session run: loginctl enable-linger \"$SETUP_USER\"" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Package installation
+# ---------------------------------------------------------------------------
 
 install_one() {
   local package="$1"
@@ -41,14 +111,48 @@ install_one() {
   esac
 }
 
-install_packages() {
+# install_required_packages <package> ... — every failure is collected and
+# reported together, then the function returns nonzero. Called as a plain
+# statement (not inside an `if`), so `set -e` aborts the script immediately
+# afterward — a required package failure is fatal, not a warning. See
+# docs/tasks/headless-install.md, "5. Make package and postflight validation
+# authoritative".
+install_required_packages() {
+  local package
+  local failed=()
+
+  for package in "$@"; do
+    if install_one "$package"; then
+      echo "  ok $package (required)"
+    else
+      echo "  FAILED $package (required)"
+      failed+=("$package")
+    fi
+  done
+
+  if [[ "${#failed[@]}" -gt 0 ]]; then
+    echo "" >&2
+    echo "ERROR: required package(s) failed to install: ${failed[*]}" >&2
+    echo "These are part of the worker contract (docs/tasks/headless-install.md," >&2
+    echo "'Required worker contract'); aborting rather than claiming success." >&2
+    return 1
+  fi
+}
+
+# install_optional_packages <package> ... — failures are warnings only, and
+# every install attempt is explicitly labeled "(optional)" in output so a
+# reader never has to guess whether a given package was part of the
+# contract. See docs/tasks/headless-install.md, "Complete Linux tool
+# parity", third bullet ("Keep guarded conveniences ... optional unless
+# promoted into the formal worker contract").
+install_optional_packages() {
   local package
 
   for package in "$@"; do
     if install_one "$package"; then
-      echo "  ok $package"
+      echo "  ok $package (optional)"
     else
-      echo "  warn: could not install $package"
+      echo "  warn: could not install optional package: $package"
     fi
   done
 }
@@ -76,12 +180,16 @@ prepare_package_manager() {
       run_sudo apt-get update
       ;;
     dnf)
+      # Best-effort: a stale/unreachable metadata cache here does not doom
+      # the install — install_required_packages below will surface any real
+      # per-package failure explicitly and fatally.
       run_sudo dnf makecache --refresh || true
       ;;
     pacman)
       run_sudo pacman -Sy --noconfirm
       ;;
     zypper)
+      # Best-effort, same reasoning as dnf above.
       run_sudo zypper --non-interactive refresh || true
       ;;
     apk)
@@ -93,79 +201,126 @@ prepare_package_manager() {
 install_linux_packages() {
   echo "Installing Linux headless packages with $PKG_MANAGER..."
 
+  local required=()
+  local optional=()
+
+  # REQUIRED: the contract commands from docs/tasks/headless-install.md,
+  # "Required worker contract" (zsh, git, git-lfs, stow, tmux, jq, rsync,
+  # tar, nvim, an ssh client) plus the minimal build toolchain genuinely
+  # needed for npm packages with native addons installed by setup/node.sh
+  # (make/gcc/g++/pkg-config or the distro's build-essentials equivalent).
+  # OPTIONAL: everything else — conveniences (ripgrep, fd, bat, fzf, tree,
+  # btop, zoxide, lsof, ctags, ...), the pyenv/Python build-dependency
+  # headers (python.sh is not part of the required command contract), and
+  # git-delta (see the loud warning below).
   case "$PKG_MANAGER" in
     apt)
-      install_packages \
-        bash zsh git git-lfs stow curl ca-certificates openssh-client \
-        tmux neovim make gcc g++ build-essential pkg-config cmake ninja-build \
-        unzip tar xz-utils ripgrep fd-find bat fzf jq tree btop zoxide \
-        python3 python3-pip python3-venv pipx universal-ctags gnupg \
-        libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
-        llvm libncursesw5-dev tk-dev libxml2-dev libxmlsec1-dev libffi-dev \
-        liblzma-dev postgresql-client libpq-dev
-
-      if [[ "${INSTALL_DOCKER:-1}" = "1" ]]; then
-        install_packages docker.io docker-compose-plugin
-      fi
+      required=(
+        bash zsh git git-lfs stow curl ca-certificates openssh-client
+        tmux neovim jq rsync tar make gcc g++ pkg-config
+      )
+      optional=(
+        cmake ninja-build unzip xz-utils ripgrep fd-find bat fzf tree btop
+        zoxide lsof python3 python3-pip python3-venv pipx universal-ctags
+        gnupg libssl-dev zlib1g-dev libbz2-dev libreadline-dev
+        libsqlite3-dev llvm libncursesw5-dev tk-dev libxml2-dev
+        libxmlsec1-dev libffi-dev liblzma-dev postgresql-client libpq-dev
+        git-delta
+      )
       ;;
     dnf)
-      install_packages \
-        bash zsh git git-lfs stow curl ca-certificates openssh-clients \
-        tmux neovim make gcc gcc-c++ pkgconf-pkg-config cmake ninja-build \
-        unzip tar xz ripgrep fd-find bat fzf jq tree btop zoxide \
-        python3 python3-pip pipx ctags \
-        openssl-devel zlib-devel bzip2 bzip2-devel readline-devel sqlite \
-        sqlite-devel xz-devel tk-devel libffi-devel postgresql postgresql-devel
-
-      if [[ "${INSTALL_DOCKER:-1}" = "1" ]]; then
-        install_packages docker docker-compose-plugin
-      fi
+      required=(
+        bash zsh git git-lfs stow curl ca-certificates openssh-clients
+        tmux neovim jq rsync tar make gcc gcc-c++ pkgconf-pkg-config
+      )
+      optional=(
+        cmake ninja-build unzip xz ripgrep fd-find bat fzf tree btop zoxide
+        lsof python3 python3-pip pipx ctags openssl-devel zlib-devel bzip2
+        bzip2-devel readline-devel sqlite sqlite-devel xz-devel tk-devel
+        libffi-devel postgresql postgresql-devel git-delta
+      )
       ;;
     pacman)
-      install_packages \
-        bash zsh git git-lfs stow curl ca-certificates openssh \
-        tmux neovim base-devel pkgconf cmake ninja unzip tar xz \
-        ripgrep fd bat fzf jq tree btop zoxide \
-        python python-pip python-pipx ctags \
-        openssl zlib bzip2 readline sqlite tk libffi postgresql-libs
-
-      if [[ "${INSTALL_DOCKER:-1}" = "1" ]]; then
-        install_packages docker docker-compose
-      fi
+      required=(
+        bash zsh git git-lfs stow curl ca-certificates openssh
+        tmux neovim jq rsync tar base-devel pkgconf
+      )
+      optional=(
+        cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
+        python python-pip python-pipx ctags openssl zlib bzip2 readline
+        sqlite tk libffi postgresql-libs git-delta
+      )
       ;;
     zypper)
-      install_packages \
-        bash zsh git git-lfs stow curl ca-certificates openssh \
-        tmux neovim make gcc gcc-c++ pkg-config cmake ninja unzip tar xz \
-        ripgrep fd bat fzf jq tree btop zoxide \
-        python3 python3-pip python3-venv pipx ctags \
-        libopenssl-devel zlib-devel libbz2-devel readline-devel sqlite3-devel \
-        xz-devel tk-devel libffi-devel postgresql-devel
-
-      if [[ "${INSTALL_DOCKER:-1}" = "1" ]]; then
-        install_packages docker docker-compose
-      fi
+      required=(
+        bash zsh git git-lfs stow curl ca-certificates openssh
+        tmux neovim jq rsync tar make gcc gcc-c++ pkg-config
+      )
+      optional=(
+        cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
+        python3 python3-pip python3-venv pipx ctags libopenssl-devel
+        zlib-devel libbz2-devel readline-devel sqlite3-devel xz-devel
+        tk-devel libffi-devel postgresql-devel git-delta
+      )
       ;;
     apk)
-      install_packages \
-        bash zsh git git-lfs stow curl ca-certificates openssh-client \
-        tmux neovim make gcc g++ build-base pkgconf cmake ninja unzip tar xz \
-        ripgrep fd bat fzf jq tree btop zoxide \
-        python3 py3-pip py3-pipx ctags \
-        openssl-dev zlib-dev bzip2-dev readline-dev sqlite-dev xz-dev \
-        tk-dev libffi-dev postgresql-dev
-
-      if [[ "${INSTALL_DOCKER:-1}" = "1" ]]; then
-        install_packages docker docker-cli-compose
-      fi
+      # Kept for a possible future non-systemd durability implementation —
+      # check_systemd_support above already aborts before this function can
+      # be reached on a typical (non-systemd) Alpine host.
+      required=(
+        bash zsh git git-lfs stow curl ca-certificates openssh-client
+        tmux neovim jq rsync tar make gcc g++ build-base pkgconf
+      )
+      optional=(
+        cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
+        python3 py3-pip py3-pipx ctags openssl-dev zlib-dev bzip2-dev
+        readline-dev sqlite-dev xz-dev tk-dev libffi-dev postgresql-dev
+        delta
+      )
       ;;
   esac
 
+  install_required_packages "${required[@]}"
+  install_optional_packages "${optional[@]}"
+
+  if [[ "${INSTALL_DOCKER:-1}" = "1" ]]; then
+    case "$PKG_MANAGER" in
+      apt) install_optional_packages docker.io docker-compose-plugin ;;
+      dnf) install_optional_packages docker docker-compose-plugin ;;
+      pacman) install_optional_packages docker docker-compose ;;
+      zypper) install_optional_packages docker docker-compose ;;
+      apk) install_optional_packages docker docker-cli-compose ;;
+    esac
+  fi
+
+  # git-lfs is required above, so if this fails it is a real regression in
+  # the worker contract, not an optional nicety — no `|| true` here.
   if command -v git-lfs >/dev/null 2>&1; then
-    git lfs install --skip-repo || true
+    git lfs install --skip-repo
+  fi
+
+  # git/.gitconfig unconditionally sets `pager = delta`. Where the distro's
+  # package manager genuinely lacks git-delta (e.g. older apt releases
+  # without the git-delta package), it stays optional and this prints a
+  # loud, impossible-to-miss warning instead of silently leaving `git log`/
+  # `git diff` broken. See docs/tasks/headless-install.md, "Complete Linux
+  # tool parity where configurations depend on it".
+  if command -v delta >/dev/null 2>&1; then
+    echo "  ok git-delta (delta) available: $(command -v delta)"
+  else
+    echo ""
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "! WARNING: git-delta (delta) is not installed on this distribution.     !"
+    echo "! git/.gitconfig unconditionally sets 'pager = delta' -- git log/diff   !"
+    echo "! will fail (or fall back badly) until delta is installed manually.     !"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo ""
   fi
 
   if [[ "${INSTALL_DOCKER:-1}" = "1" ]] && command -v docker >/dev/null 2>&1; then
+    # Docker is not part of the required worker contract (headless-doctor
+    # does not check it) — enabling the service and adding the group are
+    # both best-effort conveniences.
     if command -v systemctl >/dev/null 2>&1; then
       run_sudo systemctl enable --now docker 2>/dev/null || true
     fi
@@ -176,9 +331,90 @@ install_linux_packages() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Locale
+# ---------------------------------------------------------------------------
+
+# zsh/.zshrc assumes en_US.UTF-8. Minimal VPS images frequently do not have
+# it generated. Best-effort only: generate it cheaply where that's a single
+# well-known step (Debian/Ubuntu's /etc/locale.gen), otherwise just report
+# the available UTF-8 fallback. Never fatal — headless-doctor reports locale
+# as an optional/WARN check, not a required one. See
+# docs/tasks/headless-install.md, "Handle minimal VPS locale behavior".
+locale_is_available() {
+  local target_normalized="enusutf8"
+  local available normalized
+
+  for available in $(locale -a 2>/dev/null); do
+    normalized="$(printf '%s' "$available" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+    if [[ "$normalized" == "$target_normalized" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_locale() {
+  echo "Checking locale availability (en_US.UTF-8)..."
+
+  if ! command -v locale >/dev/null 2>&1; then
+    echo "  warn: 'locale' command not available; skipping locale check."
+    return 0
+  fi
+
+  if locale_is_available; then
+    echo "  ok en_US.UTF-8 (or equivalent) is available"
+    return 0
+  fi
+
+  echo "  en_US.UTF-8 not found in 'locale -a'"
+
+  if [[ "$PKG_MANAGER" == "apt" ]] && [[ -f /etc/locale.gen ]]; then
+    echo "  attempting to generate en_US.UTF-8 via /etc/locale.gen (Debian/Ubuntu)..."
+    if run_sudo sed -i 's/^# *\(en_US\.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+      && run_sudo locale-gen >/dev/null; then
+      echo "  -> ran locale-gen; re-checking..."
+    else
+      echo "  warn: locale-gen attempt failed; continuing with an available fallback."
+    fi
+  else
+    echo "  skipping best-effort generation on $PKG_MANAGER (no cheap single-step path here)."
+  fi
+
+  if locale_is_available; then
+    echo "  ok en_US.UTF-8 is now available after locale-gen"
+    return 0
+  fi
+
+  local chosen=""
+  for available in $(locale -a 2>/dev/null); do
+    case "$available" in
+      *[Uu][Tt][Ff]8* | *[Uu][Tt][Ff]-8*)
+        chosen="$available"
+        break
+        ;;
+    esac
+  done
+
+  if [[ -n "$chosen" ]]; then
+    echo "  NOTICE: en_US.UTF-8 is unavailable. Shells will fall back to an available"
+    echo "  UTF-8 locale ($chosen). headless-doctor also reports this."
+  else
+    echo "  NOTICE: en_US.UTF-8 is unavailable and no UTF-8 locale was found via 'locale -a'."
+    echo "  Shells may run without a UTF-8 locale until one is installed manually."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Tailscale
+# ---------------------------------------------------------------------------
+
 install_tailscale() {
-  if [[ "${INSTALL_TAILSCALE:-0}" != "1" ]]; then
-    echo "Skipping Tailscale. Set INSTALL_TAILSCALE=1 to install it."
+  # Tailscale is part of the ordinary worker connectivity contract. Allow an
+  # explicit opt-out for deliberately public/LAN-only workers, but install it
+  # by default on every Linux headless host.
+  if [[ "${INSTALL_TAILSCALE:-1}" != "1" ]]; then
+    echo "Skipping Tailscale because INSTALL_TAILSCALE=${INSTALL_TAILSCALE}."
     return
   fi
 
@@ -189,7 +425,18 @@ install_tailscale() {
 
   echo "Installing Tailscale..."
   curl -fsSL https://tailscale.com/install.sh | sh
+
+  if command -v tailscale >/dev/null 2>&1; then
+    echo "Tailscale installed. Authenticate this worker with: sudo tailscale up"
+  else
+    echo "Error: Tailscale installation completed but the tailscale command is unavailable."
+    return 1
+  fi
 }
+
+# ---------------------------------------------------------------------------
+# Stripe CLI (optional — not part of the required worker contract)
+# ---------------------------------------------------------------------------
 
 install_stripe_cli_with_npm() {
   if ! command -v npm >/dev/null 2>&1; then
@@ -238,130 +485,226 @@ REPO
   esac
 }
 
-link_config_package() {
-  local package="$1"
-  local target="$HOME/.config/$package"
+# ---------------------------------------------------------------------------
+# Dotfiles (now a thin wrapper over setup/lib.sh — see the Makefile's
+# `install`/`install-headless` targets for the equivalent local pattern)
+# ---------------------------------------------------------------------------
 
-  [[ -d "$DOTFILES_DIR/$package" ]] || return 0
-
-  mkdir -p "$HOME/.config"
-
-  if [[ -L "$target" ]]; then
-    case "$(readlink "$target")" in
-      "$DOTFILES_DIR"*) echo "  $package already linked" ;;
-      *) echo "  replacing stale $package symlink"; rm "$target"; ln -s "$DOTFILES_DIR/$package" "$target" ;;
-    esac
-  elif [[ -e "$target" ]]; then
-    echo "  $target exists; skipping"
-  else
-    echo "  linking $package -> $target"
-    ln -s "$DOTFILES_DIR/$package" "$target"
-  fi
-}
-
-backup_stow_conflicts() {
-  local package="$1"
-  local file relpath target
-
-  [[ -d "$DOTFILES_DIR/$package" ]] || return 0
-
-  while IFS= read -r file; do
-    relpath="${file#"$DOTFILES_DIR/$package/"}"
-    target="$HOME/$relpath"
-
-    if [[ -L "$target" ]]; then
-      case "$(readlink "$target")" in
-        "$DOTFILES_DIR"*) ;;
-        *) echo "  removing stale symlink $relpath"; rm "$target" ;;
-      esac
-    elif [[ -e "$target" ]]; then
-      echo "  backing up $relpath"
-      rm -f "$target.bak" 2>/dev/null || true
-      mv "$target" "$target.bak"
-    fi
-  done < <(find "$DOTFILES_DIR/$package" -type f 2>/dev/null)
-}
-
-install_tpm() {
-  if [[ ! -d "$HOME/.config/tmux/plugins/tpm" ]]; then
-    echo "  installing TPM"
-    git clone https://github.com/tmux-plugins/tpm "$HOME/.config/tmux/plugins/tpm"
-  else
-    echo "  TPM already installed"
-  fi
-
-  if [[ -d "$HOME/.config/tmux/plugins/tpm" ]]; then
-    echo "  installing tmux plugins"
-    TMUX_PLUGIN_MANAGER_PATH="$HOME/.config/tmux/plugins/" "$HOME/.config/tmux/plugins/tpm/bin/install_plugins" || true
-  fi
-
-  if [[ ! -d "$HOME/.config/tmux/plugins/tmux-sessionx" ]]; then
-    echo "  installing tmux-sessionx pinned commit"
-    git clone https://github.com/omerxx/tmux-sessionx "$HOME/.config/tmux/plugins/tmux-sessionx"
-    git -C "$HOME/.config/tmux/plugins/tmux-sessionx" checkout 3a1911e
-  fi
-}
-
+# Same package set as the Makefile's HEADLESS_STOW_PACKAGES /
+# HEADLESS_CONFIG_PACKAGES, kept in sync deliberately (see
+# docs/tasks/headless-install.md, "Unify the shared local and headless setup
+# contract").
 install_headless_dotfiles() {
-  local package
-
   echo "Installing headless dotfiles..."
+
   link_config_package nvim
   link_config_package tmux
 
-  install_tpm
+  # Requires ~/.config/tmux to already be linked (just above).
+  install_tmux_plugins
 
-  mkdir -p "$HOME/.ssh"
-  chmod 700 "$HOME/.ssh"
+  ensure_ssh_dirs
 
-  for package in claude git pi ssh vim zsh; do
-    backup_stow_conflicts "$package"
-  done
+  backup_conflicts claude codex git pi ssh vim worktrees zsh
+  stow_packages claude codex git pi ssh vim worktrees zsh
 
-  for package in claude git pi ssh vim zsh; do
-    if [[ -d "$DOTFILES_DIR/$package" ]]; then
-      echo "  stowing $package"
-      stow --no-folding --restow -d "$DOTFILES_DIR" -t "$HOME" "$package"
-    fi
-  done
+  link_rw
 
+  # Cosmetic permission tightening on a file the required stow_packages call
+  # above just created (as a symlink into this repo); stow's own fatal-on-
+  # error behavior is the actual gate here, this chmod is idempotent
+  # belt-and-suspenders and never the sole guard against a wide-open key.
   chmod 600 "$DOTFILES_DIR/ssh/.ssh/config" 2>/dev/null || true
 }
+
+# ---------------------------------------------------------------------------
+# tmux-resurrect save timer (systemd --user)
+# ---------------------------------------------------------------------------
+
+install_tmux_resurrect_save_timer() {
+  # systemd --user timer that invokes tmux-resurrect's save entrypoint
+  # directly, independent of any attached tmux client. tmux-continuum's
+  # autosave is a status-line `#()` interpolation that only fires while a
+  # client renders it — a fully detached worker tmux server never
+  # autosaves otherwise. See setup/templates/tmux-resurrect-save.sh and
+  # docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
+  # durability".
+  echo "Configuring tmux-resurrect save timer (systemd --user)..."
+
+  # check_systemd_support already ran (and would have exited) before any
+  # installation happened, so systemctl is guaranteed present here. Kept as
+  # a defensive, fatal (not skip) check rather than trusting that nothing
+  # upstream changed the environment mid-run.
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "ERROR: systemctl not found — this should have been caught by check_systemd_support." >&2
+    exit 1
+  fi
+
+  local templates_dir="$DOTFILES_DIR/setup/templates"
+  local wrapper_script="$templates_dir/tmux-resurrect-save.sh"
+  local unit_dir="$HOME/.config/systemd/user"
+  local service_dest="$unit_dir/tmux-resurrect-save.service"
+  local timer_dest="$unit_dir/tmux-resurrect-save.timer"
+
+  chmod +x "$wrapper_script" 2>/dev/null || true
+  mkdir -p "$unit_dir"
+
+  # systemd --user's default environment may not include the directory tmux
+  # lives in on PATH, so a bare `tmux` lookup that works fine in this
+  # provisioning shell can silently fail under the timer. Resolve the
+  # absolute path now and bake it into the unit as
+  # TMUX_RESURRECT_SAVE_TMUX_BIN so the wrapper never depends on systemd's
+  # PATH — mirrors the same fix for launchd on macOS (setup/misc-headless.sh,
+  # setup/templates/com.kalem.tmux-resurrect-save.plist).
+  local tmux_bin_resolved
+  tmux_bin_resolved="$(command -v tmux 2>/dev/null || true)"
+  if [ -z "$tmux_bin_resolved" ]; then
+    echo "ERROR: tmux not found on PATH — cannot configure the tmux-resurrect save timer." >&2
+    exit 1
+  fi
+
+  sed \
+    -e "s#__WRAPPER_PATH__#$wrapper_script#g" \
+    -e "s#__TMUX_BIN__#$tmux_bin_resolved#g" \
+    "$templates_dir/tmux-resurrect-save.service" >"$service_dest.tmp"
+  mv "$service_dest.tmp" "$service_dest"
+  cp "$templates_dir/tmux-resurrect-save.timer" "$timer_dest"
+
+  # A headless box has no login session, so systemd --user would normally
+  # stop (and this timer with it) once the provisioning SSH session ends.
+  # Enable linger so the user systemd instance keeps running independent of
+  # any login. Missed runs while the server/tmux is down are meaningless
+  # (Persistent=no in the timer unit), so linger is what actually keeps the
+  # timer alive long-term, not catch-up semantics. Verified below and fatal
+  # if it does not end up "yes" — a timer that cannot survive logout is not
+  # a real durability net. See docs/tasks/headless-install.md, "Define the
+  # supported Linux platform boundary".
+  if loginctl show-user "$SETUP_USER" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
+    echo "  ok loginctl linger already enabled for $SETUP_USER"
+  else
+    echo "  enabling loginctl linger for $SETUP_USER"
+    run_sudo loginctl enable-linger "$SETUP_USER"
+  fi
+
+  if ! loginctl show-user "$SETUP_USER" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
+    echo "ERROR: loginctl show-user $SETUP_USER -p Linger did not report Linger=yes after enable-linger." >&2
+    echo "The save timer would not survive logout without linger — this is fatal for the" >&2
+    echo "worker durability contract, not a warning." >&2
+    exit 1
+  fi
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now tmux-resurrect-save.timer
+
+  if systemctl --user is-active --quiet tmux-resurrect-save.timer; then
+    echo "  ok tmux-resurrect-save.timer active (OnUnitActiveSec=5min)"
+  else
+    echo "ERROR: tmux-resurrect-save.timer is NOT active — check: systemctl --user status tmux-resurrect-save.timer" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Internal fast-fail verification (headless-doctor is still the authoritative
+# gate at the Make level — see the Makefile's `setup-linux-headless` target —
+# but this script's own exit code must independently reflect reality too).
+# ---------------------------------------------------------------------------
 
 verify_commands() {
   local command_name
   local missing=0
+  local required_commands=(
+    zsh git git-lfs stow tmux nvim jq curl rsync tar
+    node npm pi codex claude ob
+  )
 
-  for command_name in zsh git stow tmux nvim curl stripe; do
+  if [[ "${INSTALL_TAILSCALE:-1}" = "1" ]]; then
+    required_commands+=(tailscale)
+  fi
+
+  for command_name in "${required_commands[@]}"; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
-      echo "warn: expected command not found after setup: $command_name"
+      echo "ERROR: required command not found after setup: $command_name" >&2
       missing=1
     fi
   done
 
+  # Stripe is intentionally NOT in required_commands above — it is not part
+  # of the required worker contract (headless-doctor treats it as
+  # optional/WARN too).
+  if command -v stripe >/dev/null 2>&1; then
+    echo "  ok stripe (optional): $(command -v stripe)"
+  else
+    echo "  note: stripe CLI not found (optional; not part of the required worker contract)"
+  fi
+
+  if ! git lfs env >/dev/null 2>&1; then
+    echo "ERROR: 'git lfs env' failed." >&2
+    missing=1
+  fi
+
   return "$missing"
 }
+
+# ---------------------------------------------------------------------------
+# Main sequence
+# ---------------------------------------------------------------------------
+#
+# Order: platform/init-system boundary (fatal, before any install) ->
+# packages (required/optional split, fatal on required failure) -> locale
+# (best-effort, never fatal) -> Tailscale (required unless opted out) ->
+# misc-headless.sh (ssh key, oh-my-zsh, Claude Code, gh) -> node.sh (installs
+# fnm+Node as a CHILD process) -> activate_fnm IN THIS PROCESS (fixes the
+# child-process PATH boundary from docs/tasks/headless-install.md, "3. Fix
+# the Linux first-run environment boundary") -> Stripe CLI (npm fallback now
+# has a working, activated fnm) -> python.sh / neovim.sh / obsidian.sh
+# (obsidian.sh activates its own fnm too, so it works standalone) ->
+# dotfiles via lib.sh (stow, TPM, rw, ssh dirs) -> systemd save timer + fatal
+# linger verification -> internal verify_commands -> success banner (only
+# reachable if everything above succeeded).
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "Error: setup/linux-headless.sh is only for Linux."
   exit 1
 fi
 
+check_systemd_support
+
 detect_package_manager
 prepare_package_manager
 install_linux_packages
+
+ensure_locale
+
 install_tailscale
 
 "$DOTFILES_DIR/setup/misc-headless.sh"
+
 "$DOTFILES_DIR/setup/node.sh"
-install_stripe_cli
+
+# setup/node.sh ran as a CHILD process — its fnm/Node PATH changes do not
+# return to THIS process. Activate fnm here too so every step below
+# (Stripe's npm fallback, verify_commands, dotfile/timer installation) can
+# resolve node/npm/pi/codex/ob in its OWN process, not just inside node.sh's
+# and obsidian.sh's separate child processes. Deliberately NOT `|| true`:
+# node.sh just installed fnm+Node moments ago, so failure to activate it
+# here means something is genuinely wrong and the rest of the run (which
+# needs node-installed tools) should not proceed pretending success.
+activate_fnm
+
+# Stripe is optional (see verify_commands above) — a failure here is a
+# warning, not fatal.
+install_stripe_cli || echo "warn: Stripe CLI installation failed (optional; not part of the required worker contract)."
+
 "$DOTFILES_DIR/setup/python.sh"
 "$DOTFILES_DIR/setup/neovim.sh"
 "$DOTFILES_DIR/setup/obsidian.sh"
-install_headless_dotfiles
 
-verify_commands || true
+install_headless_dotfiles
+install_tmux_resurrect_save_timer
+
+verify_commands
 
 echo ""
-echo "Linux headless setup complete."
+echo "Linux headless install phase complete — running postflight doctor next (make setup-linux-headless gates success on it)."
 echo "Open a new login shell to pick up zsh, fnm, pyenv, Docker group changes, and PATH updates."

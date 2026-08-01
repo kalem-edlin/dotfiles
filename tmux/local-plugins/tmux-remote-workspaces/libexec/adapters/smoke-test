@@ -1,0 +1,249 @@
+#!/usr/bin/env bash
+# libexec/adapters/smoke-test -- on-demand dev tool for the provider agent
+# adapters (Phase 5; see ../README.md's "Contract" and initial-plan.md's
+# "Local-first AI coding-agent handoff" / "Vendor-independent operation":
+# "Provider adapters must have smoke tests that prove a transferred
+# transcript can be resumed from the corresponding destination directory.").
+#
+# For each provider (pi, claude, codex) this runs a fully sandboxed
+# export -> install round trip against a synthetic transcript fixture and
+# asserts placement correctness:
+#   - pi:     transcript file placed under pi's own session-directory
+#             convention, and `resume-cmd` resolves to the same session.
+#   - claude: transcript lands under the DESTINATION-path-encoded projects
+#             directory (~/.claude/projects/<dest-slug>/<session-id>.jsonl).
+#   - codex:  rollout placed at a filename/date-bucket-valid path with its
+#             first line's payload.cwd rewritten to the destination path.
+#
+# Never touches the real $HOME, the live tmux server, ssh, or any
+# content-engine-trees path: every provider's local storage root
+# ($HOME/.claude, $HOME/.codex, $HOME/.pi) is resolved under a fresh
+# per-provider sandbox $HOME. CODEX_HOME is also sandboxed alongside HOME
+# for parity/documentation with the live sandboxed smoke test described in
+# the codex adapter's own header comment -- this script's export/install
+# round trip never shells out to a real provider CLI, so only $HOME is
+# actually load-bearing here (the codex adapter resolves session storage
+# from $HOME, not $CODEX_HOME).
+#
+# Not wired into tmux anywhere -- this is an on-demand dev tool. Run it
+# directly:
+#   libexec/adapters/smoke-test
+#
+# What this does NOT exercise (needs a real TTY): actually completing an
+# interactive resume (`claude --resume ...`, `pi --session ...`,
+# `codex resume ...`) -- authenticating, rendering, and continuing a real
+# conversation. This script only proves the exported/installed transcript is
+# placed where each provider's resume mechanism looks, per the verified
+# facts in ../README.md and each adapter's own header comment. Run one real
+# interactive resume by hand before trusting a live handoff end-to-end.
+
+set -uo pipefail
+
+ADAPTERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PASS=0
+FAIL=0
+
+ok() {
+  printf 'ok   %s\n' "$1"
+  PASS=$((PASS + 1))
+}
+bad() {
+  printf 'FAIL %s\n' "$1"
+  FAIL=$((FAIL + 1))
+}
+
+command -v jq >/dev/null 2>&1 || {
+  echo "smoke-test: jq is required (adapters never install anything themselves)." >&2
+  exit 1
+}
+
+sandbox_dir() { mktemp -d "${TMPDIR:-/tmp}/rw-adapter-smoke.XXXXXX"; }
+
+# ---------------------------------------------------------------------------
+# pi -- simplest adapter: arbitrary-path/id resume, no destination-encoding.
+# ---------------------------------------------------------------------------
+smoke_pi() {
+  local sandbox src_project dest_project session_id
+  sandbox="$(sandbox_dir)"
+  src_project="/tmp/rw-smoke-pi-source"
+  dest_project="/tmp/rw-smoke-pi-dest"
+  session_id="11111111-1111-1111-1111-111111111111"
+
+  # pi's own slug: "-" + (path + "/" with every "/" -> "-") + "-" (see
+  # ../pi's pi_slug() header comment -- duplicated here deliberately so this
+  # test asserts against the documented convention, not by calling into the
+  # adapter's private function).
+  local src_mid src_slug src_dir
+  src_mid="$(printf '%s/' "$src_project" | tr '/' '-')"
+  src_slug="-${src_mid}-"
+  src_dir="$sandbox/.pi/agent/sessions/$src_slug"
+  mkdir -p "$src_dir"
+  {
+    printf '{"id":"%s","timestamp":"2026-07-31T00:00:00.000Z","type":"session_meta","cwd":"%s"}\n' \
+      "$session_id" "$src_project"
+    printf '{"type":"message","role":"user","content":"smoke test"}\n'
+  } >"$src_dir/${session_id}.jsonl"
+
+  local snapshot="$sandbox/snapshot"
+  if ! HOME="$sandbox" "$ADAPTERS_DIR/pi" export --session-id "$session_id" \
+    --project-path "$src_project" --out "$snapshot" >/dev/null 2>"$sandbox/export.err"; then
+    bad "pi export ($(cat "$sandbox/export.err"))"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "pi export"
+
+  if ! HOME="$sandbox" "$ADAPTERS_DIR/pi" install --snapshot "$snapshot" \
+    --dest-path "$dest_project" >/dev/null 2>"$sandbox/install.err"; then
+    bad "pi install ($(cat "$sandbox/install.err"))"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "pi install"
+
+  local dest_mid dest_slug dest_dir
+  dest_mid="$(printf '%s/' "$dest_project" | tr '/' '-')"
+  dest_slug="-${dest_mid}-"
+  dest_dir="$sandbox/.pi/agent/sessions/$dest_slug"
+  if find "$dest_dir" -maxdepth 1 -type f -name '*.jsonl' 2>/dev/null | grep -q .; then
+    ok "pi: transcript file placed under $dest_dir"
+  else
+    bad "pi: no transcript file found under $dest_dir"
+  fi
+
+  local resume_cmd resume_status=0
+  resume_cmd="$(HOME="$sandbox" "$ADAPTERS_DIR/pi" resume-cmd --dest-path "$dest_project" \
+    --session-id "$session_id" 2>"$sandbox/resume.err")" || resume_status=$?
+  if [ "$resume_status" -ne 0 ]; then
+    bad "pi resume-cmd ($(cat "$sandbox/resume.err"))"
+  else
+    case "$resume_cmd" in
+      *"$session_id"*) ok "pi: resume-cmd resolves the session by id/path -- points at it ($resume_cmd)" ;;
+      *) bad "pi: resume-cmd did not reference the session id: $resume_cmd" ;;
+    esac
+  fi
+
+  rm -rf "$sandbox"
+}
+
+# ---------------------------------------------------------------------------
+# claude -- transcript placement encodes the DESTINATION project path.
+# ---------------------------------------------------------------------------
+smoke_claude() {
+  local sandbox src_project dest_project session_id
+  sandbox="$(sandbox_dir)"
+  src_project="/tmp/rw-smoke-claude-source"
+  dest_project="/tmp/rw-smoke-claude-dest"
+  session_id="22222222-2222-2222-2222-222222222222"
+
+  # Claude's own slug: every "/" -> "-" (see ../claude's claude_slug()).
+  local src_slug src_dir
+  src_slug="$(printf '%s' "$src_project" | tr '/' '-')"
+  src_dir="$sandbox/.claude/projects/$src_slug"
+  mkdir -p "$src_dir"
+  printf '{"type":"summary","summary":"smoke test"}\n' >"$src_dir/${session_id}.jsonl"
+
+  local snapshot="$sandbox/snapshot"
+  if ! HOME="$sandbox" "$ADAPTERS_DIR/claude" export --session-id "$session_id" \
+    --project-path "$src_project" --out "$snapshot" >/dev/null 2>"$sandbox/export.err"; then
+    bad "claude export ($(cat "$sandbox/export.err"))"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "claude export"
+
+  if ! HOME="$sandbox" "$ADAPTERS_DIR/claude" install --snapshot "$snapshot" \
+    --dest-path "$dest_project" >/dev/null 2>"$sandbox/install.err"; then
+    bad "claude install ($(cat "$sandbox/install.err"))"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "claude install"
+
+  local dest_slug dest_file
+  dest_slug="$(printf '%s' "$dest_project" | tr '/' '-')"
+  dest_file="$sandbox/.claude/projects/$dest_slug/${session_id}.jsonl"
+  if [ -f "$dest_file" ]; then
+    ok "claude: transcript landed under the destination-path-encoded projects dir ($dest_file)"
+  else
+    bad "claude: expected transcript at $dest_file, not found"
+  fi
+
+  rm -rf "$sandbox"
+}
+
+# ---------------------------------------------------------------------------
+# codex -- rollout placed at a filename/date-bucket-valid path with
+# payload.cwd rewritten to the destination.
+# ---------------------------------------------------------------------------
+smoke_codex() {
+  local sandbox src_project dest_project session_id rollout_name
+  sandbox="$(sandbox_dir)"
+  src_project="/tmp/rw-smoke-codex-source"
+  dest_project="/tmp/rw-smoke-codex-dest"
+  session_id="33333333-3333-3333-3333-333333333333"
+  rollout_name="rollout-2026-07-31T00-00-00-${session_id}.jsonl"
+
+  local src_dir
+  src_dir="$sandbox/.codex/sessions/2026/07/31"
+  mkdir -p "$src_dir"
+  {
+    jq -nc --arg cwd "$src_project" '{type: "session_meta", payload: {cwd: $cwd}}'
+    printf '{"type":"message","role":"user"}\n'
+  } >"$src_dir/$rollout_name"
+
+  local snapshot="$sandbox/snapshot"
+  if ! HOME="$sandbox" CODEX_HOME="$sandbox/.codex" "$ADAPTERS_DIR/codex" export \
+    --session-id "$session_id" --project-path "$src_project" --out "$snapshot" \
+    >/dev/null 2>"$sandbox/export.err"; then
+    bad "codex export ($(cat "$sandbox/export.err"))"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "codex export"
+
+  if ! HOME="$sandbox" CODEX_HOME="$sandbox/.codex" "$ADAPTERS_DIR/codex" install \
+    --snapshot "$snapshot" --dest-path "$dest_project" >/dev/null 2>"$sandbox/install.err"; then
+    bad "codex install ($(cat "$sandbox/install.err"))"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "codex install"
+
+  local dest_file="$sandbox/.codex/sessions/2026/07/31/$rollout_name"
+  if [ ! -f "$dest_file" ]; then
+    bad "codex: expected rollout at $dest_file, not found"
+    rm -rf "$sandbox"
+    return
+  fi
+  ok "codex: rollout placed at a filename/date-bucket-valid path ($dest_file)"
+
+  local rewritten_cwd
+  rewritten_cwd="$(head -n1 "$dest_file" | jq -r '.payload.cwd')"
+  if [ "$rewritten_cwd" = "$dest_project" ]; then
+    ok "codex: payload.cwd rewritten to the destination path"
+  else
+    bad "codex: payload.cwd is '$rewritten_cwd', expected '$dest_project'"
+  fi
+
+  rm -rf "$sandbox"
+}
+
+echo "== pi =="
+smoke_pi
+echo
+echo "== claude =="
+smoke_claude
+echo
+echo "== codex =="
+smoke_codex
+echo
+echo "== manual step (not exercised by this script) =="
+echo "note: none of the above completes a real interactive resume -- authentication,"
+echo "      TTY rendering, and actually continuing a real conversation are unexercised."
+echo "      Run one real 'claude --resume', 'pi --session', or 'codex resume' by hand"
+echo "      against an installed transcript before trusting a live handoff end-to-end."
+echo
+echo "smoke-test: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]

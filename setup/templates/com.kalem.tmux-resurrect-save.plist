@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent: periodic tmux-resurrect save on a headless macOS
+  worker (e.g. the Mac Mini). Runs setup/templates/tmux-resurrect-save.sh on
+  a fixed interval, independent of any attached tmux client — see
+  docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
+  durability". Continuum's own status-line autosave never fires on a fully
+  detached server; this timer is the correctness net.
+
+  This is a template: __WRAPPER_PATH__, __LOG_PATH__, and __TMUX_BIN__ are
+  substituted with absolute paths by setup/misc-headless.sh at install time
+  before the rendered plist is copied to ~/Library/LaunchAgents/. Not usable
+  as-is.
+
+  __TMUX_BIN__ (the absolute result of `command -v tmux` at setup time) is
+  injected as TMUX_RESURRECT_SAVE_TMUX_BIN below because launchd's default
+  environment does not include Homebrew's bin directory on PATH — the
+  wrapper's PATH-based `tmux` lookup would otherwise fail silently under
+  launchd even though it succeeds in an interactive/provisioning shell. See
+  docs/tasks/headless-install.md, "7. Fix macOS launchd execution".
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kalem.tmux-resurrect-save</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WRAPPER_PATH__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TMUX_RESURRECT_SAVE_TMUX_BIN</key>
+    <string>__TMUX_BIN__</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_PATH__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_PATH__</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

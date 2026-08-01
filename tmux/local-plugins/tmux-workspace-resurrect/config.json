@@ -1,0 +1,16 @@
+{
+  "autosave_interval_minutes": 5,
+  "restore_mode": "queue",
+  "capture": {
+    "shell_buffers": true,
+    "agent_sessions": true,
+    "neovim_sessions": true,
+    "treemux": true
+  },
+  "agents": [
+    "claude",
+    "codex",
+    "pi"
+  ],
+  "redact_patterns": []
+}

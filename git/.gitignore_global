@@ -1,0 +1,10 @@
+# Global excludes installed by the dotfiles git package.
+#
+# worktree-slot / worktree-claim runtime files (see worktrees/ package,
+# docs/worktree-slots.md, docs/tasks/tmux-remote-workspaces/initial-plan.md).
+# These are generated/ignored private state, never repository-owned config,
+# so they are ignored globally instead of requiring every opted-in
+# repository to add its own .gitignore entry.
+.worktree-claim
+.worktree-slot.json
+.worktree-slot.env

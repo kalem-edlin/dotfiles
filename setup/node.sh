@@ -2,27 +2,29 @@
 
 set -euo pipefail
 
-# Ensure Homebrew is in PATH (required after fresh install)
-if [[ -f /opt/homebrew/bin/brew ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [[ -f /usr/local/bin/brew ]]; then
-    eval "$(/usr/local/bin/brew shellenv)"
-fi
+DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=setup/lib.sh
+. "$DOTFILES_DIR/setup/lib.sh"
+
+# Put Homebrew/fnm on PATH if either is already present (e.g. fnm installed
+# via Brewfile on macOS). Failure here is fine and expected on a completely
+# clean Linux account — fnm genuinely isn't installed yet, that's exactly
+# what this script is about to fix below. See
+# docs/tasks/headless-install.md, "3. Fix the Linux first-run environment
+# boundary".
+activate_fnm || true
 
 # Setup fnm. On macOS this is installed by Brewfile; on Linux it may need to
 # bootstrap itself before npm globals can be installed.
 if ! command -v fnm &> /dev/null; then
     echo "fnm not found; installing fnm..."
     curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
-    export PATH="$HOME/.local/share/fnm:$PATH"
 fi
 
-if ! command -v fnm &> /dev/null; then
+if ! activate_fnm; then
     echo "Error: fnm not found after installation."
     exit 1
 fi
-
-eval "$(fnm env --use-on-cd --shell bash)"
 
 # Install latest LTS Node
 echo "Installing Node LTS..."

@@ -1,0 +1,27 @@
+# systemd user timer: fires tmux-resurrect-save.service every 5 minutes,
+# independent of any attached tmux client or login session. Requires
+# `loginctl enable-linger <user>` on a headless box so the user systemd
+# instance (and this timer) keeps running with no session logged in —
+# setup/linux-headless.sh verifies/enables this alongside installing the
+# unit pair.
+#
+# Persistent=no is intentional: a missed save because the machine or tmux
+# server was down has nothing worth catching up on — the next tmux server
+# start begins a fresh save cadence, and there is no "backlog" of state to
+# reconstruct from a stale trigger.
+#
+# This template is copied to ~/.config/systemd/user/ as-is (no
+# substitution needed — it only references the paired .service unit by
+# name).
+
+[Unit]
+Description=Periodic tmux-resurrect save timer (headless worker durability net)
+
+[Timer]
+OnUnitActiveSec=5min
+OnStartupSec=5min
+Persistent=false
+Unit=tmux-resurrect-save.service
+
+[Install]
+WantedBy=timers.target

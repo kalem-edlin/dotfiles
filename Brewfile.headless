@@ -1,4 +1,7 @@
-# Headless Brewfile — CLI tools only, no GUI apps/casks/fonts/vscode extensions
+# Headless Brewfile — CLI tools only, no GUI apps/fonts/vscode extensions.
+# Deliberate exception: the tailscale-app cask below. macOS Tailscale's
+# auth/system-extension flow works best through the app (not the bare
+# `tailscale` CLI/daemon), so it is installed even on headless workers.
 # Used by: make setup-headless
 
 # Taps

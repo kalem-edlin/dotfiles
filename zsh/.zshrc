@@ -1,5 +1,7 @@
 # Fix broken stdout (can happen if shell was exec'd with redirected fd)
-if [[ ! -t 1 ]]; then
+# Only for interactive shells with a real tty available — noninteractive SSH
+# shells (hooks, scp, remote tmux commands) must not have stdout redirected.
+if [[ -o interactive ]] && [[ ! -t 1 ]] && [[ -e /dev/tty ]]; then
   exec > /dev/tty
 fi
 
@@ -9,6 +11,12 @@ if ! infocmp "$TERM" &>/dev/null 2>&1; then
   export TERM="xterm-256color"
 fi
 stty erase '^?' 2>/dev/null
+
+# Ensure ~/.local/bin is on PATH (also set in .zshenv for noninteractive
+# shells, which never source this file; guard avoids duplicate entries here)
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
 
 # Dotfiles directory (derived from this symlinked file)
 if [[ -L ~/.zshrc ]]; then
@@ -499,3 +507,6 @@ if [ -f "$HOME/Developer/utils/google-cloud-sdk/completion.zsh.inc" ]; then . "$
 if [[ -x "/Users/kalemedlin/Developer/figma-cli/figma-cli/bin/fig-start" ]]; then
   alias fig-start='/Users/kalemedlin/Developer/figma-cli/figma-cli/bin/fig-start'
 fi
+
+# Persist each tmux pane's last submitted command and current ZLE edit buffer.
+source_if_exists "$HOME/.zsh/tmux-workspace-resurrect.zsh"

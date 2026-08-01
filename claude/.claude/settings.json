@@ -5,6 +5,33 @@
   "permissions": {
     "allow": []
   },
+  "model": "claude-fable-5[1m]",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-workspace-resurrect/scripts/record-agent-session.sh\" claude",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "wc=$(command -v worktree-claim 2>/dev/null); if [ -z \"$wc\" ]; then exit 0; fi; p=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; out=$(\"$wc\" verify-writer --path \"$p\" 2>&1); rc=$?; if [ \"$rc\" -eq 0 ] || [ \"$rc\" -eq 12 ]; then exit 0; elif [ \"$rc\" -eq 10 ] || [ \"$rc\" -eq 11 ] || [ \"$rc\" -eq 13 ]; then printf '%s\\n' \"$out\" >&2; exit 2; else exit 0; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
   "statusLine": {
     "type": "command",
     "command": "ccline"
@@ -17,6 +44,5 @@
   "tui": "default",
   "skipDangerousModePermissionPrompt": true,
   "editorMode": "vim",
-  "verbose": true,
-  "model": "claude-fable-5[1m]"
+  "verbose": true
 }

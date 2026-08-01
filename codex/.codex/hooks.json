@@ -1,0 +1,29 @@
+{
+  "description": "Record Codex session identity for tmux workspace recovery.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-workspace-resurrect/scripts/record-agent-session.sh\" codex",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"$PWD\"; wc=$(command -v worktree-claim 2>/dev/null); if [ -z \"$wc\" ]; then exit 0; fi; out=$(\"$wc\" verify-writer --path \"$p\" 2>&1); rc=$?; if [ \"$rc\" -eq 0 ] || [ \"$rc\" -eq 12 ]; then exit 0; elif [ \"$rc\" -eq 10 ] || [ \"$rc\" -eq 11 ] || [ \"$rc\" -eq 13 ]; then printf '%s\\n' \"$out\" >&2; exit 2; else exit 0; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

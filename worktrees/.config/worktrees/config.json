@@ -1,0 +1,37 @@
+{
+  "format_version": 1,
+  "port_pool_ceiling": 32768,
+  "prohibited_ports": [
+    5000,
+    7000,
+    5432,
+    [54320, 54329]
+  ],
+  "repositories": {
+    "github.com/kalem-edlin/content-engine": {
+      "repo_name": "content-engine",
+      "collection": "~/Developer/content-engine-trees",
+      "slot_capacity": 20,
+      "block_size": 100,
+      "default_branch": "main",
+      "default_tier": "warm",
+      "services": {
+        "NEXT": 3000,
+        "DASHBOARD": 3010,
+        "ENGINE": 7500,
+        "EXPO": 8081
+      },
+      "env_vars": {
+        "NEXT": "NEXT_PORT",
+        "DASHBOARD": "DASHBOARD_PORT",
+        "ENGINE": "ENGINE_PORT",
+        "EXPO": "EXPO_PORT"
+      },
+      "tiers": {
+        "light": [],
+        "warm": ["pnpm install"],
+        "heavy": ["pnpm install", "pnpm build"]
+      }
+    }
+  }
+}

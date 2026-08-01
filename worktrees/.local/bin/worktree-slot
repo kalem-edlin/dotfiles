@@ -1,0 +1,456 @@
+#!/usr/bin/env bash
+# worktree-slot -- the one v1 slot command. Idempotent.
+#
+#   worktree-slot ensure [slot-number] [--tier <tier>] [--dry-run]
+#
+# Implements the 7-step sequence from
+# docs/tasks/tmux-remote-workspaces/initial-plan.md ("Persistent slot
+# worktrees and ports" / "Minimal v1 command"):
+#   1. Resolve the opted-in repository and slot from its argument or cwd.
+#   2. Allocate/validate the repository's port bases (hand-assigned in
+#      config.json; see "DEFERRED: dynamic base-pool negotiation").
+#   3. Create the missing <repo-name>-N worktree safely at the configured
+#      base revision, or validate the existing one without recreating it.
+#   4. Validate name, path, git-worktree metadata, capacity, derived ports.
+#   5. Render the stable private manifest and environment.
+#   6. Apply the configured tier idempotently on creation or explicit
+#      promotion only.
+#   7. Print a concise summary.
+#
+# See docs/worktree-slots.md for the philosophy this must match exactly.
+
+set -uo pipefail
+
+WT_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WT_LIB="$(cd "$WT_SELF/../lib/worktrees" 2>/dev/null && pwd)"
+if [ -z "$WT_LIB" ] || [ ! -f "$WT_LIB/common.sh" ]; then
+  echo "worktree-slot: could not locate lib/worktrees/common.sh next to this script." >&2
+  exit 20
+fi
+# shellcheck source-path=SCRIPTDIR/../lib/worktrees
+# shellcheck source=/dev/null
+source "$WT_LIB/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  worktree-slot ensure [slot-number] [--tier <tier>] [--dry-run]
+
+Resolves the opted-in repository from the current git remote (if inside a
+checkout) or from the current path being under a configured collection
+directory. Repository opt-in, collection paths, service offsets, capacities,
+and default tiers are edited in ~/.config/worktrees/config.json, not through
+another command.
+EOF
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 20; }
+cmd="$1"; shift
+[ "$cmd" = "ensure" ] || { wt_warn "unknown subcommand: $cmd"; usage >&2; exit 20; }
+
+opt_slot=""
+opt_tier=""
+opt_dry_run=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tier) opt_tier="${2:?--tier requires a value}"; shift 2 ;;
+    --dry-run) opt_dry_run=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    [0-9]*) opt_slot="$1"; shift ;;
+    *) wt_warn "unknown argument: $1"; usage >&2; exit 20 ;;
+  esac
+done
+
+wt_need_jq
+wt_config_require
+
+# ---------------------------------------------------------------------------
+# Step 1: resolve repository + slot number
+# ---------------------------------------------------------------------------
+
+REPO_IDENTITY=""
+REPO_JSON=""
+
+resolve_by_git_remote() {
+  local top identity cfg
+  top="$(wt_git_toplevel "$PWD")"
+  [ -n "$top" ] || return 1
+  identity="$(wt_git_remote_identity "$top")"
+  [ -n "$identity" ] || return 1
+  cfg="$(wt_repo_config "$identity")"
+  [ -n "$cfg" ] || return 1
+  REPO_IDENTITY="$identity"
+  REPO_JSON="$cfg"
+  return 0
+}
+
+# Fallback: cwd is under a configured collection dir even without a git
+# remote resolving (e.g. invoked from the bare collection root before any
+# slot exists). Requires exactly one matching configured repository.
+resolve_by_collection_containment() {
+  local cwd_real matches=0 found_identity found_json
+  cwd_real="$(cd "$PWD" 2>/dev/null && pwd)"
+  [ -n "$cwd_real" ] || return 1
+
+  while IFS=$'\t' read -r identity collection; do
+    [ -n "$identity" ] || continue
+    local collection_abs
+    collection_abs="$(wt_expand_tilde "$collection")"
+    collection_abs="$(cd "$collection_abs" 2>/dev/null && pwd)" || continue
+    case "$cwd_real" in
+      "$collection_abs" | "$collection_abs"/*)
+        matches=$((matches + 1))
+        found_identity="$identity"
+        found_json="$(wt_repo_config "$identity")"
+        ;;
+    esac
+  done < <(jq -r '.repositories | to_entries[] | [.key, .value.collection] | @tsv' "$(wt_config_file)")
+
+  [ "$matches" -eq 1 ] || return 1
+  REPO_IDENTITY="$found_identity"
+  REPO_JSON="$found_json"
+  return 0
+}
+
+if ! resolve_by_git_remote; then
+  resolve_by_collection_containment || wt_die "could not resolve an opted-in repository from $PWD (no matching git remote identity and no unique configured collection contains this path). See ~/.config/worktrees/config.json / docs/worktree-slots.md." 20
+fi
+
+REPO_NAME="$(jq -r '.repo_name' <<<"$REPO_JSON")"
+COLLECTION_RAW="$(jq -r '.collection' <<<"$REPO_JSON")"
+COLLECTION="$(wt_expand_tilde "$COLLECTION_RAW")"
+SLOT_CAPACITY="$(jq -r '.slot_capacity' <<<"$REPO_JSON")"
+BLOCK_SIZE="$(jq -r '.block_size' <<<"$REPO_JSON")"
+DEFAULT_BRANCH="$(jq -r '.default_branch // "main"' <<<"$REPO_JSON")"
+DEFAULT_TIER="$(jq -r '.default_tier // ""' <<<"$REPO_JSON")"
+
+if [ -n "$opt_slot" ]; then
+  SLOT_NUMBER="$opt_slot"
+else
+  base="$(basename "$PWD")"
+  case "$base" in
+    "$REPO_NAME"-[1-9]*)
+      candidate="${base#"$REPO_NAME"-}"
+      case "$candidate" in
+        ''|*[!0-9]*) wt_die "cwd '$base' does not end in a positive slot number; pass one explicitly: worktree-slot ensure <N>" 20 ;;
+        *) SLOT_NUMBER="$candidate" ;;
+      esac
+      ;;
+    *) wt_die "no slot number given and cwd '$base' does not match '$REPO_NAME-N'; pass one explicitly: worktree-slot ensure <N>" 20 ;;
+  esac
+fi
+
+case "$SLOT_NUMBER" in
+  ''|*[!0-9]*) wt_die "slot number must be a positive integer, got: $SLOT_NUMBER" 20 ;;
+esac
+[ "$SLOT_NUMBER" -ge 1 ] || wt_die "slot number must be >= 1, got: $SLOT_NUMBER" 20
+if [ "$SLOT_NUMBER" -gt "$SLOT_CAPACITY" ]; then
+  wt_die "slot $SLOT_NUMBER exceeds $REPO_NAME's configured capacity ($SLOT_CAPACITY). Expand capacity deliberately in config.json (with the migration review the plan requires) before using it." 20
+fi
+
+SLOT_PATH="$COLLECTION/$REPO_NAME-$SLOT_NUMBER"
+
+# ---------------------------------------------------------------------------
+# Step 2: repository port bases are hand-assigned config, not dynamically
+# allocated (DEFERRED, decided: dynamic base-pool negotiation is YAGNI until
+# a second repository actually conflicts). This step validates that the
+# whole config's port pool is self-consistent -- collisions here are a
+# config bug, not a per-slot condition -- every run, cheaply.
+# ---------------------------------------------------------------------------
+
+# Validates every *actually derivable* port (base + k*block_size, for
+# k=0..slot_capacity-1) across the whole config -- not the contiguous
+# "reserved width" as an interval. An interval-overlap check is too coarse:
+# e.g. content-engine's own blessed bases (NEXT=3000, DASHBOARD=3010, same
+# block_size=100) produce overlapping *ranges* but their actual derived
+# ports never coincide (offset by 10, same stride). Only exact derived-port
+# equality is a real collision.
+validate_port_pool() {
+  local config_file issues
+  config_file="$(wt_config_file)"
+  issues="$(jq -c '
+    def prohibited_hit($p; $proh):
+      any($proh[]; if type == "array" then ($p >= .[0] and $p <= .[1]) else (. == $p) end);
+
+    . as $cfg
+    | ($cfg.port_pool_ceiling // 32768) as $ceiling
+    | ($cfg.prohibited_ports // []) as $proh
+    | [
+        $cfg.repositories | to_entries[] | .key as $repo | .value as $r |
+        ($r.services // {}) | to_entries[] | .key as $svc | .value as $base |
+        range(0; $r.slot_capacity) as $k |
+        {repo: $repo, service: $svc, slot: ($k + 1), port: ($base + $k * $r.block_size)}
+      ] as $points
+    | (
+        [$points[] | select(.port >= $ceiling) |
+          "\(.repo)/\(.service) slot \(.slot) port \(.port) is at/above the pool ceiling (\($ceiling))"]
+        + [$points[] | select(prohibited_hit(.port; $proh)) |
+          "\(.repo)/\(.service) slot \(.slot) port \(.port) is a prohibited port"]
+        + ($points | group_by(.port) | map(select(length > 1)) | map(
+            "port \(.[0].port) collides across: "
+            + (map("\(.repo)/\(.service) slot \(.slot)") | join(", "))
+          ))
+      )
+  ' "$config_file")"
+
+  local count
+  count="$(jq 'length' <<<"$issues")"
+  if [ "$count" -gt 0 ]; then
+    wt_warn "port pool validation failed for $(wt_config_file):"
+    jq -r '.[] | "  - " + .' <<<"$issues" >&2
+    exit 20
+  fi
+}
+
+validate_port_pool
+
+# ---------------------------------------------------------------------------
+# Step 3: create missing worktree safely, or validate existing without
+# recreating.
+# ---------------------------------------------------------------------------
+
+find_anchor_checkout() {
+  # Any existing checkout under the collection whose normalized remote
+  # matches -- prefers a numbered slot, falls back to a bare "<repo_name>"
+  # checkout. `git worktree add` must run against *some* existing checkout
+  # of the repo; this package does not clone repositories (consume, never
+  # provision -- see the plan's "Consume, never provision" section).
+  local d
+  for d in "$COLLECTION"/"$REPO_NAME"-*/ "$COLLECTION"/"$REPO_NAME"/; do
+    [ -d "$d" ] || continue
+    if git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      local id
+      id="$(wt_git_remote_identity "$d")"
+      if [ "$id" = "$REPO_IDENTITY" ]; then
+        printf '%s\n' "$d"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+validate_worktree_metadata() {
+  local slot_dir="$1"
+  git -C "$slot_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || wt_die "$slot_dir exists but is not a git worktree." 20
+  local top
+  top="$(wt_git_toplevel "$slot_dir")"
+  [ "$top" = "$slot_dir" ] || wt_die "$slot_dir is inside a git worktree rooted elsewhere ($top); refusing to treat a subdirectory as a slot." 20
+  local id
+  id="$(wt_git_remote_identity "$slot_dir")"
+  [ "$id" = "$REPO_IDENTITY" ] || wt_die "$slot_dir's origin remote ($id) does not match the configured identity for $REPO_NAME ($REPO_IDENTITY)." 20
+}
+
+CREATED=0
+if [ -e "$SLOT_PATH" ]; then
+  validate_worktree_metadata "$SLOT_PATH"
+else
+  if [ "$opt_dry_run" -eq 1 ]; then
+    echo "[dry-run] would create worktree at $SLOT_PATH (base: $DEFAULT_BRANCH)"
+  else
+    anchor="$(find_anchor_checkout)" || wt_die "no existing checkout of $REPO_NAME found under $COLLECTION to create the worktree from. Clone the repository into $COLLECTION/$REPO_NAME-1 (or similar) first -- this package never clones (consume, never provision)." 20
+    mkdir -p "$COLLECTION"
+    git -C "$anchor" worktree add --detach "$SLOT_PATH" "$DEFAULT_BRANCH" >/dev/null || wt_die "git worktree add failed for $SLOT_PATH" 20
+    CREATED=1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4: validate name/path/capacity (already done above) + derived ports +
+# listener diagnostics for this slot's services.
+# ---------------------------------------------------------------------------
+
+port_listener_info() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | awk -v p=":$port" '$4 ~ p"$"'
+  fi
+}
+
+SERVICE_NAMES=()
+SERVICE_PORTS=()
+si=0
+while IFS=$'\t' read -r svc base; do
+  [ -n "$svc" ] || continue
+  port=$((base + (SLOT_NUMBER - 1) * BLOCK_SIZE))
+  SERVICE_NAMES[si]="$svc"
+  SERVICE_PORTS[si]="$port"
+  si=$((si + 1))
+done < <(jq -r '(.services // {}) | to_entries[] | [.key, .value] | @tsv' <<<"$REPO_JSON")
+
+for ((si2 = 0; si2 < ${#SERVICE_NAMES[@]}; si2++)); do
+  port="${SERVICE_PORTS[si2]}"
+  svc="${SERVICE_NAMES[si2]}"
+  if [ -e "$SLOT_PATH" ] || [ "$opt_dry_run" -eq 1 ]; then
+    info="$(port_listener_info "$port")"
+    if [ -n "$info" ]; then
+      wt_warn "port $port ($REPO_NAME slot $SLOT_NUMBER, service $svc) is already occupied by another process:"
+      printf '%s\n' "$info" >&2
+      wt_die "blocking on listener collision -- stable, predictable ports are part of the slot's identity; this never falls back to a random port. Stop the occupying process or investigate the config." 20
+    fi
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Step 5: render manifest + env (idempotent, byte-identical for the same
+# input). Skipped entirely under --dry-run (read-only).
+# ---------------------------------------------------------------------------
+
+MANIFEST_PATH="$SLOT_PATH/.worktree-slot.json"
+ENV_PATH="$SLOT_PATH/.worktree-slot.env"
+
+# Preserve allocation_generation across idempotent re-runs; only a future
+# migration tool bumps it.
+ALLOCATION_GENERATION=1
+if [ -f "$MANIFEST_PATH" ]; then
+  prior_gen="$(jq -r '.allocation_generation // 1' "$MANIFEST_PATH" 2>/dev/null)"
+  case "$prior_gen" in ''|*[!0-9]*) ;; *) ALLOCATION_GENERATION="$prior_gen" ;; esac
+fi
+
+# Tier resolution: creation uses --tier (if given) or the repo's
+# default_tier; an existing slot keeps its stored tier unless --tier is
+# explicitly passed this run (explicit promotion). A branch/task swap
+# (re-running ensure with no --tier) never changes or re-applies tier
+# commands -- "changing a task, branch, claim, or active writer host does
+# not implicitly downgrade or erase reusable slot resources."
+STORED_TIER=""
+if [ -f "$MANIFEST_PATH" ]; then
+  STORED_TIER="$(jq -r '.tier // ""' "$MANIFEST_PATH" 2>/dev/null)"
+fi
+
+APPLY_TIER=0
+if [ "$CREATED" -eq 1 ]; then
+  TIER="${opt_tier:-$DEFAULT_TIER}"
+  APPLY_TIER=1
+elif [ -n "$opt_tier" ]; then
+  TIER="$opt_tier"
+  [ "$TIER" != "$STORED_TIER" ] && APPLY_TIER=1
+else
+  TIER="${STORED_TIER:-$DEFAULT_TIER}"
+fi
+
+if [ "$opt_dry_run" -eq 1 ]; then
+  echo "[dry-run] would render $MANIFEST_PATH and $ENV_PATH (tier=$TIER, apply_tier=$APPLY_TIER)"
+else
+  ports_json="$(jq -c --argjson slot "$SLOT_NUMBER" --argjson block "$BLOCK_SIZE" '
+    (.services // {}) | to_entries | map({key: .key, value: (.value + ($slot - 1) * $block)}) | from_entries
+  ' <<<"$REPO_JSON")"
+
+  manifest_json="$(jq -nc \
+    --arg format_version "1" \
+    --arg repo_identity "$REPO_IDENTITY" \
+    --arg repo_name "$REPO_NAME" \
+    --argjson slot_number "$SLOT_NUMBER" \
+    --arg tier "$TIER" \
+    --arg host "$(wt_hostname)" \
+    --argjson allocation_generation "$ALLOCATION_GENERATION" \
+    --argjson ports "$ports_json" \
+    '{
+      format_version: ($format_version | tonumber),
+      repo_identity: $repo_identity,
+      repo_name: $repo_name,
+      slot_number: $slot_number,
+      tier: $tier,
+      host: $host,
+      allocation_generation: $allocation_generation,
+      ports: $ports
+    }')"
+  # jq -S would sort keys and break "same input -> byte-identical output"
+  # determinism against the *service declaration order*; write as-built.
+  wt_write_marker_atomic "$MANIFEST_PATH" "$manifest_json"
+
+  env_lines="# Generated by worktree-slot ensure -- do not hand-edit.
+# repo=$REPO_NAME slot=$SLOT_NUMBER tier=$TIER
+"
+  while IFS=$'\t' read -r svc varname; do
+    [ -n "$svc" ] || continue
+    port=""
+    for ((si2 = 0; si2 < ${#SERVICE_NAMES[@]}; si2++)); do
+      if [ "${SERVICE_NAMES[si2]}" = "$svc" ]; then
+        port="${SERVICE_PORTS[si2]}"
+        break
+      fi
+    done
+    [ -n "$port" ] || continue
+    env_lines="${env_lines}export ${varname}=${port}
+"
+  done < <(jq -r '(.env_vars // {}) | to_entries[] | [.key, .value] | @tsv' <<<"$REPO_JSON")
+
+  tmp_env="$(mktemp "$SLOT_PATH/.worktree-slot.env.XXXXXX")"
+  printf '%s' "$env_lines" >"$tmp_env"
+  chmod 0644 "$tmp_env"
+  mv "$tmp_env" "$ENV_PATH"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 6: apply tier commands idempotently, only on creation or explicit
+# promotion.
+# ---------------------------------------------------------------------------
+
+if [ "$opt_dry_run" -ne 1 ] && [ "$APPLY_TIER" -eq 1 ] && [ -n "$TIER" ]; then
+  tier_cmds=()
+  while IFS= read -r c; do
+    [ -n "$c" ] && tier_cmds+=("$c")
+  done < <(jq -r --arg t "$TIER" '(.tiers[$t] // [])[]' <<<"$REPO_JSON")
+
+  if [ "${#tier_cmds[@]}" -eq 0 ]; then
+    echo "tier '$TIER' has no commands configured for $REPO_NAME (or the tier name is unknown); nothing to apply."
+  else
+    echo "applying tier '$TIER' for $SLOT_PATH:"
+    for c in "${tier_cmds[@]}"; do
+      echo "  \$ $c"
+      ( cd "$SLOT_PATH" && eval "$c" ) || wt_die "tier command failed: $c" 20
+    done
+  fi
+
+  # Persist the tier we just applied/recorded.
+  updated_manifest="$(jq -c --arg t "$TIER" '.tier = $t' "$MANIFEST_PATH")"
+  wt_write_marker_atomic "$MANIFEST_PATH" "$updated_manifest"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 7: summary. --dry-run also reports leftover <collection>/.eph/*
+# entries on demand (never deleted, convention-only per the plan).
+# ---------------------------------------------------------------------------
+
+claim_state="unavailable"
+if [ -e "$SLOT_PATH" ]; then
+  claim_bin="$WT_SELF/worktree-claim"
+  if [ -x "$claim_bin" ]; then
+    # dry_run=1 skips the summary's registry-write path (marker -> registry
+    # sync) so `worktree-slot ensure --dry-run` truly writes nothing.
+    claim_state="$(wt_claim_summary_for_path "$SLOT_PATH" "$opt_dry_run")"
+  fi
+fi
+
+echo "----"
+echo "worktree-slot ensure: $REPO_NAME slot $SLOT_NUMBER"
+echo "  path:   $SLOT_PATH"
+[ "$CREATED" -eq 1 ] && echo "  status: created"
+[ "$opt_dry_run" -eq 1 ] && echo "  status: dry-run (no changes made)"
+[ "$CREATED" -eq 0 ] && [ "$opt_dry_run" -eq 0 ] && echo "  status: validated existing slot"
+echo "  tier:   $TIER"
+echo "  claim:  $claim_state"
+echo "  ports:"
+for ((si2 = 0; si2 < ${#SERVICE_NAMES[@]}; si2++)); do
+  echo "    ${SERVICE_NAMES[si2]}=${SERVICE_PORTS[si2]}"
+done
+
+if [ "$opt_dry_run" -eq 1 ]; then
+  eph_dir="$COLLECTION/.eph"
+  if [ -d "$eph_dir" ]; then
+    entries=()
+    while IFS= read -r e; do
+      [ -n "$e" ] && entries+=("$e")
+    done < <(find "$eph_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    if [ "${#entries[@]}" -gt 0 ]; then
+      echo "  leftover ephemeral sub-agent worktrees under $eph_dir (convention-only; never auto-cleaned):"
+      for e in "${entries[@]}"; do
+        echo "    $(basename "$e")"
+      done
+    fi
+  fi
+fi

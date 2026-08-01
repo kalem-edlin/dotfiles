@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Codex provider adapter. Partially degated per initial-plan.md's own smoke
+# test (see "Provider notes" / Phase 5 DECISION): Codex resume is driven by
+# a private SQLite `threads` table in ~/.codex/state_5.sqlite, 1:1 against
+# rollout files under ~/.codex/sessions/YYYY/MM/DD/. A live CODEX_HOME
+# sandbox test (run as part of this task; see the RETURN report) confirmed:
+#
+#   - Codex lazily BACKFILLS the threads table from rollout files on disk
+#     the next time codex starts with a missing/stale state DB -- no manual
+#     DB surgery needed. A copied rollout file becomes a real `threads` row
+#     automatically.
+#   - The backfilled `cwd` column comes from the rollout's own first-line
+#     `payload.cwd` field, NOT from `codex resume`'s `-C` flag. A rollout
+#     copied verbatim from another host keeps the *source* host's cwd, which
+#     breaks cwd-filtered discovery (`codex resume --last`, the default
+#     picker) at the destination even though explicit-id `codex resume
+#     <id>` and the backfilled row itself are unaffected.
+#   - Filenames are validated (`rollout-<ts>-<uuid>.jsonl`, doctor flags
+#     "malformed file names" otherwise) and directory-bucketed by the
+#     timestamp embedded in that filename.
+#
+# `install` therefore places the rollout at a filename-valid path AND
+# rewrites just the first line's `payload.cwd` to `--dest-path`, then relies
+# on Codex's own backfill for the DB row (this adapter never touches sqlite
+# directly). NOT verified end-to-end: actually *completing* an interactive
+# `codex resume` after backfill needs a real TTY and authenticated model
+# access, neither available in an automated sandbox test -- only the
+# indexing/backfill mechanism itself was exercised and confirmed. Treat
+# `install`'s success as "correctly staged and discoverable," not as proof
+# the full conversation resumes cleanly; a live smoke test with a real
+# terminal remains recommended before relying on this for a real handoff.
+#
+# Subcommands: detect, versions, export, install, resume-cmd
+# See libexec/adapters/README.md for the full contract.
+
+set -uo pipefail
+
+CA_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./common-adapter.sh
+source "$CA_SELF/common-adapter.sh"
+
+PROVIDER="codex"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex detect --pane <pane-id>
+  codex versions --worker <alias>
+  codex export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
+  codex install --snapshot <dir> --dest-path <path> [--worker <alias>]
+  codex resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+EOF
+}
+
+[ $# -ge 1 ] || {
+  usage >&2
+  exit 1
+}
+cmd="$1"
+shift
+
+codex_sessions_root_local() { printf '%s/.codex/sessions\n' "$HOME"; }
+
+# ---------------------------------------------------------------------------
+# detect --pane <pane-id>
+# ---------------------------------------------------------------------------
+cmd_detect() {
+  local pane=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pane)
+        pane="${2:?--pane requires a value}"
+        shift 2
+        ;;
+      *) ca_die "detect: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$pane" "--pane"
+  ca_need_jq
+
+  # shellcheck disable=SC2046 # intentional word-splitting: each pattern
+  # line from ca_patterns_codex becomes a separate positional argument.
+  ca_pane_has_process "$pane" $(ca_patterns_codex) || {
+    ca_warn "no codex process detected in pane $pane."
+    exit 1
+  }
+
+  local state
+  state="$(ca_read_pane_agent_state "$pane" "$PROVIDER")" || {
+    ca_warn "detected a codex process in pane $pane but no recorded session (record-agent-session.sh/tmux-workspace-resurrect hook may not have fired yet, or is not installed); cannot produce a resumable handoff without a session id."
+    exit 1
+  }
+
+  local session_id project_path
+  session_id="$(jq -r '.session_id // empty' <<<"$state")"
+  project_path="$(jq -r '.cwd // empty' <<<"$state")"
+  [ -n "$session_id" ] || {
+    ca_warn "recorded codex session state for pane $pane has no session_id."
+    exit 1
+  }
+
+  jq -nc --arg provider "$PROVIDER" --arg session_id "$session_id" --arg project_path "$project_path" \
+    '{provider: $provider, session_id: $session_id, project_path: $project_path}'
+}
+
+# ---------------------------------------------------------------------------
+# versions --worker <alias>
+#
+# Codex is an npm package under fnm (@openai/codex) -- alignment means
+# matching Node plus a pinned npm install.
+# ---------------------------------------------------------------------------
+cmd_versions() {
+  local worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --worker)
+        worker="${2:?--worker requires a value}"
+        shift 2
+        ;;
+      *) ca_die "versions: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$worker" "--worker"
+  ca_need_jq
+
+  command -v codex >/dev/null 2>&1 || ca_die "codex is not installed locally; nothing to compare." 1
+  command -v node >/dev/null 2>&1 || ca_die "node is not installed locally; codex is an npm package and needs it." 1
+  local local_cli local_node
+  local_cli="$(codex --version 2>/dev/null | awk '{print $NF}')"
+  local_node="$(node --version 2>/dev/null | tr -d '[:space:]')"
+  [ -n "$local_cli" ] || ca_die "could not read local codex --version output." 1
+
+  local worker_cli worker_node
+  worker_cli="$(ca_ssh_run "$worker" 'command -v codex >/dev/null 2>&1 && codex --version' 2>/dev/null | awk '{print $NF}')"
+  if [ -z "$worker_cli" ]; then
+    ca_die "codex is not installed (or not on PATH) on worker '$worker'. Consume-never-provision: this adapter will not install it -- run 'make setup-headless' on '$worker', or install codex there manually, then retry." 1
+  fi
+  worker_node="$(ca_ssh_run "$worker" 'command -v node >/dev/null 2>&1 && node --version' 2>/dev/null | tr -d '[:space:]')"
+
+  local cmp policy
+  cmp="$(ca_version_cmp "$worker_cli" "$local_cli")"
+  if [ "$cmp" -eq 0 ] && [ "$worker_node" = "$local_node" ]; then
+    policy="identical"
+  elif [ "$cmp" -ge 0 ]; then
+    policy="newer_worker"
+    if [ "$worker_node" != "$local_node" ]; then
+      ca_warn "notice: worker node ($worker_node) differs from local node ($local_node); codex package version is >= local, proceeding."
+    fi
+  else
+    jq -nc --arg local "$local_cli" --arg worker "$worker_cli" '{local: $local, worker: $worker, policy: "blocked"}'
+    ca_warn "worker codex ($worker_cli) is older than local ($local_cli). This adapter never updates a worker -- run on '$worker':"
+    ca_warn "  fnm use $local_node --install-if-missing && npm install -g @openai/codex@$local_cli"
+    exit 3
+  fi
+
+  jq -nc \
+    --arg local_cli "$local_cli" --arg local_node "$local_node" \
+    --arg worker_cli "$worker_cli" --arg worker_node "$worker_node" \
+    --arg policy "$policy" \
+    '{local: {cli: $local_cli, node: $local_node}, worker: {cli: $worker_cli, node: $worker_node}, policy: $policy}'
+}
+
+# ---------------------------------------------------------------------------
+# export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
+#
+# Rollout files live at ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl
+# (verified against live files on this machine). Locating one requires a
+# glob search since the date-bucket directory isn't derivable from the id
+# alone.
+# ---------------------------------------------------------------------------
+cmd_export() {
+  local session_id="" project_path="" out="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session-id)
+        session_id="${2:?}"
+        shift 2
+        ;;
+      --project-path)
+        project_path="${2:?}"
+        shift 2
+        ;;
+      --out)
+        out="${2:?}"
+        shift 2
+        ;;
+      --worker)
+        worker="${2:?}"
+        shift 2
+        ;;
+      *) ca_die "export: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$session_id" "--session-id"
+  ca_require "$project_path" "--project-path"
+  ca_require "$out" "--out"
+  ca_need_jq
+
+  mkdir -p "$out"
+  local dest_file="$out/session.jsonl" found
+
+  if [ -n "$worker" ]; then
+    found="$(ca_ssh_run "$worker" "find \"\$HOME/.codex/sessions\" -type f -iname 'rollout-*-${session_id}.jsonl' 2>/dev/null | head -n1")"
+    [ -n "$found" ] || {
+      ca_warn "no codex rollout file found on worker '$worker' for session $session_id; nothing to export."
+      exit 4
+    }
+    if ! ca_ssh_run "$worker" "cat -- '$found'" >"$dest_file" 2>/dev/null; then
+      ca_warn "failed to read codex rollout file from worker '$worker'."
+      exit 4
+    fi
+  else
+    found="$(find "$(codex_sessions_root_local)" -type f -iname "rollout-*-${session_id}.jsonl" 2>/dev/null | head -n1)"
+    [ -n "$found" ] && [ -f "$found" ] || {
+      ca_warn "no local codex rollout file found for session $session_id; nothing to export."
+      exit 4
+    }
+    cp -p "$found" "$dest_file"
+  fi
+
+  # Preserve the original rollout basename -- install needs it verbatim
+  # (codex validates the "rollout-<ts>-<uuid>.jsonl" filename shape and
+  # derives the YYYY/MM/DD bucket from the embedded timestamp).
+  local rollout_filename
+  rollout_filename="$(basename "$found")"
+
+  ca_write_manifest "$out" "$(jq -nc \
+    --arg provider "$PROVIDER" \
+    --arg session_id "$session_id" \
+    --arg source_project_path "$project_path" \
+    --arg transcript_file "session.jsonl" \
+    --arg rollout_filename "$rollout_filename" \
+    --arg exported_at "$(ca_now_iso)" \
+    '{provider: $provider, session_id: $session_id, source_project_path: $source_project_path, transcript_file: $transcript_file, rollout_filename: $rollout_filename, exported_at: $exported_at, note: "install rewrites payload.cwd to the destination path; codex backfills its own threads-table row from the rollout file on next startup -- see the adapter header comment for what was and was not smoke-tested."}')"
+
+  cat "$out/manifest.json"
+}
+
+# ---------------------------------------------------------------------------
+# install --snapshot <dir> --dest-path <path> [--worker <alias>]
+#
+# Places the rollout at a filename/date-bucket-valid path and rewrites the
+# first line's payload.cwd to --dest-path (see header comment for why).
+# Deliberately does NOT touch ~/.codex/state_5.sqlite: codex's own lazy
+# backfill (confirmed live, see header comment) creates the threads row the
+# next time codex starts against this CODEX_HOME with that row missing.
+# ---------------------------------------------------------------------------
+cmd_install() {
+  local snapshot="" dest_path="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --snapshot)
+        snapshot="${2:?}"
+        shift 2
+        ;;
+      --dest-path)
+        dest_path="${2:?}"
+        shift 2
+        ;;
+      --worker)
+        worker="${2:?}"
+        shift 2
+        ;;
+      *) ca_die "install: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$snapshot" "--snapshot"
+  ca_require "$dest_path" "--dest-path"
+  ca_need_jq
+
+  local transcript="$snapshot/session.jsonl"
+  [ -f "$transcript" ] || ca_die "no session.jsonl in snapshot dir $snapshot." 1
+  local rollout_filename
+  rollout_filename="$(ca_manifest_field "$snapshot" "rollout_filename")"
+  [ -n "$rollout_filename" ] || ca_die "snapshot manifest.json at $snapshot is missing rollout_filename (export it with this adapter's own 'export' subcommand)." 1
+
+  local yyyy mm dd
+  if [[ "$rollout_filename" =~ ^rollout-([0-9]{4})-([0-9]{2})-([0-9]{2})T ]]; then
+    yyyy="${BASH_REMATCH[1]}"
+    mm="${BASH_REMATCH[2]}"
+    dd="${BASH_REMATCH[3]}"
+  else
+    ca_die "rollout_filename '$rollout_filename' does not match codex's expected rollout-<YYYY>-<MM>-<DD>T... shape; refusing to guess a date bucket." 1
+  fi
+
+  # Rewrite only the first line's payload.cwd; every other line (including
+  # any other line that happens to also carry a "cwd" key) is passed through
+  # byte-for-byte untouched.
+  local rewritten
+  rewritten="$(mktemp "${TMPDIR:-/tmp}/codex-install-rollout.XXXXXX")"
+  {
+    head -n1 "$transcript" | jq -c --arg cwd "$dest_path" \
+      'if .type == "session_meta" then .payload.cwd = $cwd else . end'
+    tail -n +2 "$transcript"
+  } >"$rewritten"
+
+  if [ -n "$worker" ]; then
+    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}\" && cat > \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}/${rollout_filename}\"" <"$rewritten"; then
+      rm -f "$rewritten"
+      ca_die "failed to install codex rollout on worker '$worker'." 1
+    fi
+    printf 'installed codex rollout on %s: ~/.codex/sessions/%s/%s/%s/%s\n' "$worker" "$yyyy" "$mm" "$dd" "$rollout_filename"
+  else
+    local dest_dir
+    dest_dir="$(codex_sessions_root_local)/$yyyy/$mm/$dd"
+    mkdir -p "$dest_dir"
+    cp "$rewritten" "$dest_dir/$rollout_filename"
+    printf 'installed codex rollout: %s/%s\n' "$dest_dir" "$rollout_filename"
+  fi
+  rm -f "$rewritten"
+  printf 'note: codex backfills its threads-table row for this rollout automatically the next time it starts against this CODEX_HOME (confirmed via sandboxed smoke test); full interactive resume completion under a real TTY was not exercised by this adapter -- verify once before relying on this for a real handoff.\n' >&2
+}
+
+# ---------------------------------------------------------------------------
+# resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+# ---------------------------------------------------------------------------
+cmd_resume_cmd() {
+  local dest_path="" session_id="" fork=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dest-path)
+        dest_path="${2:?}"
+        shift 2
+        ;;
+      --session-id)
+        session_id="${2:?}"
+        shift 2
+        ;;
+      --fork)
+        fork=1
+        shift
+        ;;
+      *) ca_die "resume-cmd: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$dest_path" "--dest-path"
+  ca_require "$session_id" "--session-id"
+
+  if [ "$fork" -eq 1 ]; then
+    printf 'codex fork %q -C %q\n' "$session_id" "$dest_path"
+  else
+    printf 'codex resume %q -C %q\n' "$session_id" "$dest_path"
+  fi
+}
+
+case "$cmd" in
+  detect) cmd_detect "$@" ;;
+  versions) cmd_versions "$@" ;;
+  export) cmd_export "$@" ;;
+  install) cmd_install "$@" ;;
+  resume-cmd) cmd_resume_cmd "$@" ;;
+  -h | --help) usage ;;
+  *)
+    ca_warn "unknown subcommand: $cmd"
+    usage >&2
+    exit 1
+    ;;
+esac

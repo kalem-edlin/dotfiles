@@ -3,6 +3,8 @@
 -- Set leader key to Space
 vim.g.mapleader = " "
 
+require("tmux_workspace_resurrect").setup()
+
 local pynvim_host = vim.fn.expand("~/.local/share/nvim/pynvim-venv/bin/python")
 if vim.fn.executable(pynvim_host) == 1 then
   vim.g.python3_host_prog = pynvim_host

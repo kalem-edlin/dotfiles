@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# tmux-remote-workspaces command dispatcher.
+#
+# Usage: rw <ensure|handoff|return|close|status|doctor> [args...]
+#
+# There is no separate attach/reconnect verb -- `rw ensure` is idempotent and
+# handles both first establishment and reattachment of an existing pane's
+# endpoint (initial-plan.md, Resolved decision #5).
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+usage: rw <command> [args...]
+
+commands:
+  ensure --worker <alias> [--workspace <path>|auto]
+      Idempotent establish/re-establish of a durable remote endpoint for the
+      current pane.
+
+  close [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
+      Lifecycle-aware intentional close of a remote-backed pane.
+
+  status
+      Human-readable table of registered endpoints.
+
+  doctor
+      Read-only diagnostics: local prerequisites, per-worker preflight,
+      registry/live-pane consistency, clipboard/passthrough checks.
+
+  handoff --worker <alias> [--workspace <path>|auto] [--pane <pane-id>]
+          [--keep-local] [--check-lfs]
+      Transactional handoff of the current pane's workspace (and, if a
+      supported AI agent is running there, its conversation) to a durable
+      remote endpoint on <alias>.
+
+  return [--pane <pane-id>] [--keep-remote] [--check-lfs]
+      Mirror of handoff: bring a remote-backed pane's workspace (and agent,
+      if one was handed off) back to the focus machine.
+EOF
+}
+
+[ $# -ge 1 ] || {
+  usage >&2
+  exit 64
+}
+
+command="$1"
+shift
+
+case "$command" in
+  ensure) exec "$SCRIPT_DIR/rw-ensure.sh" "$@" ;;
+  close) exec "$SCRIPT_DIR/rw-close.sh" "$@" ;;
+  status) exec "$SCRIPT_DIR/rw-status.sh" "$@" ;;
+  doctor) exec "$SCRIPT_DIR/rw-doctor.sh" "$@" ;;
+  handoff) exec "$SCRIPT_DIR/rw-handoff.sh" "$@" ;;
+  return) exec "$SCRIPT_DIR/rw-return.sh" "$@" ;;
+  -h | --help | help)
+    usage
+    exit 0
+    ;;
+  *)
+    printf 'rw: unknown command: %s\n\n' "$command" >&2
+    usage >&2
+    exit 64
+    ;;
+esac

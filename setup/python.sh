@@ -47,6 +47,13 @@ echo "✓ System-wide libraries installed!"
 echo "Setting up pipx..."
 pipx ensurepath
 
-# Install useful system-wide CLI tools
-pipx install httpie  # Better curl for API testing
+# Install useful system-wide CLI tools (idempotent: skip/upgrade if already
+# installed so reruns don't fail on an already-provisioned worker)
+if pipx list --short 2>/dev/null | grep -q '^httpie '; then
+    echo "httpie already installed via pipx; upgrading..."
+    pipx upgrade httpie
+else
+    echo "Installing httpie via pipx..."
+    pipx install httpie  # Better curl for API testing
+fi
 echo "✓ pipx configured!"

@@ -2,15 +2,17 @@
 
 set -u
 
-if [[ -f /opt/homebrew/bin/brew ]]; then
-  eval "$(/opt/homebrew/bin/brew shellenv)"
-elif [[ -f /usr/local/bin/brew ]]; then
-  eval "$(/usr/local/bin/brew shellenv)"
-fi
+DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=setup/lib.sh
+. "$DOTFILES_DIR/setup/lib.sh"
 
-if command -v fnm &> /dev/null; then
-  eval "$(fnm env --use-on-cd --shell bash)"
-fi
+# Activates fnm (Homebrew locations on macOS, ~/.local/share/fnm on Linux)
+# if it's installed. Must work standalone (e.g. `make obsidian` run on its
+# own) as well as immediately after setup/node.sh installed fnm+Node in a
+# SEPARATE process on a completely clean Linux account — that's exactly the
+# case that used to break here. See docs/tasks/headless-install.md, "3. Fix
+# the Linux first-run environment boundary".
+activate_fnm || true
 
 echo "Configuring Obsidian Headless..."
 
