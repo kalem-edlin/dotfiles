@@ -20,9 +20,13 @@ brew update
 DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ "${BREWFILE_HEADLESS:-}" = "1" ]; then
   echo "Using headless Brewfile (CLI tools only)..."
-  brew bundle --file="$DOTFILES_DIR/Brewfile.headless"
+  BUNDLE_FILE="$DOTFILES_DIR/Brewfile.headless"
 else
-  brew bundle --file="$DOTFILES_DIR/Brewfile"
+  BUNDLE_FILE="$DOTFILES_DIR/Brewfile"
+fi
+if ! brew bundle --file="$BUNDLE_FILE"; then
+  echo "✗ brew bundle failed for $BUNDLE_FILE — packages are missing; aborting." >&2
+  exit 1
 fi
 
 # Post-install steps
