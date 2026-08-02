@@ -1,5 +1,11 @@
 # Headless Installation Readiness Plan
 
+> **Archived reference.** This was the install-readiness audit and smoke-test
+> plan for `make setup-headless`. Its durable reference content now lives in
+> `docs/headless-vs-local.md`; this file is kept as the historical record of
+> the 2026-08-01/02 campaign. Treat the "Required work" language below as
+> historical, not current status.
+
 Status: COMPLETE (2026-08-02). The AI-agent smoke test below was executed in
 full against both workers: `agents-roll` (Linux, root) passed doctor 61/61
 with the detached save-chain proven and three idempotent provisions;
@@ -12,6 +18,23 @@ PATH, sidecar tmux-3.7 delimiter, vendored tmux-resurrect tmux-3.7
 delimiter — pinned+patched via setup/patches/, rw symlink resolution).
 Outstanding: manual auth only (worker Git-host keys, provider logins,
 `tailscale up` on agents-roll) — see runbook.
+
+### Not covered by this campaign
+
+- The verification-matrix rows for Fedora/RHEL, Arch, and openSUSE systemd
+  VPS hosts, and for Alpine/OpenRC, were never executed. The smoke test in
+  this document only ran against `mini` (macOS, Apple Silicon) and
+  `agents-roll` (Ubuntu/Debian systemd) — see "AI-agent smoke test", Phase B.
+  Those distros' package-manager branches exist in
+  `setup/linux-headless.sh` and are recognized by detection, but are
+  untested in practice.
+- The Mini's GUI-login/reboot durability model is still an open decision,
+  not a resolved one. The launchd save job loads into `gui/$UID`, which
+  requires the Mini to either auto-login or otherwise maintain that GUI user
+  domain across reboots — see "7. Fix macOS launchd execution" above and the
+  matching manual-step note in `docs/headless-workers.md`. This needs a
+  deliberate choice (auto-login vs. a different service model), not an
+  assumption.
 
 Created: 2026-08-01
 

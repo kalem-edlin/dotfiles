@@ -136,7 +136,16 @@ if command -v gh &> /dev/null; then
     echo "✓ GitHub CLI authenticated"
   fi
 else
-  echo "⚠ GitHub CLI (gh) not installed"
+  # gh is now part of the worker contract (headless-doctor.sh's required
+  # cmd:gh check) and is installed by brew-headless (Brewfile.headless) on
+  # macOS and by setup/linux-headless.sh on Linux. Seeing this warning means
+  # that install step did not run or did not succeed -- name the fix instead
+  # of leaving it a dead end. Still never auto-install or auto-auth here.
+  if [[ "$OS_NAME" = "Darwin" ]]; then
+    echo "⚠ GitHub CLI (gh) not installed — run: make brew-headless (see Brewfile.headless)"
+  else
+    echo "⚠ GitHub CLI (gh) not installed — run: make setup-headless (see setup/linux-headless.sh)"
+  fi
 fi
 
 ###############################################################################

@@ -1,7 +1,15 @@
 # Tmux Remote Workspaces — Initial Plan
 
-Status: decision-complete (2026-07-31 review rounds); the only open item is
-the Phase 1 client-detached smoke-test outcome. Ready for implementation.
+Status: implementation is complete dotfiles-side. The worker-provisioning
+prerequisite this plan depended on is now satisfied and verified — see
+"Headless worker provisioning results (2026-08-02)" below and
+`docs/tasks/headless-install.md` for the full campaign record. The remaining
+open surface is this plan's own live smoke execution: Waves 0-7 below are
+mostly unexecuted, Wave 5's real provider handoff/return matrix is blocked on
+operator authentication, and the live-server crash/restore drill is
+deliberately deferred to the last step. See "Remaining smoke-test surface
+(as of 2026-08-02)" at the end of the smoke-testing section for the current
+breakdown.
 
 Created: 2026-07-30
 Implementation status: implemented dotfiles-side (2026-07-31); see
@@ -1320,9 +1328,9 @@ does not build a general scheduler.
 - Install the worker save timer (`launchd`/systemd) via `setup-headless`.
 - Implement the consume-never-provision preflight checks.
 - Start the observability event log.
-- Verification: confirm the `Host mini` account (currently `User
-  alfierobertson` in the ssh config) is the intended identity/namespace root
-  before wiping and re-provisioning the Mini.
+- Verification: resolved. As of 2026-08-01, `ssh/.ssh/config` uses `User
+  admin` (with NOPASSWD sudo) for both the Tailscale and LAN Mini blocks as
+  the intended identity/namespace root.
 
 ### Phase 2: pane/window behavior and resurrection integration
 
@@ -1450,7 +1458,10 @@ Defensible deviations from the letter of this plan:
   (dashes), not the dotted form sketched earlier: tmux silently rewrites
   `.` in session names to `_` because `.` is target syntax, so a dotted
   convention can never round-trip through `has-session`/`list-sessions`.
-  Discovered empirically against tmux 3.6b during handoff-engine testing.
+  Discovered empirically against tmux; the code comments now anchor this to
+  tmux 3.7b (`tmux-remote-workspaces.tmux:29`, `rw-post-restore.sh:136`). See
+  "Headless worker provisioning results (2026-08-02)" below for the related
+  tmux >= 3.7 control-character sanitization work this same version surfaced.
 
 Verified results that close items this document left open:
 
@@ -1543,6 +1554,36 @@ registration and ensures tree mutations and generated editor splits occur in
 the nested worker tmux. Missing worker-side Treemux is an actionable failure
 (`make setup-headless`); the dispatcher deliberately never falls back to a
 misleading local tree for a remote pane.
+
+### Headless worker provisioning results (2026-08-02)
+
+Both workers were provisioned from `origin/main` and verified: `agents-roll`
+(Ubuntu 24.04 VPS, login user `root`, tmux 3.4) passed headless-doctor 61/61;
+`mini` (macOS, login user `admin`, tmux 3.7b) passed headless-doctor 62/62.
+On both, the detached save-chain was proven — the timer fires with no
+attached client, the Resurrect snapshot mtime advances, and the workspace
+sidecar logs `saved N pane records` — and rerunning the chain was proven
+idempotent. `rw doctor` run from the focus machine reports all checks
+passing for both workers.
+
+Nine installer/plugin defects were found and fixed along the way: macOS 26
+`sudo -v` PAM/TTY behavior, a silent `brew bundle` failure, untrusted
+Homebrew taps, a `gh auth login` hang in the headless lane, pyenv
+rerun-safety, the launchd save-wrapper's `PATH`, tmux >= 3.7's
+control-character sanitization inside this repo's own sidecar and `rw`
+scripts, the same sanitization inside vendored tmux-resurrect (now pinned to
+`cff343c` and patched via
+`setup/patches/tmux-resurrect-tmux37-delimiter.patch`), and `rw` failing when
+invoked through its `~/.local/bin` symlink.
+
+The tmux >= 3.7 sanitization directly affects the multi-field pane-registry
+parsing this plan specifies: tmux 3.7 rewrites control characters (including
+literal TAB) in format output to `_`, with no opt-out, so every tab-delimited
+multi-field parse of tmux stdout had to become one field per call instead.
+See commits `bbd0211` (this repo's sidecar/`rw` scripts) and `d232f42`
+(vendored tmux-resurrect pin and patch).
+
+See `docs/tasks/headless-install.md` for the full campaign record.
 
 ## Smoke testing — agent-first execution plan
 
@@ -1684,9 +1725,29 @@ Hard safety rules for every sub-agent:
 - no edits/fixes during a smoke lane — report the failure and let the
   coordinator decide whether to stop and open a repair cycle;
 - close endpoints through `rw close` first, then clean only exact resources
-  recorded in that lane's manifest; and
+  recorded in that lane's manifest;
 - preserve failing workspaces/backups until the coordinator has copied the
-  evidence.
+  evidence; and
+- tear down every lane's private tmux server promptly and verify no orphaned
+  `tmux` processes remain on the machine when the lane finishes, per the
+  continuum-suppression hazard below.
+
+Newly discovered constraint, verified 2026-08-02: tmux-continuum only arms
+its autosave by prepending a `#(continuum_save.sh)` interpolation to
+`status-right`, and `continuum.tmux`'s `main()` skips that step entirely
+whenever any other tmux process is running on the machine
+(`another_tmux_server_running` in `scripts/helpers.sh` compares all `tmux`
+processes except the current server against that server's attached-client
+count). Therefore any private/isolated laptop tmux server — exactly what
+these smoke lanes are built on — suppresses continuum's re-arming on the
+user's live server for as long as it exists. Combined with the fact that
+every `source-file` re-runs catppuccin and rewrites `status-right`, a stray
+server left running leaves the live session's autosave silently disarmed
+with no error. This is not hypothetical: six orphaned test servers from
+earlier runs left the live server's autosave dead from 2026-08-01 03:45
+until 2026-08-02. After any smoke run, the operator should re-source
+tmux.conf and confirm autosave re-armed; `rw doctor` now has a "Local
+durability" section that checks this.
 
 ### Evidence contract
 
@@ -2022,6 +2083,50 @@ extraction PR: port repair on slots 10/11 and 12/13, legacy colon-format
 claim migration on slots 5/6/7/9, deletion of `worktree-claim.ts`,
 `sync-env-worktrees.ts` and their script/doc references, and the
 Playwright port-3014 conversion.
+
+### Remaining smoke-test surface (as of 2026-08-02)
+
+Honest accounting of where the waves above actually stand:
+
+PROVEN so far — only two things: the sandboxed provider-adapter round-trip
+(`libexec/adapters/smoke-test`, 11/11, re-verified 2026-08-02), and the
+headless-install worker-provisioning contract (both workers' doctors, the
+detached save-timer chain, and `rw doctor` run from the laptop).
+
+BLOCKED on operator authentication:
+
+- all of Wave 5's six live provider handoff/return cases (Pi/Claude/Codex x
+  mini/agents-roll);
+- the real authenticated `codex resume` check; and
+- the final terminal-emulator OSC 52 clipboard confirmation, which needs one
+  brief human check.
+
+REMAINING and schedulable now over SSH only:
+
+- `preflight.sh --worker <alias>` for both workers;
+- Treemux/plugin-version inventory;
+- the `allow-passthrough` and key-table check;
+- a worker-side `git ls-remote` against a disposable origin;
+- the `ssh -G mini` route-selection check, without disturbing the real
+  Wi-Fi/Tailscale path; and
+- the agents-roll timer wrapper `--check` self-test (the mini equivalent is
+  already proven).
+
+REMAINING on an isolated laptop tmux server, subject to the continuum
+teardown rule in the coordinator isolation contract above:
+
+- Wave 1E private-focus behavior;
+- Waves 2-3 endpoint establishment/placement, pane/window/split/close
+  lifecycle, connection-loss/backoff, and the still-open
+  detach-hook-on-TCP-drop question;
+- the mandatory remote Treemux smoke;
+- Wave 4 handoff/return; and
+- Wave 6's private-variant resurrection/reconciliation drills.
+
+DEFERRED to a final, explicitly-warned step: Wave 6's serialized production
+canaries against the live focus-machine tmux server — real timer firing
+without isolation, default-server-loss inventory, worker reboot recovery,
+and the optional focus-Mac sleep/wake drill.
 
 ## Research references
 

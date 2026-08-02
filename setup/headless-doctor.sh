@@ -333,12 +333,22 @@ if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- required commands (current environment) --"
 fi
 
-REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob"
+REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob gh"
 for cmd in $REQUIRED_CMDS; do
   if has_cmd "$cmd"; then
     c_pass "cmd:$cmd" "$(command -v "$cmd")"
   else
-    c_fail "cmd:$cmd" "not found on PATH" "$SETUP_REMEDIATION"
+    if [ "$cmd" = "gh" ]; then
+      # gh (GitHub CLI): Brewfile.headless already installs it on macOS, and
+      # setup/linux-headless.sh now installs it on Linux too (apt/dnf/pacman
+      # required, zypper/apk optional). A worker provisioned before that fix
+      # will FAIL this check until re-provisioned -- that is intentional,
+      # not a false positive; it is exactly the parity gap this check exists
+      # to catch. See docs/tasks/headless-install.md.
+      c_fail "cmd:$cmd" "not found on PATH" "$SETUP_REMEDIATION (installs gh on Linux/macOS; on unsupported distros install gh manually: https://cli.github.com)"
+    else
+      c_fail "cmd:$cmd" "not found on PATH" "$SETUP_REMEDIATION"
+    fi
   fi
 done
 
@@ -441,6 +451,7 @@ check_stow_target "stow:codex" "$TARGET_HOME/.codex/AGENTS.md"
 check_stow_target "stow:git" "$TARGET_HOME/.gitconfig"
 check_stow_target "stow:pi" "$TARGET_HOME/.pi/agent/AGENTS.md"
 check_stow_target "stow:ssh" "$TARGET_HOME/.ssh/config"
+check_stow_target "stow:vim" "$TARGET_HOME/.vimrc"
 check_stow_target "stow:zsh" "$TARGET_HOME/.zshrc" "$TARGET_HOME/.zshenv"
 check_stow_target "stow:worktrees" "$TARGET_HOME/.local/bin/worktree-slot"
 

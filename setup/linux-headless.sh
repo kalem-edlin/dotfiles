@@ -208,7 +208,13 @@ install_linux_packages() {
   # "Required worker contract" (zsh, git, git-lfs, stow, tmux, jq, rsync,
   # tar, nvim, an ssh client) plus the minimal build toolchain genuinely
   # needed for npm packages with native addons installed by setup/node.sh
-  # (make/gcc/g++/pkg-config or the distro's build-essentials equivalent).
+  # (make/gcc/g++/pkg-config or the distro's build-essentials equivalent),
+  # plus gh (GitHub CLI) for parity with Brewfile.headless:27, which already
+  # installs it on macOS headless workers (see headless-doctor.sh's cmd:gh
+  # check). gh is only REQUIRED here on distros confidently known to ship it
+  # in their default repos (apt/dnf/pacman); elsewhere it is OPTIONAL with a
+  # comment explaining why, so an unsupported distro degrades to a warning
+  # instead of a hard failure.
   # OPTIONAL: everything else — conveniences (ripgrep, fd, bat, fzf, tree,
   # btop, zoxide, lsof, ctags, ...), the pyenv/Python build-dependency
   # headers (python.sh is not part of the required command contract), and
@@ -217,7 +223,7 @@ install_linux_packages() {
     apt)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-client
-        tmux neovim jq rsync tar make gcc g++ pkg-config
+        tmux neovim jq rsync tar make gcc g++ pkg-config gh
       )
       optional=(
         cmake ninja-build unzip xz-utils ripgrep fd-find bat fzf tree btop
@@ -231,7 +237,7 @@ install_linux_packages() {
     dnf)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-clients
-        tmux neovim jq rsync tar make gcc gcc-c++ pkgconf-pkg-config
+        tmux neovim jq rsync tar make gcc gcc-c++ pkgconf-pkg-config gh
       )
       optional=(
         cmake ninja-build unzip xz ripgrep fd-find bat fzf tree btop zoxide
@@ -243,7 +249,7 @@ install_linux_packages() {
     pacman)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh
-        tmux neovim jq rsync tar base-devel pkgconf
+        tmux neovim jq rsync tar base-devel pkgconf gh
       )
       optional=(
         cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
@@ -261,6 +267,11 @@ install_linux_packages() {
         python3 python3-pip python3-venv pipx ctags libopenssl-devel
         zlib-devel libbz2-devel readline-devel sqlite3-devel xz-devel
         tk-devel libffi-devel postgresql-devel git-delta
+        # gh: package name is correct, but unlike apt/dnf/pacman we are not
+        # confident it ships in every openSUSE default repo config (Leap vs
+        # Tumbleweed vary) -- keep optional so a miss degrades to a warning,
+        # not a hard failure.
+        gh
       )
       ;;
     apk)
@@ -276,6 +287,12 @@ install_linux_packages() {
         python3 py3-pip py3-pipx ctags openssl-dev zlib-dev bzip2-dev
         readline-dev sqlite-dev xz-dev tk-dev libffi-dev postgresql-dev
         delta
+        # gh: package name is correct, but it lives in Alpine's "community"
+        # repo, which is not guaranteed enabled on every minimal Alpine
+        # install (and this branch is currently unreachable anyway per the
+        # comment above) -- keep optional so a missing/disabled repo
+        # degrades to a warning, not a hard failure.
+        gh
       )
       ;;
   esac

@@ -32,12 +32,16 @@ make setup-headless
 headless lane automatically. See [`docs/headless-workers.md`](docs/headless-workers.md)
 for the full operator runbook — preconditions, what success/failure means,
 manual steps that stay manual, and how to register a worker with a focus
-machine so `rw` can orchestrate it.
+machine so `rw` can orchestrate it. See
+[`docs/headless-vs-local.md`](docs/headless-vs-local.md) for the conceptual
+reference on how headless and full local installs differ (and why) — the
+shared CLI/dotfile/provider contract both consume.
 
 The Linux lane uses distro packages instead of Homebrew, then reuses the shared
 setup scripts and dotfiles for:
 
-- Stow-managed configs: `claude`, `git`, `pi`, `ssh`, `vim`, `zsh`
+- Stow-managed configs: `claude`, `codex`, `git`, `pi`, `ssh`, `vim`,
+  `worktrees`, `zsh`
 - Direct `~/.config` links: `nvim`, `tmux`
 - CLI tooling: zsh, tmux, Neovim, Git/Git LFS, Stow, fd/ripgrep/bat/fzf/jq,
   Python/pyenv/pipx, Node/fnm/npm globals, Stripe CLI, Claude Code, Pi tools,
@@ -50,11 +54,12 @@ GUI/macOS-only packages are intentionally skipped on Linux: AeroSpace,
 SketchyBar, Ghostty, KindaVim, macOS defaults, fonts/casks, and login items.
 
 Linux does not mirror the full headless Brewfile. It installs the required
-CLI contract shared with macOS (see `docs/tasks/headless-install.md`) plus a
-set of guarded conveniences (e.g. eza, bat/batcat, fd/fdfind, Git Delta where
-available), rather than every package listed in `Brewfile.headless`. Package
-selection lives in `setup/linux-headless.sh`, because package names differ
-across apt, dnf, pacman, zypper, and apk.
+CLI contract shared with macOS (see `docs/tasks/headless-install.md` and
+`docs/headless-vs-local.md`) plus a set of guarded conveniences (e.g. eza,
+bat/batcat, fd/fdfind, Git Delta where available), rather than every package
+listed in `Brewfile.headless`. Package selection lives in
+`setup/linux-headless.sh`, because package names differ across apt, dnf,
+pacman, zypper, and apk.
 
 ## Commands
 
