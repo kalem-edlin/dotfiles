@@ -52,6 +52,13 @@ export PYENV_ROOT="$HOME/.pyenv"
 # silently drop off PATH.
 [[ -f "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
 
+# Claude Code envoy CLI (originally added to the laptop's pre-dotfiles
+# ~/.zshenv by allhands). Preserved here for the same reason as .cargo/env
+# above: stow replaces that file, and dropping this would silently remove
+# envoy from PATH. Guarded on the relative path, so it only ever applies in a
+# directory that actually ships one.
+[[ -f ".claude/envoy/envoy" ]] && export PATH="$PWD/.claude/envoy:$PATH"
+
 # Initialize fnm for noninteractive shells only. This is what puts the
 # selected default Node/npm and npm-global CLIs (pi, codex) on PATH for
 # `ssh worker 'command'` invocations, which never source .zshrc. Interactive

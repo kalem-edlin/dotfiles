@@ -34,8 +34,9 @@
 #     FIRST-.bak protection: if "$target.bak" already exists from a prior
 #     run, it is preserved untouched and the new conflict is moved to a
 #     timestamp-suffixed "$target.bak.<epoch>" instead of overwriting it.
-#     Stale symlinks that already point into $DOTFILES_DIR are left alone;
-#     stale symlinks pointing elsewhere are removed (stow will replace them).
+#     Relative symlinks that resolve into $DOTFILES_DIR are left alone;
+#     absolute symlinks (which stow refuses to adopt) and symlinks pointing
+#     elsewhere are removed, so stow can recreate them relative.
 #
 #   stow_packages <package> [<package> ...]
 #     Runs `stow --no-folding --restow -d "$DOTFILES_DIR" -t "$HOME"` for
@@ -185,11 +186,36 @@ backup_conflicts() {
       target="$HOME/$relpath"
 
       if [ -L "$target" ]; then
-        case "$(readlink "$target")" in
-          "$DOTFILES_DIR"*) ;;
-          *)
-            echo "  -> removing stale symlink $relpath"
+        link_text="$(readlink "$target")"
+        case "$link_text" in
+          /*)
+            # Absolute symlink. stow only ever CREATES relative links and
+            # refuses to adopt an absolute one -- it prints "Ignoring an
+            # absolute symlink" and then fails the whole package with
+            # "existing target is not owned by stow". Crucially it aborts
+            # *after* this function has already moved every other conflict
+            # aside, which leaves $HOME stripped of the very dotfiles the run
+            # was meant to install. Observed 2026-08-02 on the laptop: two
+            # absolute links (~/.claude/keybindings.json, .claude/commands/
+            # plan.md) aborted `make install` and ~/.zshrc, ~/.gitconfig,
+            # ~/.ssh/config and ~/.vimrc were all left missing.
+            # Remove it regardless of where it points: if it targets this
+            # repo, stow recreates it correctly as a relative link; if it
+            # targets anywhere else it was stale and had to go anyway.
+            echo "  -> removing absolute symlink $relpath (stow requires relative)"
             rm "$target"
+            ;;
+          *)
+            # Relative symlink -- stow's own format. Resolve it and keep it
+            # only when it genuinely points back into this repo.
+            link_dest="$(cd -P "$(dirname "$target")/$(dirname "$link_text")" 2>/dev/null && pwd)"
+            case "$link_dest" in
+              "$DOTFILES_DIR"*) ;;
+              *)
+                echo "  -> removing stale symlink $relpath"
+                rm "$target"
+                ;;
+            esac
             ;;
         esac
       elif [ -e "$target" ]; then
