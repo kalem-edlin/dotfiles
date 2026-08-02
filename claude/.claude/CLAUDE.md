@@ -51,12 +51,21 @@ there.
   with a workaround. Exit 12 (no stable session identity, e.g. running
   outside tmux) is not itself a block; use ordinary judgment.
 - Claim the worktree for the current focus/tmux responsibility
-  (`worktree-claim claim`) before starting managed edits on it.
+  (`worktree-claim claim`) before starting managed edits on it. Pass
+  `--branch <name>` to switch the worktree to that branch as part of
+  claiming (`--create` if the branch does not exist yet); this refuses on a
+  tree with uncommitted tracked changes unless `--force`. Omit `--branch`
+  to claim without touching the current checkout.
+- `worktree-claim status [--json] [--path <worktree>]` reports who
+  currently owns a worktree. It never mutates, so use it freely before
+  deciding whether a worktree is yours to edit.
 - Never steal or overwrite an existing claim. Use the explicit
   `handoff-writer` / `return-writer` / `release` operations, or an approved
-  `--force-takeover`, never a silent overwrite.
+  `--force-takeover`, never a silent overwrite. `release` also refuses on a
+  tree with uncommitted tracked changes unless `--force`.
 - Unclaimed worktrees and non-opted-in repositories are unaffected --
-  claims are optional, not a universal lock.
+  claims are optional, not a universal lock. A worktree with no claim
+  marker is free to take over.
 
 ### Ephemeral sub-agent worktrees
 
