@@ -3,9 +3,7 @@
 # setup/macos-headless.sh — Darwin orchestration for `make setup-headless`.
 #
 # Extracted out of the Makefile recipe (which used to be one giant `@if ...;
-# \` compound shell recipe with no fail-fast behavior — see
-# docs/tasks/headless-install.md, "4. Make the macOS Make path fail fast")
-# for two reasons:
+# \` compound shell recipe with no fail-fast behavior) for two reasons:
 #
 #   1. `set -euo pipefail` here means the FIRST failing step aborts the
 #      whole run. No step's failure can be masked by a later echo reaching a
@@ -66,9 +64,8 @@ trap 'kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true' EXIT
 # binary), then language/tool steps, then install-headless (stow + TPM
 # plugins), then misc-headless (SSH key + launchd save timer) LAST — the
 # launchd timer setup asserts that tmux-resurrect's save.sh already exists,
-# which only install-headless creates. See docs/tasks/headless-install.md,
-# "CRITICAL ORDERING" note. headless-doctor is the final gate: this script
-# only reaches the success banner if it exits 0.
+# which only install-headless creates. headless-doctor is the final gate:
+# this script only reaches the success banner if it exits 0.
 run_make_target brew-headless
 run_make_target python
 run_make_target neovim

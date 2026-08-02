@@ -18,8 +18,7 @@
   injected as TMUX_RESURRECT_SAVE_TMUX_BIN below because launchd's default
   environment does not include Homebrew's bin directory on PATH — the
   wrapper's PATH-based `tmux` lookup would otherwise fail silently under
-  launchd even though it succeeds in an interactive/provisioning shell. See
-  docs/tasks/headless-install.md, "7. Fix macOS launchd execution".
+  launchd even though it succeeds in an interactive/provisioning shell.
 -->
 <plist version="1.0">
 <dict>

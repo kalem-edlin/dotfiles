@@ -3,12 +3,9 @@
 # setup/linux-headless.sh — Linux orchestration for `make setup-headless`
 # (Linux branch). Adopts the shared install layer in setup/lib.sh instead of
 # maintaining its own third copy of the stow/TPM/rw logic, and stops
-# converting required failures into warnings. See
-# docs/tasks/headless-install.md, especially "3. Fix the Linux first-run
-# environment boundary", "5. Make package and postflight validation
-# authoritative", "Complete Linux tool parity", "Define the supported Linux
-# platform boundary", "Handle minimal VPS locale behavior", and "Unify the
-# shared local and headless setup contract".
+# converting required failures into warnings. See docs/headless-vs-local.md
+# for the shared-contract design and docs/headless-workers.md for the
+# required worker contract this script installs toward.
 #
 # `make setup-linux-headless` runs this script and THEN gates on
 # `setup/headless-doctor.sh` (exit-propagating) — this script no longer needs
@@ -28,9 +25,7 @@ SETUP_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 # worktree-slot/worktree-claim entrypoints the `worktrees` package stows
 # later in this same script. Put it on PATH now so every later step in THIS
 # process — verify_commands in particular — can resolve them without
-# depending on a login shell having sourced zsh/.zshenv first. See
-# docs/tasks/headless-install.md, "2. Fix noninteractive PATH on both
-# platforms".
+# depending on a login shell having sourced zsh/.zshenv first.
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) export PATH="$HOME/.local/bin:$PATH" ;;
@@ -61,14 +56,14 @@ run_sudo() {
 # container reach package installation and only discover the durability gap
 # at the very end. apk stays in the package-manager mapping below for a
 # possible future non-systemd implementation, but this script does not
-# pretend to support it today. See docs/tasks/headless-install.md, "Define
-# the supported Linux platform boundary".
+# pretend to support it today. See docs/headless-vs-local.md, "Platform
+# support boundary".
 check_systemd_support() {
   if ! command -v systemctl >/dev/null 2>&1; then
     echo "Error: systemctl not found." >&2
     echo "This installer supports only systemd-based Linux distributions (v1 boundary)." >&2
     echo "Alpine/OpenRC and other non-systemd init systems are out of contract." >&2
-    echo "See docs/tasks/headless-install.md, 'Define the supported Linux platform boundary'." >&2
+    echo "See docs/headless-vs-local.md, 'Platform support boundary'." >&2
     exit 1
   fi
 
@@ -114,9 +109,7 @@ install_one() {
 # install_required_packages <package> ... — every failure is collected and
 # reported together, then the function returns nonzero. Called as a plain
 # statement (not inside an `if`), so `set -e` aborts the script immediately
-# afterward — a required package failure is fatal, not a warning. See
-# docs/tasks/headless-install.md, "5. Make package and postflight validation
-# authoritative".
+# afterward — a required package failure is fatal, not a warning.
 install_required_packages() {
   local package
   local failed=()
@@ -133,7 +126,7 @@ install_required_packages() {
   if [[ "${#failed[@]}" -gt 0 ]]; then
     echo "" >&2
     echo "ERROR: required package(s) failed to install: ${failed[*]}" >&2
-    echo "These are part of the worker contract (docs/tasks/headless-install.md," >&2
+    echo "These are part of the worker contract (docs/headless-workers.md," >&2
     echo "'Required worker contract'); aborting rather than claiming success." >&2
     return 1
   fi
@@ -142,9 +135,7 @@ install_required_packages() {
 # install_optional_packages <package> ... — failures are warnings only, and
 # every install attempt is explicitly labeled "(optional)" in output so a
 # reader never has to guess whether a given package was part of the
-# contract. See docs/tasks/headless-install.md, "Complete Linux tool
-# parity", third bullet ("Keep guarded conveniences ... optional unless
-# promoted into the formal worker contract").
+# contract.
 install_optional_packages() {
   local package
 
@@ -204,7 +195,7 @@ install_linux_packages() {
   local required=()
   local optional=()
 
-  # REQUIRED: the contract commands from docs/tasks/headless-install.md,
+  # REQUIRED: the contract commands from docs/headless-workers.md,
   # "Required worker contract" (zsh, git, git-lfs, stow, tmux, jq, rsync,
   # tar, nvim, an ssh client) plus the minimal build toolchain genuinely
   # needed for npm packages with native addons installed by setup/node.sh
@@ -215,15 +206,32 @@ install_linux_packages() {
   # in their default repos (apt/dnf/pacman); elsewhere it is OPTIONAL with a
   # comment explaining why, so an unsupported distro degrades to a warning
   # instead of a hard failure.
+  #
+  # git-delta is ALSO required (apt/dnf/pacman/zypper, package "git-delta")
+  # for the same reason gh is: git/.gitconfig unconditionally sets `pager =
+  # delta` and a [delta] diffFilter, so a missing delta breaks ordinary
+  # `git log`/`git diff` outright, not just a nice-to-have degradation (see
+  # headless-doctor.sh's cmd:delta check and docs/headless-vs-local.md,
+  # "Known parity gaps"). Confirmed available via `apt-cache policy
+  # git-delta` on agents-roll (Ubuntu 24.04, universe repo) 2026-08-02; dnf/
+  # pacman/zypper all carry a "git-delta" package in their default repos
+  # too. apk stays OPTIONAL under the name "delta" below, matching gh's apk
+  # treatment (unreachable branch today per check_systemd_support, and less
+  # confidence in Alpine's package set generally).
+  #
   # OPTIONAL: everything else — conveniences (ripgrep, fd, bat, fzf, tree,
-  # btop, zoxide, lsof, ctags, ...), the pyenv/Python build-dependency
-  # headers (python.sh is not part of the required command contract), and
-  # git-delta (see the loud warning below).
+  # btop, zoxide, lsof, ctags, eza, zsh-autosuggestions, ...) and the
+  # pyenv/Python build-dependency headers (python.sh is not part of the
+  # required command contract). eza and zsh-autosuggestions are genuine
+  # conveniences (README.md's "guarded convenience" promise, zsh/.zshrc's
+  # `command -v eza`/plugin source_if_exists guards) -- never required,
+  # because zsh/.zshrc and the alias definitions already degrade silently
+  # when either is absent.
   case "$PKG_MANAGER" in
     apt)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-client
-        tmux neovim jq rsync tar make gcc g++ pkg-config gh
+        tmux neovim jq rsync tar make gcc g++ pkg-config gh git-delta
       )
       optional=(
         cmake ninja-build unzip xz-utils ripgrep fd-find bat fzf tree btop
@@ -231,42 +239,43 @@ install_linux_packages() {
         gnupg libssl-dev zlib1g-dev libbz2-dev libreadline-dev
         libsqlite3-dev llvm libncursesw5-dev tk-dev libxml2-dev
         libxmlsec1-dev libffi-dev liblzma-dev postgresql-client libpq-dev
-        git-delta
+        eza zsh-autosuggestions
       )
       ;;
     dnf)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-clients
         tmux neovim jq rsync tar make gcc gcc-c++ pkgconf-pkg-config gh
+        git-delta
       )
       optional=(
         cmake ninja-build unzip xz ripgrep fd-find bat fzf tree btop zoxide
         lsof python3 python3-pip pipx ctags openssl-devel zlib-devel bzip2
         bzip2-devel readline-devel sqlite sqlite-devel xz-devel tk-devel
-        libffi-devel postgresql postgresql-devel git-delta
+        libffi-devel postgresql postgresql-devel eza zsh-autosuggestions
       )
       ;;
     pacman)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh
-        tmux neovim jq rsync tar base-devel pkgconf gh
+        tmux neovim jq rsync tar base-devel pkgconf gh git-delta
       )
       optional=(
         cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
         python python-pip python-pipx ctags openssl zlib bzip2 readline
-        sqlite tk libffi postgresql-libs git-delta
+        sqlite tk libffi postgresql-libs eza zsh-autosuggestions
       )
       ;;
     zypper)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh
-        tmux neovim jq rsync tar make gcc gcc-c++ pkg-config
+        tmux neovim jq rsync tar make gcc gcc-c++ pkg-config git-delta
       )
       optional=(
         cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
         python3 python3-pip python3-venv pipx ctags libopenssl-devel
         zlib-devel libbz2-devel readline-devel sqlite3-devel xz-devel
-        tk-devel libffi-devel postgresql-devel git-delta
+        tk-devel libffi-devel postgresql-devel eza zsh-autosuggestions
         # gh: package name is correct, but unlike apt/dnf/pacman we are not
         # confident it ships in every openSUSE default repo config (Leap vs
         # Tumbleweed vary) -- keep optional so a miss degrades to a warning,
@@ -286,6 +295,13 @@ install_linux_packages() {
         cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
         python3 py3-pip py3-pipx ctags openssl-dev zlib-dev bzip2-dev
         readline-dev sqlite-dev xz-dev tk-dev libffi-dev postgresql-dev
+        eza zsh-autosuggestions
+        # delta: package name is correct (Alpine ships git-delta's binary
+        # under the plain name "delta"), but we are less confident it is
+        # present/enabled in every Alpine repo config than on apt/dnf/
+        # pacman/zypper -- keep optional so a miss degrades to a warning,
+        # not a hard failure (this branch is currently unreachable anyway
+        # per the check_systemd_support comment above).
         delta
         # gh: package name is correct, but it lives in Alpine's "community"
         # repo, which is not guaranteed enabled on every minimal Alpine
@@ -316,12 +332,17 @@ install_linux_packages() {
     git lfs install --skip-repo
   fi
 
-  # git/.gitconfig unconditionally sets `pager = delta`. Where the distro's
-  # package manager genuinely lacks git-delta (e.g. older apt releases
-  # without the git-delta package), it stays optional and this prints a
+  # git/.gitconfig unconditionally sets `pager = delta`. git-delta is now a
+  # REQUIRED package on apt/dnf/pacman/zypper above (see the comment on
+  # install_linux_packages' required/optional split), so install_required_
+  # packages already aborts the whole script (via `set -e`) before this
+  # point is ever reached on those managers if the install genuinely failed.
+  # This check remains as defense-in-depth for the one path where delta is
+  # still OPTIONAL (apk -- unreachable today per check_systemd_support) and
+  # as a second, independent confirmation that the binary is actually on
+  # PATH (not just that the package manager reported success) -- it prints a
   # loud, impossible-to-miss warning instead of silently leaving `git log`/
-  # `git diff` broken. See docs/tasks/headless-install.md, "Complete Linux
-  # tool parity where configurations depend on it".
+  # `git diff` broken.
   if command -v delta >/dev/null 2>&1; then
     echo "  ok git-delta (delta) available: $(command -v delta)"
   else
@@ -356,8 +377,7 @@ install_linux_packages() {
 # it generated. Best-effort only: generate it cheaply where that's a single
 # well-known step (Debian/Ubuntu's /etc/locale.gen), otherwise just report
 # the available UTF-8 fallback. Never fatal — headless-doctor reports locale
-# as an optional/WARN check, not a required one. See
-# docs/tasks/headless-install.md, "Handle minimal VPS locale behavior".
+# as an optional/WARN check, not a required one.
 locale_is_available() {
   local target_normalized="enusutf8"
   local available normalized
@@ -509,8 +529,7 @@ REPO
 
 # Same package set as the Makefile's HEADLESS_STOW_PACKAGES /
 # HEADLESS_CONFIG_PACKAGES, kept in sync deliberately (see
-# docs/tasks/headless-install.md, "Unify the shared local and headless setup
-# contract").
+# docs/headless-vs-local.md for the shared-contract design).
 install_headless_dotfiles() {
   echo "Installing headless dotfiles..."
 
@@ -524,6 +543,12 @@ install_headless_dotfiles() {
 
   backup_conflicts claude codex git pi ssh vim worktrees zsh
   stow_packages claude codex git pi ssh vim worktrees zsh
+
+  # codex ships no config.toml in the stowed package (codex writes project
+  # trust entries straight into that file, so symlinking it would dirty the
+  # repo on every run); seed a starter one only if none exists yet. See
+  # setup/lib.sh's seed_codex_config.
+  seed_codex_config
 
   link_rw
 
@@ -594,8 +619,7 @@ install_tmux_resurrect_save_timer() {
   # (Persistent=no in the timer unit), so linger is what actually keeps the
   # timer alive long-term, not catch-up semantics. Verified below and fatal
   # if it does not end up "yes" — a timer that cannot survive logout is not
-  # a real durability net. See docs/tasks/headless-install.md, "Define the
-  # supported Linux platform boundary".
+  # a real durability net.
   if loginctl show-user "$SETUP_USER" -p Linger 2>/dev/null | grep -q "Linger=yes"; then
     echo "  ok loginctl linger already enabled for $SETUP_USER"
   else
@@ -672,8 +696,8 @@ verify_commands() {
 # (best-effort, never fatal) -> Tailscale (required unless opted out) ->
 # misc-headless.sh (ssh key, oh-my-zsh, Claude Code, gh) -> node.sh (installs
 # fnm+Node as a CHILD process) -> activate_fnm IN THIS PROCESS (fixes the
-# child-process PATH boundary from docs/tasks/headless-install.md, "3. Fix
-# the Linux first-run environment boundary") -> Stripe CLI (npm fallback now
+# child-process PATH boundary — fnm/Node changes made inside a child process
+# do not propagate back to this script) -> Stripe CLI (npm fallback now
 # has a working, activated fnm) -> python.sh / neovim.sh / obsidian.sh
 # (obsidian.sh activates its own fnm too, so it works standalone) ->
 # dotfiles via lib.sh (stow, TPM, rw, ssh dirs) -> systemd save timer + fatal

@@ -8,13 +8,12 @@ actually bring up a worker), see `docs/headless-workers.md`.
 
 This repo maintains one shared CLI/dotfile/provider contract that both
 `make setup` (full local install) and `make setup-headless` (headless worker
-install) consume. Per `docs/tasks/headless-install.md`'s "Purpose" section, a
-headless machine should receive the same terminal, Git, editor, provider,
-dotfile, networking, and `rw` capabilities as a local machine unless the
-local machine has a deliberate platform-specific alternative. The normal
-local setup may add GUI applications and focus-machine integration; it must
-not be a weaker CLI installation than headless setup ("Installation parity
-and ownership").
+install) consume. By design, a headless machine should receive the same
+terminal, Git, editor, provider, dotfile, networking, and `rw` capabilities
+as a local machine unless the local machine has a deliberate
+platform-specific alternative. The normal local setup may add GUI
+applications and focus-machine integration; it must not be a weaker CLI
+installation than headless setup.
 
 In practice: headless is a strict CLI subset of local, plus a small set of
 worker-specific durability mechanisms (save timers, linger) that local
@@ -45,26 +44,86 @@ correctly omits, or a worker-only concern that local correctly omits.
 These are durable, currently-true facts about where headless and local (or
 Linux and macOS headless) still diverge, as of this writing.
 
-1. **`gh` (GitHub CLI).** Installed on macOS headless via `Brewfile.headless`
-   (`brew "gh"`). On Linux, `setup/linux-headless.sh` now installs `gh` as a
-   **required** package on apt, dnf, and pacman; on zypper it is listed as
-   **optional** with an explicit comment ("unlike apt/dnf/pacman we are not
-   confident it ships in every openSUSE default repo config") so a miss
-   degrades to a warning rather than aborting the whole install; on apk it is
-   likewise optional, because `gh` lives in Alpine's `community` repo, which
-   is not guaranteed to be enabled (moot in practice today, since
-   `check_systemd_support` already rejects non-systemd Alpine hosts before
-   package installation is reached).
+1. **`gh` (GitHub CLI).** FIXED. Installed on macOS headless via
+   `Brewfile.headless` (`brew "gh"`). On Linux, `setup/linux-headless.sh`
+   installs `gh` as a **required** package on apt, dnf, and pacman; on
+   zypper it is listed as **optional** with an explicit comment ("unlike
+   apt/dnf/pacman we are not confident it ships in every openSUSE default
+   repo config") so a miss degrades to a warning rather than aborting the
+   whole install; on apk it is likewise optional, because `gh` lives in
+   Alpine's `community` repo, which is not guaranteed to be enabled (moot in
+   practice today, since `check_systemd_support` already rejects
+   non-systemd Alpine hosts before package installation is reached).
+   `headless-doctor.sh`'s `REQUIRED_CMDS` includes `gh`.
 
-2. **Provider config parity.** The three provider CLIs ship very different
-   first-run experiences via their stowed dotfiles:
+   The same forensic audit that closed this gap (2026-08-02) found the same
+   under-the-radar shape recurring elsewhere — see "The parity guard" below
+   for the structural fix, and this same list for what else it caught:
+   - `delta` (git-delta) was OPTIONAL on Linux and absent from
+     `headless-doctor.sh`'s `REQUIRED_CMDS`, even though `git/.gitconfig`
+     unconditionally sets `pager = delta` — a missing delta broke ordinary
+     `git log`/`git diff` outright. FIXED: `git-delta` is now REQUIRED on
+     apt/dnf/pacman/zypper (package name confirmed via `apt-cache policy
+     git-delta` on agents-roll, Ubuntu 24.04 — already installed there,
+     0.16.5-5, from the `universe` repo), OPTIONAL on apk under the name
+     `delta` (same treatment as `gh`'s apk branch, and similarly moot since
+     that branch is unreachable). `headless-doctor.sh`'s `REQUIRED_CMDS` now
+     includes `delta`.
+   - `eza` was promised as a Linux convenience in this doc and in
+     `README.md` but was in no Linux package list, and confirmed MISSING on
+     the live worker (`agents-roll`). FIXED by installing it: `apt-cache
+     policy eza` on agents-roll showed it available (candidate 0.18.2-1,
+     `universe` repo, just not installed) — a real, low-risk convenience, so
+     it was added to the OPTIONAL package list on all five Linux package
+     managers rather than walking back the README's promise.
+   - `zsh-autosuggestions` had a hardcoded Linux distro fallback path in
+     `zsh/.zshrc` but was never installed by `setup/linux-headless.sh`, and
+     was confirmed absent on the worker. FIXED by installing it: `apt-cache
+     policy zsh-autosuggestions` on agents-roll showed it available
+     (0.7.0-1, `universe`), so it was added to the OPTIONAL list on all five
+     managers.
+   - `zsh-vi-mode` has the same kind of `zsh/.zshrc` fallback path, but is
+     NOT packaged by apt on Ubuntu 24.04 (confirmed absent via both
+     `apt-cache policy zsh-vi-mode` and `apt-cache search zsh-vi-mode`, no
+     output either way) — jeffreytse/zsh-vi-mode has no distro package on
+     any mainstream Linux package manager. FIXED by correcting the
+     documentation instead of installing: `zsh/.zshrc`'s plugin-loading
+     comment no longer implies zsh-vi-mode is distro-packaged on Linux; its
+     `source_if_exists` fallback paths (including a manual
+     `~/.zsh/zsh-vi-mode/` clone location) remain and degrade silently when
+     absent, same as before.
+   - `pyenv`'s PATH export lived only in `zsh/.zshrc` (interactive-only), so
+     the binary existed on disk (`~/.pyenv/bin/pyenv`, confirmed present on
+     agents-roll) but never resolved under a noninteractive shell — the same
+     failure mode `zsh/.zshenv` already solves for `~/.local/bin` and fnm.
+     FIXED: `zsh/.zshenv` now exports `PYENV_ROOT` and prepends
+     `$PYENV_ROOT/bin` to `PATH`, following the exact pattern already used
+     for fnm's bootstrap directory in that file. `zsh/.zshrc`'s own
+     `eval "$(pyenv init -)"` block is unchanged and stays interactive-only
+     (shell function wrapping/completion, not something a noninteractive
+     shell needs).
+
+2. **Provider config parity.** PARTLY FIXED. The three provider CLIs still
+   ship very different first-run experiences via their stowed dotfiles:
    - `claude`'s shipped `claude/.claude/settings.json` now includes a
      `"theme": "dark"` key, so theme selection is no longer a first-run
      prompt.
-   - `codex` ships only `codex/.codex/hooks.json` and
-     `codex/.codex/AGENTS.md` — no settings/config file and no theme key at
-     all — so a first-run wizard is effectively guaranteed on every fresh
-     machine.
+   - `codex` ships no `config.toml` in its stowed package **by design** —
+     codex writes project-trust entries and other machine-specific cache
+     state straight into that exact file, so symlinking it via stow would
+     guarantee permanent working-tree dirt. `codex/.codex/` ships only
+     `hooks.json` and `AGENTS.md`. Instead, `setup/lib.sh`'s
+     `seed_codex_config()` copies `setup/templates/codex-config.toml` to
+     `~/.codex/config.toml` **only when that file does not already exist**
+     — it never overwrites an existing one. This is called from both
+     `make install` / `make install-headless` (the Makefile's `install`/
+     `install-headless` targets) and from `setup/linux-headless.sh`'s
+     `install_headless_dotfiles`. Net effect: a brand-new machine gets the
+     template's theme/model/status-line defaults and skips the first-run
+     wizard; an existing machine's `~/.codex/config.toml` (with its trust
+     entries and caches) is left completely alone by every rerun. Editing
+     the template therefore only ever affects machines that have never been
+     provisioned before.
    - `pi` ships `pi/.pi/agent/settings.json` with `"theme": "personal"` plus
      the theme definition itself at `pi/.pi/agent/themes/personal.json`, so
      it applies instantly with no prompt.
@@ -76,11 +135,29 @@ Linux and macOS headless) still diverge, as of this writing.
    own settings file — writes through the symlink and dirties the dotfiles
    working tree on every machine that has them stowed. This was observed
    live on both workers (`mini`, `agents-roll`) on 2026-08-02. Operational
-   consequence: the worker-sync procedure in
-   `docs/tasks/headless-install.md`'s smoke test requires a clean tree
+   consequence: the worker-sync procedure in `docs/headless-workers.md`'s
+   full validation section requires a clean tree
    (`git status --porcelain` must be empty) before syncing `main` — a worker
    whose tree got dirtied by a provider's own runtime write will halt the
    next provisioning run until the dirtied file is checked out or committed.
+
+   `setup/headless-doctor.sh` now has a non-fatal check for exactly this,
+   `drift:provider-settings` (section 11, "Provider settings write-back
+   drift"). It runs `git -C <dotfiles> status --porcelain -- <paths>` against
+   `claude/.claude/settings.json` and `pi/.pi/agent/settings.json` and:
+   - `c_optpass`es (PASS, optional) when both files are clean;
+   - `c_warn`s — never `c_fail`s — when either has uncommitted changes,
+     listing which file(s) drifted and the exact remediation:
+     `git -C <repo> checkout -- claude/.claude/settings.json pi/.pi/agent/settings.json`.
+   - degrades to a WARN (not a crash) when `git` is missing or
+     `$DOTFILES_DIR` isn't a git repository.
+
+   It is deliberately a WARN, not a FAIL: a worker where someone simply
+   launched `claude` or `pi` once must not go doctor-red over an expected
+   side effect of normal CLI use. The check exists so the drift is visible
+   in doctor output (and thus caught before it silently blocks a `main`
+   sync per the worker-sync procedure above), not to gate provisioning
+   success on it.
 
 ## Why the durability mechanisms differ
 
@@ -122,6 +199,80 @@ verification-tested end-to-end. Alpine/OpenRC is explicitly out of contract
 for v1: the durability timer requires a working `systemd --user` instance,
 and `check_systemd_support` deliberately fails fast on any host — Alpine or
 otherwise — that lacks one, before any package is installed.
+
+## Other deliberate safety defaults
+
+- **Homebrew cleanup is opt-in, not automatic.** `brew bundle cleanup
+  --force` can remove formulae or casks that were installed manually and
+  are simply absent from the Brewfile. Neither `make setup` nor
+  `make setup-headless` calls it. `make brew-cleanup` (and its
+  `brew-cleanup-headless` counterpart) only prints what would be removed;
+  applying it requires the separate, explicit `make brew-cleanup-force` /
+  `make brew-cleanup-headless-force`.
+- **A required step failing never produces a success banner.** Both
+  install chains gate their final "complete" message on
+  `headless-doctor`/postflight passing, so a failed required package,
+  dotfile, plugin, PATH, or timer step is always visible as a nonzero
+  exit, never masked by a later step that happened to succeed.
+
+## The tool-parity guard
+
+The root cause behind the `gh`/`delta`/`eza`/`zsh-autosuggestions` gaps above
+is structural, not a one-off oversight: `Brewfile.headless`,
+`setup/linux-headless.sh`'s `required=()`/`optional=()` package arrays, and
+`setup/headless-doctor.sh`'s `REQUIRED_CMDS` are three independently
+hand-maintained lists. Nothing forces them to agree, so a tool added to one
+can silently never make it into the others — which is exactly how `gh`
+shipped on macOS headless, was absent from every Linux package list, and was
+never checked by the doctor, all while the doctor still reported 61/61.
+
+`setup/check-tool-parity.sh` is a read-only maintenance script that closes
+that gap mechanically. It extracts tool names from all three sources,
+canonicalizes formula/package-name variants to one identity per tool (a
+single commented table in the script handles cases like `git-delta`/`delta`,
+`neovim`/`nvim`, `universal-ctags`/`ctags`, `ripgrep`/`rg`,
+`fd-find`/`fd`/`fdfind`-on-Debian, `bat`/`batcat`-on-Debian, and the
+per-package-manager build-toolchain/openssh naming variants), then runs
+three checks:
+
+1. Every Brewfile.headless tool has *some* Linux package-list entry
+   (required or optional) — catches the eza/zsh-autosuggestions shape.
+2. Every Linux **required** package resolves to a `headless-doctor.sh`
+   `REQUIRED_CMDS` check — catches the gh/delta shape (a package whose
+   absence is fatal to the worker contract, but that nothing actually
+   verifies post-install).
+3. Every `headless-doctor.sh` `REQUIRED_CMDS` entry traces back to either
+   source — catches a stale/orphaned doctor check with no real install path
+   behind it.
+
+Any divergence not listed in `setup/tool-parity-exceptions.txt` (one name
+per line, plus a one-line reason) fails the script loudly with a nonzero
+exit. The allowlist's existing categories: macOS/Xcode-only tools correctly
+absent from Linux (`cocoapods`, `fastlane`, `swift`, `watchman`, `rbenv`);
+things installed by a mechanism other than the package arrays (`fnm`,
+`pyenv`, `tailscale`, `stripe-cli`, `yarn`, `docker`, `docker-compose`,
+`node`, `npm`, `pi`, `codex`, `claude`, `ob`); native-build-toolchain/
+trust-store packages that are required but not part of the interactive
+command contract (`ca-certificates`, `make`, `gcc`, `g++`, `pkg-config`,
+`base-devel`, `build-base`); things disabled everywhere (`zsh-autocomplete`);
+things not packaged by any mainstream distro (`zsh-vi-mode`); and
+known-accepted, deliberately-deferred Linux gaps kept visible as TODOs
+(`actionlint`, `ast-grep`, `atac`, `cmatrix`, `git-filter-repo`, `glow`,
+`go`, `lazydocker`, `prettyping`, `recall`, `sl`, `sshs`, `supabase`,
+`trash-cli`, `uv`, `webp`, `httpd`).
+
+Run it with `make check-tool-parity`. **The rule going forward:** adding a
+tool to `Brewfile.headless` means also adding it to the Linux package lists
+and to `headless-doctor.sh` (if it's part of the required command contract),
+or adding it to `setup/tool-parity-exceptions.txt` with a reason if the
+absence is intentional.
+
+It is deliberately **not** wired into `setup`/`setup-headless` as a hard
+gate — see the comment on the Makefile's `check-tool-parity` target. This is
+a maintenance check for whoever is editing those three files, not a
+worker-provisioning precondition; failing a real provisioning run over a
+missing convenience-tool doctor check would be worse than the disease it
+prevents.
 
 ## See also
 

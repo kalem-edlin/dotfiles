@@ -3,13 +3,16 @@
 Status: implementation is complete dotfiles-side. The worker-provisioning
 prerequisite this plan depended on is now satisfied and verified — see
 "Headless worker provisioning results (2026-08-02)" below and
-`docs/tasks/headless-install.md` for the full campaign record. The remaining
+`docs/headless-workers.md` for the full campaign record. The remaining
 open surface is this plan's own live smoke execution: Waves 0-7 below are
 mostly unexecuted, Wave 5's real provider handoff/return matrix is blocked on
 operator authentication, and the live-server crash/restore drill is
 deliberately deferred to the last step. See "Remaining smoke-test surface
 (as of 2026-08-02)" at the end of the smoke-testing section for the current
-breakdown.
+breakdown. Separately, this plan implies changes to the content-engine
+repository itself; those are not part of this document's dotfiles execution
+and are consolidated as their own ad hoc PR in "Content-engine follow-up: a
+separate PR" near the end of the smoke-testing section.
 
 Created: 2026-07-30
 Implementation status: implemented dotfiles-side (2026-07-31); see
@@ -1092,6 +1095,12 @@ This separation prevents collaborators from inheriting a tmux/worktree process
 they did not choose, while allowing the same personal claim system to work
 across content-engine and any future opted-in repository.
 
+The concrete extraction checklist, what already works against content-engine
+without it, and the exact interim/advisory behavior on unmigrated slots are
+consolidated in "Content-engine follow-up: a separate PR" near the end of the
+smoke-testing section — that subsection, not this one, is the authority on
+what the content-engine-side PR must actually change.
+
 ### Relationship to workmux
 
 `workmux` is valuable prior art for coupling a worktree lifecycle to terminal
@@ -1512,7 +1521,9 @@ all subsequently fixed and re-verified:
   stderr warning from `verify-writer` — but do NOT block writes. Blocking
   would break current daily workflows, and the legacy system enforced
   nothing either. Real enforcement over those slots begins with the
-  content-engine migration PR.
+  content-engine migration PR (see "Content-engine follow-up: a separate
+  PR" near the end of the smoke-testing section for exactly what that PR
+  must do).
 - Also fixed: state-dir override consistency, a `--dry-run` write leak,
   proactive git-host auth preflight, and five stale doc/doctor surfaces
   that described finished work as stubs.
@@ -1583,7 +1594,7 @@ multi-field parse of tmux stdout had to become one field per call instead.
 See commits `bbd0211` (this repo's sidecar/`rw` scripts) and `d232f42`
 (vendored tmux-resurrect pin and patch).
 
-See `docs/tasks/headless-install.md` for the full campaign record.
+See `docs/headless-workers.md` for the full campaign record.
 
 ## Smoke testing — agent-first execution plan
 
@@ -1602,6 +1613,65 @@ already have test seams. Even authenticated Claude, Codex, and Pi resumes can
 be launched in disposable tmux panes and driven/polled by an agent. Never run a
 handoff test in the coordinating agent's own pane: successful handoff stops the
 source agent by design.
+
+### Execution contract: fully automated, agent-run, non-destructive
+
+This entire smoke plan runs the same way the just-completed headless-install
+worker-provisioning campaign did (see "Headless worker provisioning results
+(2026-08-02)" above and `docs/headless-workers.md`): programmatic,
+agent-executed, and structured so nothing destructive can happen by accident.
+That precedent is the binding contract for every lane below, not a stylistic
+preference, and every wave, lane, and assertion that follows must satisfy it.
+
+- **Programmatic execution only.** Every lane is executed by an instructed
+  subagent running commands over SSH or against an isolated tmux server, per
+  the coordinator isolation contract below. No lane is run by a human typing
+  into a terminal, and no lane is a guided manual walkthrough — the human's
+  only role is the readiness gate in "The small user-owned readiness gate."
+- **The live focus-machine tmux server is untouchable.** Agents never run any
+  tmux command against the user's live focus-machine tmux server — not
+  `send-keys`, not `capture-pane`, not `kill-session`, nothing. Worker-side
+  tmux is permitted, but confined to sessions carrying the lane's test prefix
+  (the `rw-<machine-short>-<endpoint-id>` namespace under a lane-unique focus
+  id, or the lane's own `$RUN_ID`/`$LANE_ID`), and such a session is only ever
+  killed by quoted exact match: `tmux kill-session -t '=exact-session-name'`.
+  The leading `=` forces tmux's exact-match target syntax instead of prefix
+  matching; the quotes matter because a zsh login shell would otherwise
+  consume a bare `=word` as an EQUALS-expansion glob before tmux ever sees the
+  argument.
+- **Nothing destructive, anywhere, ever.** Saves only — never a Resurrect
+  *restore* run against a worker's real state. No unscoped `kill-server` or
+  `pkill`. No `git reset --hard` or `git clean` on a worker with a dirty tree
+  without explicit operator approval. No write to the real Resurrect `last`
+  target. No deletion of real user data. This is the same rule as "Hard
+  safety rules for every sub-agent" below, stated here as a precondition of
+  the whole run rather than a per-lane footnote.
+- **Blocked is not failed.** An auth-blocked or interactive-blocked step (a
+  sudo password prompt, `tailscale up`, a provider login, anything that would
+  need `ssh -t`) is reported `BLOCKED`, never `FAIL`. The agent skips it,
+  continues everything that does not depend on it, and the coordinator
+  reports one consolidated operator checklist at the end of the run instead
+  of halting on the first blocked item.
+- **Required-step failure halts and reports verbatim.** The coordinator stops
+  at the first failed *required* step and reports it exactly as observed. It
+  does not improvise a fix or a workaround beyond what the failing step
+  names — repairing forward mid-lane is exactly what "no edits/fixes during a
+  smoke lane" below forbids.
+- **Every lane tears itself down and proves it.** A lane is not done when its
+  assertions pass; it is done when it has also torn down everything it
+  created and verified no orphaned tmux processes remain on that machine.
+  This is the same rule as the continuum-suppression hazard documented in the
+  coordinator isolation contract below — a stray private server left running
+  silently disarms the live session's autosave with no error, which is
+  exactly the class of accidental damage this contract exists to prevent.
+- **Every lane produces a machine-checkable result.** Not a prose impression:
+  a per-step PASS/FAIL/BLOCKED line, the commit SHA under test, and every WARN
+  with its recorded detail, per the evidence contract below.
+- **What cannot be proven programmatically is named, not assumed.** The final
+  terminal-emulator OSC 52 clipboard acceptance and a real authenticated
+  provider resume that depends on interactive login the operator performed
+  out of band are called out explicitly as needing one brief human
+  confirmation. Neither is ever silently marked passed.
 
 ### Completion rule
 
@@ -1754,7 +1824,8 @@ durability" section that checks this.
 Each sub-agent writes under its lane root:
 
 ```text
-manifest.json       run/lane/host/socket/state roots and exact owned resources
+manifest.json       run/lane/host/socket/state roots, exact owned resources,
+                     and the commit SHA under test
 assertions.jsonl    id, surface, expected, actual, PASS|FAIL|BLOCKED, timestamps
 commands.log        sanitized argv, exit code, duration (no secrets/transcripts)
 before.json         scoped local/worker inventory before the lane
@@ -2076,13 +2147,98 @@ optional-LFS preflight behavior, retained endpoint reuse/cleanup after return,
 return-pane resume verification, attach-loop timing/backoff, and remote Treemux
 path/action guarantees.
 
-### Separate content-engine follow-up
+### Content-engine follow-up: a separate PR
 
-Out of this repository's reach, tracked for the separate content-engine
-extraction PR: port repair on slots 10/11 and 12/13, legacy colon-format
-claim migration on slots 5/6/7/9, deletion of `worktree-claim.ts`,
-`sync-env-worktrees.ts` and their script/doc references, and the
-Playwright port-3014 conversion.
+This plan is dotfiles-only. It implies real changes inside the separate
+`content-engine` repository (worktrees live under
+`~/Developer/content-engine-trees/content-engine-*` on this machine), but
+those changes are not part of this document's dotfiles work, are not part of
+the smoke-testing waves above, and do not gate them. They land as their own
+ad hoc PR against content-engine. This subsection is the single place that
+states what that PR must change, what already works today without it, and
+what stays broken or advisory-only until it lands.
+
+**What the content-engine PR must change.** Verified against the live
+checkout at `content-engine-1`:
+
+- Delete `scripts/worktree-claim.ts` (356 lines, confirmed; roughly 90%
+  generic claim/release/status/tmux-ownership/slot-claiming/machine-writer
+  logic per the extraction fact above, with its only content-engine coupling
+  being a single `env:pull` call) and remove its `package.json` scripts
+  `worktree:claim`, `worktree:release`, and `worktree:status`.
+- Delete `scripts/sync-env-worktrees.ts` and remove its `package.json`
+  scripts `env:sync:worktrees` and `env:sync:worktrees:dry`, plus the
+  dangling references to it in `AGENTS.md` and
+  `platform/gcp/protocols/env-rendering.md`.
+- Migrate the legacy `.worktree-claim` markers on slots 5, 6, 7, and 9 from
+  their pre-JSON format to the current JSON claim schema. The live format on
+  an unmigrated slot is confirmed key=value, not colon-delimited — verified
+  directly from `content-engine-1/.worktree-claim`:
+  ```text
+  holder=kalemedlin
+  branch=fix/straight-to-app-attribution-readiness
+  tmux_session=roll-1-web-billing
+  date=2026-07-31T15:24:48.287Z
+  ```
+  (Slots 5-7 and 9 may carry either this key=value form or the older
+  colon-delimited variant; `worktree-claim`'s `wt_marker_is_legacy` treats
+  both identically — any `.worktree-claim` content that is not valid JSON.)
+- Run the one-time port-repair pass restoring the correct
+  `(N - 1) * block_size` ports on slots 10/11 and 12/13, currently corrupted
+  by the old linear `slot - 1` formula (verified: both pairs currently share
+  identical dev-server ports).
+- Convert Playwright's hardcoded port 3014
+  (`apps/tanstack/playwright.config.ts:47`) into a rendered per-slot service.
+- Remove the now-redundant `.worktree-claim` entry from content-engine's own
+  `.gitignore` (currently line 55) — see "already works" below, this is
+  cleanup, not a functional requirement.
+- Opting content-engine into the dotfiles-side registry is **already done**
+  and does not need to happen in the content-engine PR: it is opted into
+  `worktrees/.config/worktrees/config.json` today (repo identity
+  `github.com/kalem-edlin/content-engine`, `slot_capacity: 20`, services
+  `NEXT`/`DASHBOARD`/`ENGINE`/`EXPO`, `block_size: 100`, default tier
+  `warm`). The content-engine PR only needs to remove its own competing
+  implementation and stale markers, not add configuration on the dotfiles
+  side.
+
+**What already works today, without the content-engine PR.** The dotfiles-side
+`worktree-slot` and `worktree-claim` executables operate against
+content-engine's opted-in configuration right now, including against slots
+that still carry a legacy marker: `worktree-slot ensure`, `worktree-claim
+claim/release/status/verify-writer`, and the deterministic port allocator all
+run today. `.worktree-claim` is already globally ignored by dotfiles'
+`core.excludesfile` (`git/.gitignore_global`), independent of content-engine's
+own now-redundant `.gitignore` entry, so a claim marker never needs to be
+committed to get that behavior. `wt_marker_is_legacy` in
+`worktrees/.local/lib/worktrees/common.sh` detects a pre-migration marker by
+the same test used above (present but not valid JSON) and labels it "legacy
+claim marker (unmigrated — see content-engine extraction PR)" in
+`status`/`doctor` output, with a `verify-writer` stderr warning — but it does
+NOT block writes. New claims and handoffs written by `worktree-claim` on any
+slot, migrated or not, always use the current JSON schema.
+
+**What stays broken or advisory-only until the content-engine PR lands:**
+
+- Slots 10/11 and 12/13 keep their colliding dev-server ports; the first
+  `worktree-slot ensure` against either pair legitimately blocks on the
+  listener/collision diagnostic in the meantime (expected, per the
+  blocking-diagnostic rule in "Deterministic port allocator" — not a bug).
+- Slots 5, 6, 7, and 9 remain on the legacy marker format: visible and
+  labeled, but not enforced.
+- content-engine's own `worktree:claim`/`worktree:release`/`worktree:status`
+  scripts and `env:sync:worktrees` remain live and duplicate the
+  dotfiles-owned implementation until removed, and its two disagreeing port
+  derivations (`(slot - 1) * 100` in the GCP env renderer versus plain
+  `slot - 1` in `sync-env-worktrees.ts`) keep disagreeing until content-engine's
+  copy is deleted.
+- Enforcement over any unmigrated slot stays advisory-only — a warning, never
+  a block — until the content-engine migration PR lands, per the INTERIM
+  BEHAVIOR decision recorded in the adversarial-audit findings above.
+
+See also "Content-engine inconsistency to replace" and "Relationship to
+content-engine" earlier in this document for the design rationale behind
+these items; this subsection is the authoritative checklist for what the
+separate PR actually has to do.
 
 ### Remaining smoke-test surface (as of 2026-08-02)
 

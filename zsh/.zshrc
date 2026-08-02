@@ -89,7 +89,19 @@ source_if_exists() {
   [[ -r "$1" ]] && source "$1"
 }
 
-# zsh plugins (Homebrew on macOS/Linuxbrew, distro packages on Linux)
+# zsh plugins (Homebrew on macOS/Linuxbrew, distro packages on Linux).
+# zsh-autosuggestions IS distro-packaged on Linux and setup/linux-headless.sh
+# installs it as a guarded OPTIONAL convenience (apt/dnf/pacman/zypper: pkg
+# "zsh-autosuggestions"; confirmed available via `apt-cache policy
+# zsh-autosuggestions` on agents-roll, Ubuntu 24.04, 2026-08-02). zsh-vi-mode
+# (jeffreytse/zsh-vi-mode) is NOT packaged by any mainstream distro's default
+# repos (confirmed absent from apt on Ubuntu 24.04 via both `apt-cache
+# policy` and `apt-cache search`) -- setup/linux-headless.sh does not attempt
+# to install it, so on Linux it only activates if manually cloned to
+# ~/.zsh/zsh-vi-mode (the last source_if_exists below) or otherwise placed at
+# one of the paths checked here. Every source_if_exists guard below is a
+# silent no-op when its target is absent, on every platform -- an unmet
+# plugin never breaks shell startup.
 if command -v brew >/dev/null 2>&1; then
   BREW_PREFIX="$(brew --prefix)"
   source_if_exists "$BREW_PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"

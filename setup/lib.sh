@@ -13,8 +13,8 @@
 # before sourcing this file. All functions below act relative to that
 # variable and to $HOME; none of them infer the repo location themselves.
 #
-# Public functions (see docs/tasks/headless-install.md, "Unify the shared
-# local and headless setup contract" for the design rationale):
+# Public functions (see docs/headless-vs-local.md for the shared local vs.
+# headless setup contract design rationale):
 #
 #   activate_fnm
 #     Idempotently put fnm on PATH (Homebrew locations on macOS,
@@ -75,11 +75,21 @@
 #     (tmux/local-plugins/tmux-remote-workspaces/scripts/rw) into
 #     ~/.local/bin/rw.
 #
+#   seed_codex_config
+#     Seed-if-missing: copies setup/templates/codex-config.toml to
+#     ~/.codex/config.toml ONLY if that file does not already exist. Never
+#     overwrites an existing config.toml. codex/.codex/ (the stowed package)
+#     deliberately ships no config.toml of its own — codex writes
+#     machine-specific state (project trust entries, model migration/
+#     availability caches, marketplace timestamps) straight into that exact
+#     file, so symlinking it would guarantee permanent working-tree dirt.
+#     This is the only way codex gets its default theme/model/status-line
+#     settings on a fresh machine instead of running its first-run wizard.
+#
 #   ensure_ssh_dirs
 #     Creates ~/.ssh and ~/.ssh/sockets (mkdir -p, then chmod 700 each —
 #     deliberately not `mkdir -m`, which only guarantees the mode on the
-#     deepest created directory per docs/tasks/headless-install.md's
-#     "Current validation evidence").
+#     deepest created directory).
 
 if [ -z "${DOTFILES_DIR:-}" ]; then
   echo "setup/lib.sh: DOTFILES_DIR must be set before sourcing this file." >&2
@@ -362,6 +372,25 @@ link_rw() {
   mkdir -p "$HOME/.local/bin"
   ln -sf "$DOTFILES_DIR/tmux/local-plugins/tmux-remote-workspaces/scripts/rw" "$HOME/.local/bin/rw"
   echo "  -> linked rw -> ~/.local/bin/rw"
+}
+
+seed_codex_config() {
+  template="$DOTFILES_DIR/setup/templates/codex-config.toml"
+  target="$HOME/.codex/config.toml"
+
+  if [ ! -f "$template" ]; then
+    echo "  (warn) codex config template not found: $template (skipping seed)"
+    return 0
+  fi
+
+  mkdir -p "$HOME/.codex"
+
+  if [ -e "$target" ]; then
+    echo "  -> ~/.codex/config.toml already exists, leaving it alone"
+  else
+    cp "$template" "$target"
+    echo "  -> seeded ~/.codex/config.toml from template (codex owns this file from now on)"
+  fi
 }
 
 ensure_ssh_dirs() {

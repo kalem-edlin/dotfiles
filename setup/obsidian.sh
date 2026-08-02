@@ -10,8 +10,7 @@ DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # if it's installed. Must work standalone (e.g. `make obsidian` run on its
 # own) as well as immediately after setup/node.sh installed fnm+Node in a
 # SEPARATE process on a completely clean Linux account — that's exactly the
-# case that used to break here. See docs/tasks/headless-install.md, "3. Fix
-# the Linux first-run environment boundary".
+# case that used to break here.
 activate_fnm || true
 
 echo "Configuring Obsidian Headless..."

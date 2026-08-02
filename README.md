@@ -54,12 +54,14 @@ GUI/macOS-only packages are intentionally skipped on Linux: AeroSpace,
 SketchyBar, Ghostty, KindaVim, macOS defaults, fonts/casks, and login items.
 
 Linux does not mirror the full headless Brewfile. It installs the required
-CLI contract shared with macOS (see `docs/tasks/headless-install.md` and
-`docs/headless-vs-local.md`) plus a set of guarded conveniences (e.g. eza,
-bat/batcat, fd/fdfind, Git Delta where available), rather than every package
-listed in `Brewfile.headless`. Package selection lives in
-`setup/linux-headless.sh`, because package names differ across apt, dnf,
-pacman, zypper, and apk.
+CLI contract shared with macOS (see `docs/headless-vs-local.md` and
+`docs/headless-workers.md`) — which now includes Git Delta as a required
+package on apt/dnf/pacman/zypper, since `git/.gitconfig` unconditionally sets
+`pager = delta` and a missing delta breaks ordinary `git log`/`git diff` —
+plus a set of guarded conveniences that degrade silently when absent (eza,
+bat/batcat, fd/fdfind, zsh-autosuggestions), rather than every package listed
+in `Brewfile.headless`. Package selection lives in `setup/linux-headless.sh`,
+because package names differ across apt, dnf, pacman, zypper, and apk.
 
 ## Commands
 

@@ -2,8 +2,8 @@
 
 Operator steps for bringing up a headless worker (macOS Mini, Linux VPS) and
 registering it with a focus machine so `rw` can orchestrate it. See
-`docs/tasks/headless-install.md` for the design rationale and acceptance
-criteria this runbook implements.
+`docs/headless-vs-local.md` for the design rationale — what headless install
+does differently from local install, and why.
 
 ## Preconditions
 
@@ -47,6 +47,41 @@ This dispatches to the Linux or macOS headless lane automatically based on
 - `INSTALL_TAILSCALE=0 make setup-headless` skips Tailscale installation.
   Use this escape hatch only for a deliberately public/LAN-only worker;
   everything else should keep Tailscale in the default contract.
+
+## Required worker contract
+
+After `make setup-headless` succeeds, the target user has all of the
+following. `make headless-doctor` and the verification commands below prove
+this contract — not just that the installer exited zero.
+
+- **Commands:** `bash`, `zsh`, `ssh`, `git`, `git-lfs`, `stow`, `tmux`, `jq`,
+  `rsync`, `tar`, `tailscale` (unless provisioned with
+  `INSTALL_TAILSCALE=0`), and a usable UUID source; `node`, `npm`, `pi`,
+  `codex`, and `claude` for agent handoff; `nvim` and `ob` as part of the
+  intended headless toolset.
+- **Dotfiles:** `~/.config/tmux` and `~/.config/nvim` linked to this
+  repository; the `claude`, `codex`, `git`, `pi`, `ssh`, `vim`, `worktrees`,
+  and `zsh` packages stowed; `~/.local/bin/rw`, `worktree-slot`, and
+  `worktree-claim` available.
+- **tmux plugins:** TPM itself, `tmux-resurrect` and `tmux-continuum`, and
+  this repository's own `tmux-workspace-resurrect` and
+  `tmux-remote-workspaces` plugin files exposed through the tmux dotfiles
+  link.
+- **Durability service:** on macOS, a loaded launchd job that can find
+  Homebrew tmux; on Linux, an active systemd user timer with linger enabled
+  for the target user.
+- **Noninteractive availability:** every command a focus machine invokes via
+  `ssh worker '<command>'` resolves without an interactive or login shell —
+  in particular Homebrew `tmux`/`git-lfs` on macOS and fnm-managed
+  `node`/`pi`/`codex` on both platforms.
+- **Independent credentials:** a worker-owned SSH key exists and is
+  registered with the Git host, and `claude`, `codex`, and `pi` are
+  authenticated independently on the worker — never copied from the focus
+  machine.
+- **Focus-machine registration:** the worker has a logical OpenSSH alias on
+  the laptop, and the same alias is declared in
+  `tmux/local-plugins/tmux-remote-workspaces/config.json` (see "Focus-machine
+  registration" below).
 
 ## Manual steps (these stay manual)
 
@@ -161,3 +196,71 @@ rw ensure --worker <alias>
 `rw doctor` should report the worker as healthy; `rw ensure` should be able
 to stand up or attach to a workspace on it. If either fails, treat the worker
 as not-yet-registered rather than working around it from the worker side.
+
+## Full validation (new or updated worker)
+
+The quick checks above are enough for routine use. When bringing up a new
+worker for the first time, or after a change to the install/durability
+scripts, run this fuller procedure once to prove the whole contract end to
+end. Everything runs from the focus machine over SSH; nothing in this
+procedure touches the focus machine's own tmux server. Every tmux command
+below runs on the worker, only ever against a disposable session named
+`smoke-headless` that this procedure itself creates and cleans up, and only
+ever kills a session it created, with an exact-match target
+(`kill-session -t '=smoke-headless'` — the leading `=` forces exact match so
+prefix matching can never select another session; quote the argument, since
+a zsh login shell on the worker otherwise intercepts the bare `=word` token
+as zsh EQUALS command-path expansion and tmux never sees it).
+
+Let `W` be the worker's logical alias and `REPO` the path to the dotfiles
+checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
+
+1. Sync `main`: confirm `ssh $W "git -C $REPO status --porcelain"` is empty
+   (a dirty tree halts the sync — never `reset --hard` a dirty worker tree
+   without first checking what dirtied it; a stowed provider settings
+   symlink writing through to the tracked file is a known cause, see
+   `docs/headless-vs-local.md`), then run
+   `ssh $W "git -C $REPO fetch origin && git -C $REPO checkout main && git -C $REPO reset --hard origin/main"`
+   and confirm `ssh $W "git -C $REPO rev-parse HEAD"` matches the intended
+   commit.
+2. Provision: `ssh -t $W "cd $REPO && make setup-headless"` exits 0.
+3. Doctor, noninteractively: `ssh $W "cd $REPO && make headless-doctor"`
+   exits 0 — this also proves the doctor's own toolchain resolves under a
+   noninteractive SSH shell.
+4. Full contract probe:
+   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar node npm pi codex claude nvim ob rw worktree-slot worktree-claim'` —
+   every command must resolve, and the output must be paths only, with no
+   shell-init noise. `tailscale` too, unless the worker was provisioned with
+   `INSTALL_TAILSCALE=0`.
+5. Git LFS: `ssh $W 'git lfs env >/dev/null && echo LFS_OK'` prints
+   `LFS_OK`.
+6. Durability timer: the per-platform checks above (`launchctl print` /
+   `systemctl --user is-enabled` plus `is-active` plus
+   `loginctl show-user -p Linger`).
+7. Detached save-chain proof — the strongest evidence the timer actually
+   works with nobody attached, not just that it's loaded:
+   - Record the newest file mtime in `~/.local/share/tmux/resurrect/` and
+     the last line of
+     `~/.local/state/tmux-workspace-resurrect/workspace-resurrect.log`.
+   - `ssh $W 'tmux new-session -d -s smoke-headless'`.
+   - Trigger the timer directly instead of waiting: macOS
+     `ssh $W 'launchctl kickstart "gui/$(id -u)/com.kalem.tmux-resurrect-save"'`;
+     Linux `ssh $W 'systemctl --user start tmux-resurrect-save.service'`.
+   - Within about 30 seconds, the resurrect snapshot mtime must advance and
+     the workspace sidecar log must gain a new `saved N pane records` line —
+     proof the whole chain runs with no attached client.
+   - Clean up: `ssh $W 'tmux kill-session -t =smoke-headless'`.
+8. Rerun idempotency: record the SSH key fingerprint
+   (`ssh $W 'ssh-keygen -lf ~/.ssh/id_ed25519.pub'`) and any existing `.bak`
+   files, run `make setup-headless` a second time, and confirm the
+   fingerprint is unchanged, the `.bak` files are unchanged (first-backup
+   protection), and there is exactly one timer/service registered
+   (`launchctl print` / `systemctl --user list-timers`).
+9. Provider presence (auth stays manual):
+   `ssh $W 'claude --version; codex --version; pi --version'` must resolve
+   and print versions.
+10. `rw doctor` from the laptop reports the worker healthy, and
+    `rw ensure --worker <alias>` can stand up or attach to a workspace on
+    it — beyond that, remote-workspace behavior (handoff, reconnect,
+    reboot/restore) is validated by the smoke-test checklist in
+    `docs/tasks/tmux-remote-workspaces/initial-plan.md`.

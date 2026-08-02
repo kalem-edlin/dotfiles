@@ -32,6 +32,21 @@ fi
 # `command -v fnm` resolves at all before fnm's own env init runs below.
 [[ -d "$HOME/.local/share/fnm" ]] && path=("$HOME/.local/share/fnm" $path)
 
+# pyenv's bin directory. setup/python.sh installs pyenv to ~/.pyenv on both
+# macOS and Linux (via pyenv.run on Linux; see setup/python.sh). Previously
+# PYENV_ROOT/PATH were only exported in zsh/.zshrc, which noninteractive
+# shells (ssh worker 'pyenv ...', hooks, scp) never source -- so the pyenv
+# binary existed on disk but never resolved outside an interactive shell
+# (confirmed: ~/.pyenv/bin/pyenv present but unresolved under `ssh agents-
+# roll 'command -v pyenv'`, 2026-08-02). Exported here, same pattern as
+# ~/.local/bin and fnm above, so it resolves noninteractively too.
+# zsh/.zshrc still does the interactive-only `eval "$(pyenv init -)"` shims
+# (shell function wrapping, completion) — that part is deliberately
+# interactive-only and does not belong in this file. No output, no TTY
+# assumptions: PATH/env only.
+export PYENV_ROOT="$HOME/.pyenv"
+[[ -d "$PYENV_ROOT/bin" ]] && path=("$PYENV_ROOT/bin" $path)
+
 # Rust toolchain env (PATH etc.). The pre-dotfiles ~/.zshenv sourced this;
 # stow replaces that file, so it must be preserved here or cargo/rustc
 # silently drop off PATH.

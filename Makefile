@@ -1,5 +1,5 @@
 .PHONY: all setup setup-headless setup-headless-darwin setup-headless-unsupported \
-	setup-linux-headless setup-linux-headless-run headless-doctor \
+	setup-linux-headless setup-linux-headless-run headless-doctor check-tool-parity \
 	install install-headless brew brew-headless brew-cleanup brew-cleanup-force \
 	brew-cleanup-headless brew-cleanup-headless-force \
 	neovim node python macos obsidian obsidian-cli misc misc-headless uninstall reload help
@@ -7,8 +7,7 @@
 # Dotfiles directory (absolute path). Resolved from this Makefile's own
 # location (not the caller's cwd) so `make -C somewhere/else -f
 # path/to/Makefile ...` and plain `cd dotfiles && make ...` behave
-# identically. See docs/tasks/headless-install.md, "Make repository path
-# resolution robust".
+# identically.
 DOTFILES := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # Ensure Homebrew is in PATH (for stow and other tools)
@@ -25,8 +24,7 @@ STOW_PACKAGES := claude codex git kindavim pi ssh vim worktrees zsh
 # sketchybar, kindavim — GUI/local-specific). Kept as explicit lists rather
 # than derived/filtered from CONFIG_PACKAGES/STOW_PACKAGES so the difference
 # between local and headless package sets stays visible here, not hidden in
-# logic. See docs/tasks/headless-install.md, "Unify the shared local and
-# headless setup contract".
+# logic. See docs/headless-vs-local.md for the shared-contract design.
 HEADLESS_CONFIG_PACKAGES := nvim tmux
 HEADLESS_STOW_PACKAGES := claude codex git pi ssh vim worktrees zsh
 
@@ -72,8 +70,7 @@ setup:
 # that textually contains `$(MAKE)`/`${MAKE}`, even under -n, which is
 # exactly what made the old compound recipe invoke real sudo during a dry
 # run. This target has no recipe of its own, so there is nothing for that
-# rule to trigger on. See docs/tasks/headless-install.md, "4. Make the macOS
-# Make path fail fast".
+# rule to trigger on.
 #
 # Never run as `sudo make setup-headless` — run as the target user. The
 # Darwin and Linux lanes below acquire sudo only for their own specific
@@ -99,8 +96,7 @@ setup-headless-unsupported:
 # Linux headless setup without Homebrew or GUI dependencies. headless-doctor
 # is a second, gating step run AFTER the script: postflight validation is
 # authoritative, not advisory, so this only "succeeds" if the doctor also
-# passes. See docs/tasks/headless-install.md, "5. Make package and
-# postflight validation authoritative".
+# passes.
 setup-linux-headless: setup-linux-headless-run headless-doctor
 
 setup-linux-headless-run:
@@ -115,12 +111,30 @@ headless-doctor:
 	@chmod +x "$(DOTFILES)/setup/headless-doctor.sh"
 	@"$(DOTFILES)/setup/headless-doctor.sh"
 
+# Read-only maintenance guard: fails loudly on any tool present in
+# Brewfile.headless / setup/linux-headless.sh's required()/optional() arrays
+# / setup/headless-doctor.sh's REQUIRED_CMDS but absent from the others,
+# unless the divergence is recorded in setup/tool-parity-exceptions.txt. This
+# is the guard against the gh/delta bug class: those three lists are
+# hand-maintained independently, so nothing else forces them to agree.
+#
+# Deliberately NOT wired into `setup`/`setup-headless` as a hard gate. This
+# is a maintenance check for whoever is editing Brewfile.headless/
+# linux-headless.sh/headless-doctor.sh, not a worker-provisioning
+# precondition — failing a real provisioning run over e.g. a missing
+# convenience-tool doctor check would be worse than the disease it prevents.
+# Run it by hand (or in CI on PRs touching those files) when adding/removing
+# a tool from any of the three sources.
+check-tool-parity:
+	@chmod +x "$(DOTFILES)/setup/check-tool-parity.sh"
+	@"$(DOTFILES)/setup/check-tool-parity.sh"
+
 # Install all dotfile configurations
 ## Thin wrapper over setup/lib.sh: each logical step is its own recipe line
 ## (so Make's normal "abort on nonzero" behavior already gives fail-fast
 ## semantics — no step here uses `|| true`), sourcing lib.sh fresh each time
-## with DOTFILES_DIR set from $(DOTFILES). See docs/tasks/headless-install.md,
-## "Unify the shared local and headless setup contract".
+## with DOTFILES_DIR set from $(DOTFILES). See docs/headless-vs-local.md for
+## the shared-contract design.
 install:
 	@echo "Installing dotfile configurations..."
 	@mkdir -p ~/.config
@@ -132,6 +146,10 @@ install:
 	@# will flow back to the repo as git unstaged changes via the symlinks.
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; backup_conflicts $(STOW_PACKAGES)'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; stow_packages $(STOW_PACKAGES)'
+	@# codex ships no config.toml in the stowed package (codex writes project
+	@# trust entries straight into that file, so symlinking it would dirty the
+	@# repo on every run); seed a starter one only if none exists yet.
+	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; seed_codex_config'
 	@# rw (tmux-remote-workspaces dispatcher) lives inside the tmux plugin;
 	@# expose it on PATH so it can be run outside tmux keybindings too
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; link_rw'
@@ -224,6 +242,7 @@ install-headless:
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; ensure_ssh_dirs'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; backup_conflicts $(HEADLESS_STOW_PACKAGES)'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; stow_packages $(HEADLESS_STOW_PACKAGES)'
+	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; seed_codex_config'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; link_rw'
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Headless dotfiles installed!"
@@ -328,9 +347,8 @@ brew-headless:
 # a DRY RUN, nothing is removed. `brew bundle cleanup --force` can delete
 # formulae/casks that were installed manually and are simply absent from the
 # Brewfile, so this is deliberately opt-in and two-step rather than run
-# automatically by `setup`/`setup-headless`. See
-# docs/tasks/headless-install.md, "Remove destructive cleanup from ordinary
-# setup". Review the plan, then run `make brew-cleanup-force` to apply it.
+# automatically by `setup`/`setup-headless`. Review the plan, then run
+# `make brew-cleanup-force` to apply it.
 brew-cleanup:
 	@echo "The following would be removed by 'brew bundle cleanup' (dry run; nothing changed):"
 	@brew bundle cleanup --file="$(DOTFILES)/Brewfile"
@@ -429,6 +447,7 @@ help:
 	@echo "  install         Symlink dotfiles to ~/.config/, ~, and app settings"
 	@echo "  install-headless  CLI-only dotfiles install (no GUI packages)"
 	@echo "  headless-doctor  Read-only postflight validator; exit 0 only if the worker contract is met"
+	@echo "  check-tool-parity  Read-only maintenance guard: Brewfile.headless/linux-headless.sh/headless-doctor.sh tool-list parity"
 	@echo "  uninstall       Remove dotfile symlinks"
 	@echo "  brew         Install Homebrew + all packages from Brewfile"
 	@echo "  brew-headless  Install Homebrew CLI-only packages (Brewfile.headless)"

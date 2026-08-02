@@ -9,9 +9,7 @@ DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Put Homebrew/fnm on PATH if either is already present (e.g. fnm installed
 # via Brewfile on macOS). Failure here is fine and expected on a completely
 # clean Linux account — fnm genuinely isn't installed yet, that's exactly
-# what this script is about to fix below. See
-# docs/tasks/headless-install.md, "3. Fix the Linux first-run environment
-# boundary".
+# what this script is about to fix below.
 activate_fnm || true
 
 # Setup fnm. On macOS this is installed by Brewfile; on Linux it may need to

@@ -204,8 +204,7 @@ if [[ "$OS_NAME" = "Darwin" ]]; then
   # shell (Homebrew was added to PATH above) silently fails under launchd.
   # Resolve the absolute path now and bake it into the plist as
   # TMUX_RESURRECT_SAVE_TMUX_BIN so the wrapper never depends on launchd's
-  # PATH. See docs/tasks/headless-install.md, "7. Fix macOS launchd
-  # execution".
+  # PATH.
   TMUX_BIN_RESOLVED="$(command -v tmux 2>/dev/null || true)"
   if [[ -z "$TMUX_BIN_RESOLVED" ]]; then
     echo "✗ tmux not found on PATH — cannot configure the tmux-resurrect save timer." >&2
@@ -292,8 +291,7 @@ if [[ "$OS_NAME" = "Darwin" ]]; then
   # save script under a launchd-like MINIMAL environment (no Homebrew, no
   # provisioning-shell PATH) — not merely that it works in this
   # provisioning shell's environment, which is exactly the class of bug
-  # this fix addresses (see docs/tasks/headless-install.md, "7. Fix macOS
-  # launchd execution"). The extra env var mirrors what the rendered
+  # this fix addresses. The extra env var mirrors what the rendered
   # plist's EnvironmentVariables dict sets for the real launchd job.
   echo "  → Verifying wrapper under a launchd-like minimal environment..."
   if ! env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \

@@ -1,0 +1,23 @@
+# setup/templates/codex-config.toml — seeded to ~/.codex/config.toml ONLY
+# when that file does not already exist yet (see setup/lib.sh's
+# seed_codex_config, called from both `make install`/`install-headless` and
+# setup/linux-headless.sh). This file is deliberately NOT part of the
+# stowed codex/.codex/ package and never symlinked: codex writes
+# machine-specific/mutable state — [projects."<absolute path>"] trust
+# entries, notify (an absolute path to a local .app),
+# [notice.model_migrations], [tui.model_availability_nux], and
+# [marketplaces.*] cache timestamps — directly into this exact file, so
+# symlinking it into the repo would guarantee permanent working-tree dirt on
+# every machine. Seeding a plain copy once, and never overwriting an
+# existing config.toml, keeps only the stable defaults below portable across
+# machines while leaving codex free to own the file afterward.
+personality = "pragmatic"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+[notice]
+hide_full_access_warning = true
+
+[tui]
+theme = "catppuccin-mocha"
+status_line = ["model-with-reasoning", "git-branch", "run-state", "context-used"]

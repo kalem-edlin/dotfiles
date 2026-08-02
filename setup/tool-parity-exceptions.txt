@@ -1,0 +1,71 @@
+# setup/tool-parity-exceptions.txt
+#
+# Allowlist for setup/check-tool-parity.sh. Every INTENTIONAL divergence
+# between Brewfile.headless, setup/linux-headless.sh's required=()/optional()
+# arrays, and setup/headless-doctor.sh's REQUIRED_CMDS must be listed here
+# with a one-line reason, or the parity script fails loudly on it.
+#
+# Format: one entry per line, "<name> <reason...>" (first whitespace run
+# separates the name from the reason; the rest of the line is free text).
+# <name> is matched against the SAME canonicalized tool identity the script
+# uses internally (see check-tool-parity.sh's canonicalize() table) — e.g.
+# "trash-cli" below is canonicalized to "trash" before comparison, so this
+# entry also covers a bare "trash" appearing anywhere.
+#
+# Blank lines and lines starting with # are ignored.
+
+# --- macOS/Xcode-only, correctly absent from Linux ---
+cocoapods    macOS/Xcode-only (CocoaPods dependency manager); no Linux use case
+fastlane     macOS/Xcode-only (iOS/mobile release automation); no Linux use case
+swift        macOS/Xcode-only (Swift toolchain); no Linux use case
+watchman     macOS-only in this repo's usage (paired with Xcode/RN workflows); not part of the Linux worker contract
+rbenv        macOS-only in this repo's usage; Linux workers use pyenv instead, see the "installed by a mechanism other than the package arrays" entries below
+
+# --- Disabled everywhere, dead weight ---
+zsh-autocomplete   commented out in zsh/.zshrc ("conflicts with autosuggestions and fzf tab handling") on every platform; never actually loaded
+
+# --- Installed by a mechanism other than the package arrays (absence from Brewfile "brew" lines / linux-headless.sh required()/optional() is expected) ---
+fnm             installed by setup/node.sh's own bootstrap (curl installer), not a brew formula or Linux package
+pyenv           installed by setup/python.sh via pyenv.run on Linux (and by Homebrew only indirectly via python.sh on macOS); not a linux-headless.sh package-array entry
+tailscale        installed via the official install script in setup/linux-headless.sh's install_tailscale (curl | sh), not the required/optional package arrays; macOS uses the tailscale-app cask (a `cask`, not a `brew` line, so Source A extraction never sees it either)
+stripe-cli       installed via setup/linux-headless.sh's install_stripe_cli (apt/dnf repo + fallback to `npm install -g @stripe/cli`), not the required/optional package arrays
+yarn             installed as an npm global by setup/node.sh, not a package-manager array entry
+docker           installed via the separate INSTALL_DOCKER conditional block in setup/linux-headless.sh (install_optional_packages docker.io / docker docker-compose-plugin, etc.), deliberately outside the required()/optional() arrays this script parses
+docker-compose   same INSTALL_DOCKER block as docker above, same reasoning
+node             fnm-managed; installed by setup/node.sh, not a package-manager array entry (see fnm above)
+npm              ships with fnm-managed node; see node/fnm above
+pi               installed as an npm global by setup/node.sh, not a package-manager array entry
+codex            installed as an npm global by setup/node.sh, not a package-manager array entry
+claude           installed by setup/misc-headless.sh (Anthropic's own installer), not a package-manager array entry
+ob               Obsidian CLI installed by setup/obsidian.sh, not a package-manager array entry
+
+# --- Not packaged by any mainstream Linux distro's default repos ---
+zsh-vi-mode   jeffreytse/zsh-vi-mode has no apt/dnf/pacman/zypper/apk package; confirmed absent from Ubuntu 24.04 via both `apt-cache policy zsh-vi-mode` and `apt-cache search zsh-vi-mode` on agents-roll, 2026-08-02. zsh/.zshrc's source_if_exists fallback paths (incl. ~/.zsh/zsh-vi-mode/) remain for a manual/future install and degrade silently when absent.
+
+# --- Native-build toolchain / trust-store packages: required for the Linux install to succeed (npm native addons, TLS verification) but not part of the interactive CLI command contract, so intentionally absent from headless-doctor.sh's REQUIRED_CMDS ---
+ca-certificates   TLS trust store package, not an invocable command
+make              build toolchain dependency for npm native addons (setup/node.sh); no standalone doctor check, same class as gcc/g++/pkg-config below
+gcc               build toolchain dependency, see make above
+g++               build toolchain dependency, see make above
+pkg-config        build toolchain dependency, see make above
+base-devel        pacman meta-package bundling the make/gcc/g++/pkg-config toolchain above into one token
+build-base        apk meta-package bundling the make/gcc/g++ toolchain above into one token (apk branch is currently unreachable — check_systemd_support rejects non-systemd hosts first — but kept accurate for a possible future implementation)
+
+# --- Known-accepted Linux gaps: NOT yet installed, deliberately deferred (accepted TODOs — keep visible, not silent) ---
+actionlint       accepted TODO: not yet added to any Linux package list
+ast-grep         accepted TODO: not yet added to any Linux package list
+atac             accepted TODO: not yet added to any Linux package list
+cmatrix          accepted TODO: not yet added to any Linux package list
+git-filter-repo  accepted TODO: not yet added to any Linux package list
+glow             accepted TODO: not yet added to any Linux package list
+go               accepted TODO: not yet added to any Linux package list
+lazydocker       accepted TODO: not yet added to any Linux package list (also requires the jesseduffield/lazydocker tap on macOS, no direct Linux distro package)
+prettyping       accepted TODO: not yet added to any Linux package list
+recall           accepted TODO: not yet added to any Linux package list (zippoxer/tap/recall on macOS, no Linux distro package known)
+sl               accepted TODO: not yet added to any Linux package list
+sshs             accepted TODO: not yet added to any Linux package list
+supabase         accepted TODO: not yet added to any Linux package list (supabase/tap/supabase on macOS, no Linux distro package known)
+trash-cli        accepted TODO: not yet added to any Linux package list; zsh/.zshrc's `rm` wrapper already degrades to real `rm` when neither `trash` nor `trash-put` is present
+uv               accepted TODO: not yet added to any Linux package list
+webp             accepted TODO: not yet added to any Linux package list
+httpd            accepted TODO: not yet added to any Linux package list

@@ -18,8 +18,7 @@
 # PATH — the wrapper's PATH-based `tmux` lookup would otherwise fail
 # silently under systemd even though it succeeds in an interactive/
 # provisioning shell. Mirrors the same fix for launchd on macOS, see
-# setup/templates/com.kalem.tmux-resurrect-save.plist and
-# docs/tasks/headless-install.md, "7. Fix macOS launchd execution".
+# setup/templates/com.kalem.tmux-resurrect-save.plist.
 
 [Unit]
 Description=Periodic tmux-resurrect save (headless worker durability net)

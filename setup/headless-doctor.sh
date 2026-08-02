@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # headless-doctor.sh - READ-ONLY postflight validator for the worker contract
-# documented in docs/tasks/headless-install.md ("Required worker contract",
-# "Proposed implementation sequence / Phase 1", "Acceptance tests").
+# documented in docs/headless-workers.md ("Required worker contract").
 #
 # This script never installs, edits, or repairs anything. It only inspects
 # the current machine and reports PASS/FAIL/WARN per check, then exits 0 iff
@@ -333,7 +332,7 @@ if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- required commands (current environment) --"
 fi
 
-REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob gh"
+REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob gh delta"
 for cmd in $REQUIRED_CMDS; do
   if has_cmd "$cmd"; then
     c_pass "cmd:$cmd" "$(command -v "$cmd")"
@@ -344,8 +343,19 @@ for cmd in $REQUIRED_CMDS; do
       # required, zypper/apk optional). A worker provisioned before that fix
       # will FAIL this check until re-provisioned -- that is intentional,
       # not a false positive; it is exactly the parity gap this check exists
-      # to catch. See docs/tasks/headless-install.md.
+      # to catch. See docs/headless-vs-local.md, "Known parity gaps".
       c_fail "cmd:$cmd" "not found on PATH" "$SETUP_REMEDIATION (installs gh on Linux/macOS; on unsupported distros install gh manually: https://cli.github.com)"
+    elif [ "$cmd" = "delta" ]; then
+      # delta (git-delta): git/.gitconfig unconditionally sets `pager =
+      # delta` and a [delta] diffFilter, so a missing delta breaks ordinary
+      # `git log`/`git diff`, not just a cosmetic gap -- REQUIRED, not
+      # optional, same severity class as gh above. Brewfile.headless already
+      # installs "git-delta" on macOS; setup/linux-headless.sh installs it
+      # as a required package on apt/dnf/pacman/zypper (apk stays optional).
+      # A worker provisioned before this fix will FAIL this check until
+      # re-provisioned -- intentional, see docs/headless-vs-local.md, "Known
+      # parity gaps".
+      c_fail "cmd:$cmd" "not found on PATH" "$SETUP_REMEDIATION (installs git-delta on Linux/macOS; on unsupported distros install delta manually: https://github.com/dandavison/delta)"
     else
       c_fail "cmd:$cmd" "not found on PATH" "$SETUP_REMEDIATION"
     fi
@@ -754,6 +764,42 @@ if has_cmd git && git lfs env >/dev/null 2>&1; then
   c_pass "git:lfs-env" "git lfs env succeeded"
 else
   c_fail "git:lfs-env" "git lfs env failed (git-lfs missing or not initialized)" "install git-lfs then run: git lfs install --skip-repo"
+fi
+
+# ===========================================================================
+# 11. Provider settings write-back drift (informational / non-fatal)
+# ===========================================================================
+#
+# claude and pi stow their settings files straight into $HOME, so each
+# CLI's own runtime writes (theme changes, defaultModel updates, etc.) go
+# THROUGH the symlink and land back in this tracked repo as uncommitted
+# changes. That is expected CLI behavior, not a broken install, so this
+# check is a WARN via c_warn (optional_warned), never a c_fail — a worker
+# where someone simply launched claude must not go doctor-red over it. It
+# asks git about the repo's own tracked files rather than diffing symlink
+# targets by hand, and degrades to a WARN (not a crash) when git is
+# unavailable or $DOTFILES_DIR is not a git repository.
+
+if [ "$QUIET" -eq 0 ]; then
+  printf '%s\n' "-- provider settings write-back drift --"
+fi
+
+PROVIDER_SETTINGS_PATHS="claude/.claude/settings.json pi/.pi/agent/settings.json"
+PROVIDER_SETTINGS_REMEDIATION="git -C $DOTFILES_DIR checkout -- $PROVIDER_SETTINGS_PATHS"
+
+if ! has_cmd git; then
+  c_warn "drift:provider-settings" "git not found; cannot check provider settings write-back drift"
+elif ! git -C "$DOTFILES_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  c_warn "drift:provider-settings" "$DOTFILES_DIR is not a git repository; cannot check provider settings write-back drift"
+else
+  # shellcheck disable=SC2086 # PROVIDER_SETTINGS_PATHS is an intentional word-split pathspec list
+  DRIFT_STATUS="$(git -C "$DOTFILES_DIR" status --porcelain -- $PROVIDER_SETTINGS_PATHS 2>/dev/null)"
+  if [ -z "$DRIFT_STATUS" ]; then
+    c_optpass "drift:provider-settings" "no drift in tracked provider settings ($PROVIDER_SETTINGS_PATHS)"
+  else
+    DRIFT_FILES="$(printf '%s\n' "$DRIFT_STATUS" | awk '{print $2}' | tr '\n' ' ')"
+    c_warn "drift:provider-settings" "provider CLI runtime writes modified tracked settings: $DRIFT_FILES" "$PROVIDER_SETTINGS_REMEDIATION"
+  fi
 fi
 
 # ===========================================================================
