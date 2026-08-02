@@ -658,15 +658,20 @@ DECISION: a one-time port-repair pass restoring the correct
 the same content-engine extraction PR, not as an urgent standalone fix. The
 first `worktree-slot ensure` runs against corrupted slots will legitimately
 block on the listener/collision diagnostic until remediated — expected,
-per the blocking-diagnostic rule above, not a bug in the allocator.
+per the blocking-diagnostic rule above, not a bug in the allocator. Reconfirmed
+2026-08-02 with `worktree-slot ensure <N> --dry-run` rather than by grepping
+`.env.local`; that run also found `ensure 11 --dry-run` blocking on a *live*
+listener on port 9081 (an Expo dev server whose cwd is `content-engine-10`),
+so the repair needs that process moved, not just the config values fixed.
 
 The same remediation pass also:
 
 - Migrates the legacy `.worktree-claim` markers to the current format. Scope
-  is larger than an earlier draft of this document assumed: all 13
-  currently-claimed slots (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14) carry a
-  legacy non-JSON marker, in either the key=value or the older
-  colon-delimited form; only slots 3 and 15 are unclaimed. The new claim
+  is larger than an earlier draft of this document assumed: all 14
+  currently-claimed slots (1-14) carry a legacy non-JSON marker, in either the
+  key=value or the older colon-delimited form; only slot 15 is unclaimed (slot
+  3 was claimed partway through the 2026-08-02 investigation session, which is
+  why an earlier pass in that same session counted differently). The new claim
   schema carries a generation/format version so future format changes are
   explicit — justified because the format has already drifted once in the
   wild.
@@ -1643,7 +1648,8 @@ See `docs/headless-workers.md` for the full campaign record.
 The items below are not smoke-testing steps. They are the work that must land
 — or, for (c), be explicitly confirmed — before the smoke-testing plan that
 follows can start meaningfully. Each subsection states its own definition of
-done.
+done. Status as of 2026-08-02: (a) and (b) are DONE; (c) is the only item
+still open.
 
 Gating relationship, stated plainly: (a) and (b) are independent of each other
 and may proceed in parallel. (b), the worktree-claim extraction, is
@@ -1661,6 +1667,15 @@ and the real authenticated `codex resume` check, per the readiness gate and
 `BLOCKED`-item accounting already built into the smoke-testing section below.
 
 ### a. Autosave freshness indicator
+
+**STATUS: DONE, verified 2026-08-02 (7/7 assertions).** Built as specified
+below, including the disarmed case (assertion 4) — continuum's interpolation
+stripped from `status-right` while the timestamp still looks recent still
+renders red `AUTOSAVE OFF`. Renders as a catppuccin-style chip prepended to
+`status-right`. One spec revision: the <10ms cost budget below was
+unachievable and was revised upward; measured cost is 18.8ms, against ~50ms
+for the `continuum_save.sh` interpolation already running on every refresh, so
+the added cost is proportionate rather than dominant.
 
 **Why.** On 2026-08-01 the laptop's tmux-continuum autosave stopped arming
 itself and nothing said so. The last snapshot was 34 hours old before anyone
@@ -1720,7 +1735,9 @@ duplicate either.
 `tmux/scripts/host_indicator.sh` precedent. It runs on every status refresh
 (every `status-interval`, default 15s, independent of continuum's own cadence),
 so it must be cheap: no subshell storms, no `git`, no filesystem walks — two
-`tmux show-option` calls and arithmetic, targeting well under 10ms. It must
+`tmux show-option` calls and arithmetic. Measured mean cost is 18.8ms (see
+STATUS above); the original <10ms target proved unachievable and was revised.
+It must
 never fail loudly: any error path prints nothing rather than an error string,
 or the status line fills with noise. Colour is applied with tmux `#[fg=...]`
 inline styling and reset afterwards so it cannot leak into adjacent segments.
@@ -1755,6 +1772,14 @@ Wave 6's live crash/restore drill (see the gating relationship above).
 
 ### b. Worktree-claim extraction (content-engine retirement, not a build)
 
+**STATUS: dotfiles-side capability gaps DONE, verified 2026-08-02.** The two
+small gaps below (branch checkout on claim, dirty-tree guard on release) are
+closed. The content-engine-side retirement PR itself (deleting
+`worktree-claim.ts`/`sync-env-worktrees.ts`, migrating markers, repairing
+ports) is separate, non-gating work tracked in "Content-engine follow-up: a
+separate PR" and has not landed — closing the two gaps was the only part of
+(b) that gated anything, per the gating relationship above.
+
 **Headline finding — this inverts the expected framing.** Investigated
 2026-08-02 against the live worktrees, verified by direct inspection rather
 than inferred. The dotfiles implementation
@@ -1779,15 +1804,20 @@ field (so it works for non-Node repos); a deterministic multi-service port
 allocator with global collision validation; and `status --json`, release
 tombstones, and a `format_version` field.
 
-Content-engine has, dotfiles does not — the three real gaps to close:
+Content-engine has, dotfiles does not — three gaps, two now closed:
 
-1. **Branch checkout on claim.** Content-engine's `claim` switches to or
-   creates the branch and refuses on a dirty tree unless forced. Dotfiles'
-   `claim` is metadata-only: it records whatever branch the worktree is
-   already on and never runs `git checkout`.
-2. **Dirty-tree guard on release.** Content-engine refuses to release a dirty
-   worktree unless forced. Dotfiles' `release` has no cleanliness check.
-3. **Arbitrary env-key fan-out.** `scripts/sync-env-worktrees.ts` propagates
+1. **Branch checkout on claim — CLOSED 2026-08-02.** Content-engine's `claim`
+   switches to or creates the branch and refuses on a dirty tree unless
+   forced. Dotfiles' `claim` was metadata-only. It now takes `--branch <name>`
+   (checkout) and `--create` (create-and-checkout), refusing on a dirty tree
+   unless `--force`.
+2. **Dirty-tree guard on release — CLOSED 2026-08-02.** Content-engine refuses
+   to release a dirty worktree unless forced. Dotfiles' `release` now carries
+   the same guard, with `--force` to override. Both guards define dirty as
+   tracked changes only — deliberately not untracked-sensitive, because an
+   untracked-sensitive check would have refused claim/release on 5 of the 15
+   live slots that git itself would check out/switch cleanly.
+3. **Arbitrary env-key fan-out — still open.** `scripts/sync-env-worktrees.ts` propagates
    whole `.env.local`/`.env.production` files across sibling worktrees.
    `worktree-slot` only renders the port variables declared in `config.json`.
    Deleting the old script drops the non-port propagation entirely — needs an
@@ -1816,7 +1846,7 @@ marker adoption ever sees two markers at the same generation with different
 owners, it should mark conflicted rather than silently picking one. Small
 additive change; not required for the extraction.
 
-**Staged sequencing (so the 13 live worktrees never lose function).**
+**Staged sequencing (so the 14 live worktrees never lose function).**
 
 1. Nothing needs to happen dotfiles-side to start — the tools already work in
    advisory mode against live slots.
@@ -1847,10 +1877,19 @@ producer now or later.
 right now, all read-only:
 
 - `worktree-claim status --path <slot>` for all 15 slots — reproduces the
-  claimed/unclaimed inventory as a repeatable check.
-- `worktree-slot ensure <N> --dry-run` — guaranteed to write nothing, and the
-  right way to prove the port collisions programmatically instead of grepping
-  `.env.local` by hand.
+  claimed/unclaimed inventory as a repeatable check. Run 2026-08-02: 14
+  claimed (1-14, all legacy markers), only 15 unclaimed. (Slot 3 was claimed
+  partway through the investigation session, which is why an earlier pass
+  during the same session counted differently — not a discrepancy in the
+  tooling.)
+- `worktree-slot ensure <N> --dry-run` — guaranteed to write nothing, and
+  proves the port collisions programmatically instead of grepping
+  `.env.local` by hand. Run 2026-08-02: confirmed slots 10+11 and 12+13
+  collide as described below. `ensure 11 --dry-run` also failed against a
+  *live* listener on port 9081, traced to a running Expo dev server whose cwd
+  is `content-engine-10` — a real process conflict, not just a stale-config
+  one, so the port repair step (2b) needs that process stopped or moved
+  first.
 - `worktree-claim verify-writer --path <slot>` — never mutates.
 - Over SSH: `ssh <worker> 'worktree-claim status --path <slot>'` for a
   reflected slot, confirming the worker's own install resolves the same
@@ -1862,10 +1901,12 @@ Do not run `claim` or `handoff-writer` against a real reflected slot over SSH
 as part of verification — that mutates live claim state for a workspace that
 may have in-flight work.
 
-**Definition of done.** The content-engine PR has landed through step 2d of
-the staged sequencing above (or a later step is explicitly deferred with
-stated rationale); all 13 currently-claimed markers are migrated by their
-actual owners; slots 10 and 12 are repaired to their correct ports; the
+**Definition of done.** The dotfiles-side capability gaps (1 and 2 above) are
+DONE as of 2026-08-02. The remaining, non-gating part of (b) is done when: the
+content-engine PR has landed through step 2d of the staged sequencing above
+(or a later step is explicitly deferred with stated rationale); all 14
+currently-claimed markers are migrated by their actual owners; slots 10 and 12
+are repaired to their correct ports; the
 dangling `sync-env-worktrees` doc references are removed and the
 `worktree:claim`/port-formula references in `AGENTS.md` and
 `env-rendering.md` are updated (see "Content-engine follow-up: a separate PR"
@@ -2498,19 +2539,21 @@ checkout at `content-engine-1`:
   need to describe the dotfiles-owned tools instead.
 - Migrate the legacy `.worktree-claim` markers from their pre-JSON format to
   the current JSON claim schema. Migration scope is larger than an earlier
-  draft of this checklist stated: **all 13 currently-claimed slots** (1, 2,
-  4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14) carry a legacy non-JSON marker, not
-  only 5, 6, 7, and 9. Only slots 3 and 15 are unclaimed. The live format on
-  an unmigrated slot is confirmed key=value, not colon-delimited — verified
+  draft of this checklist stated: **all 14 currently-claimed slots** (1-14)
+  carry a legacy non-JSON marker, not only 5, 6, 7, and 9. Only slot 15 is
+  unclaimed (slot 3 was claimed partway through the 2026-08-02 investigation
+  session, which is why an earlier pass in that session counted slot 3 among
+  the unclaimed ones — not a tooling discrepancy). The live format on an
+  unmigrated slot is confirmed key=value, not colon-delimited — verified
   directly from `content-engine-1/.worktree-claim`, which is itself one of
-  the 13 unmigrated slots despite being quoted here as the format example:
+  the 14 unmigrated slots despite being quoted here as the format example:
   ```text
   holder=kalemedlin
   branch=fix/straight-to-app-attribution-readiness
   tmux_session=roll-1-web-billing
   date=2026-07-31T15:24:48.287Z
   ```
-  (Any of the 13 may carry either this key=value form or the older
+  (Any of the 14 may carry either this key=value form or the older
   colon-delimited variant; `worktree-claim`'s `wt_marker_is_legacy` treats
   both identically — any `.worktree-claim` content that is not valid JSON.)
   Because migration rewrites `owning_user`/`session_uuid`/`active_writer_host`
@@ -2561,9 +2604,13 @@ slot, migrated or not, always use the current JSON schema.
   `worktree-slot ensure` against either pair legitimately blocks on the
   listener/collision diagnostic in the meantime (expected, per the
   blocking-diagnostic rule in "Deterministic port allocator" — not a bug).
-- All 13 currently-claimed slots (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
-  remain on the legacy marker format until migrated: visible and labeled, but
-  not enforced. Slots 3 and 15 are unclaimed and unaffected.
+  Confirmed programmatically with `worktree-slot ensure <N> --dry-run` on
+  2026-08-02; `ensure 11 --dry-run` also hit a *live* listener on port 9081
+  (an Expo dev server whose cwd is `content-engine-10`), so the port repair
+  needs that process stopped or moved, not just config edited.
+- All 14 currently-claimed slots (1-14) remain on the legacy marker format
+  until migrated: visible and labeled, but not enforced. Slot 15 is unclaimed
+  and unaffected.
 - content-engine's own `worktree:claim`/`worktree:release`/`worktree:status`
   scripts and `env:sync:worktrees` remain live and duplicate the
   dotfiles-owned implementation until removed, and its two disagreeing port
@@ -2579,38 +2626,98 @@ content-engine" earlier in this document for the design rationale behind
 these items; this subsection is the authoritative checklist for what the
 separate PR actually has to do.
 
+### Wave 0 and Wave 1 results (2026-08-02)
+
+Wave 0's SSH-only worker surface ran **17/17 PASS**: both workers'
+`preflight.sh`, Treemux/plugin-version inventory, the `allow-passthrough` +
+key-table check, a worker-side `git ls-remote` against a disposable origin,
+both timer wrappers' `--check` self-test, and `make headless-doctor`
+(`mini` 65/65, `agents-roll` 64/64).
+
+Wave 1's fully parallel hermetic contracts (lanes 1A-1E: config/command
+preflight, sync-engine fault injection, provider-adapter fixtures, worktree
+slots/ports/claims, private focus-tmux behavior) ran **32 PASS / 2 FAIL / 4
+DEFERRED** — mostly green, not a fully clean pass; which specific assertions
+failed or were deferred is not itemized in this round's record. Fully proven
+within that run: the complete sync-engine fault-injection sweep (divergence,
+truncated transfer, post-apply mismatch, apply interruption) against the
+documented exit-code contract (0/2/3/4) with zero silent overwrites on any
+failure path, and both `RW_SSH_BIN` and `CA_SSH_BIN` seams honored and
+independent, including CA's documented fallback to RW.
+
+Also verified this round: `agents-roll` runs tmux 3.4, `mini` runs 3.7b. The
+tmux >= 3.7 delimiter patch (`bbd0211`/`d232f42`) is confirmed correct and a
+no-op on 3.4 — a literal TAB survives `-F`/`display-message -p` intact there,
+and real save files on both workers parse correctly. No defect found. Caveat:
+the original 3.7b corruption could not be reproduced against the currently
+running server on `mini`, so the patch comment's "always sanitizes, no
+off-switch" claim is asserted more strongly than is presently reproducible.
+
+Cleanup found along the way: two leftover `smoke-headless` sessions (one per
+worker) from an earlier run were found and removed by exact-match kill; zero
+tmux processes remain on either worker afterward. Also found, not a failure:
+plugin pin drift — `tmux-fzf` and `tpm` sit at different HEAD SHAs on `mini`
+vs. `agents-roll`; the two workers are not bit-identical.
+
+Two defects found and fixed along the way, independent of (a)/(b)/(c) above:
+
+- `pi versions --worker` was broken: pi prints its version to stderr, so
+  reading it with `2>/dev/null` always returned empty and the command died
+  before reaching the SSH seam. Fixed and verified end-to-end against `mini`.
+- `rw doctor` is not literally read-only — per-worker preflight appends to the
+  events log (the exact behavior Lane 1A's assertion above was written to
+  observe). Its usage text was corrected rather than removing the
+  observability.
+
+New durability fix, worth its own note: tmux-resurrect's `save_all()`
+repointed the `last` symlink at any save that merely *differed* from the
+previous, with no validity check, so a partially-written save could silently
+become the authoritative restore source. Real occurrence: `agents-roll` wrote
+a 0-byte save on 2026-08-01 and `last` pointed at it for 13 seconds. Now
+gated on >=1 well-formed pane record plus a complete trailing `state` record
+(`save_all` writes `state` last, so a complete `state` line proves the whole
+write finished); on rejection `last` stays at the previous good snapshot.
+Shipped as `setup/patches/tmux-resurrect-save-validity-gate.patch` with a
+`headless-doctor` check. The sibling `tmux-workspace-resurrect` writes via
+mktemp+mv and does not have this hole.
+
+All fixes above landed at commit `fa5cd83`. **The workers have not received
+them yet** — both are still at `453fc1a`, so every result in this subsection
+ran against that commit. The save-validity gate in particular needs a pull
+plus a rerun of each worker's normal headless-setup entrypoint before it
+protects anything there (idempotent; no plugin reinstall or tmux restart
+required).
+
 ### Remaining smoke-test surface (as of 2026-08-02)
 
 Honest accounting of where the waves above actually stand:
 
-PROVEN so far — only two things: the sandboxed provider-adapter round-trip
-(`libexec/adapters/smoke-test`, 11/11, re-verified 2026-08-02), and the
-headless-install worker-provisioning contract (both workers' doctors, the
-detached save-timer chain, and `rw doctor` run from the laptop).
+PROVEN:
 
-BLOCKED on operator authentication:
+- the sandboxed provider-adapter round-trip (`libexec/adapters/smoke-test`,
+  11/11, re-verified 2026-08-02);
+- the headless-install worker-provisioning contract (both workers' doctors,
+  the detached save-timer chain, and `rw doctor` run from the laptop);
+- Wave 0's SSH-only worker surface, 17/17 (see "Wave 0 and Wave 1 results"
+  above); and
+- most of Wave 1's hermetic contracts, 32/38 assertions (see above) —
+  proven but not yet a fully clean pass.
+
+BLOCKED on the one remaining operator-auth item, `gh auth login` on
+`agents-roll` (see (c) above; Tailscale, Claude, Codex, and Pi are already
+green on both workers):
 
 - all of Wave 5's six live provider handoff/return cases (Pi/Claude/Codex x
-  mini/agents-roll);
-- the real authenticated `codex resume` check; and
-- the final terminal-emulator OSC 52 clipboard confirmation, which needs one
-  brief human check.
+  mini/agents-roll); and
+- the real authenticated `codex resume` check.
 
-REMAINING and schedulable now over SSH only:
+BLOCKED on a brief human check, unrelated to worker auth:
 
-- `preflight.sh --worker <alias>` for both workers;
-- Treemux/plugin-version inventory;
-- the `allow-passthrough` and key-table check;
-- a worker-side `git ls-remote` against a disposable origin;
-- the `ssh -G mini` route-selection check, without disturbing the real
-  Wi-Fi/Tailscale path; and
-- the agents-roll timer wrapper `--check` self-test (the mini equivalent is
-  already proven).
+- the final terminal-emulator OSC 52 clipboard confirmation.
 
 REMAINING on an isolated laptop tmux server, subject to the continuum
 teardown rule in the coordinator isolation contract above:
 
-- Wave 1E private-focus behavior;
 - Waves 2-3 endpoint establishment/placement, pane/window/split/close
   lifecycle, connection-loss/backoff, and the still-open
   detach-hook-on-TCP-drop question;
@@ -2622,6 +2729,10 @@ DEFERRED to a final, explicitly-warned step: Wave 6's serialized production
 canaries against the live focus-machine tmux server — real timer firing
 without isolation, default-server-loss inventory, worker reboot recovery,
 and the optional focus-Mac sleep/wake drill.
+
+Note: every Wave 0/1 result above ran against the workers at `453fc1a`, which
+has not yet received this round's fixes (`fa5cd83`) — see "Wave 0 and Wave 1
+results" above.
 
 ## Research references
 
