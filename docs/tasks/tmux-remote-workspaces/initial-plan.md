@@ -653,42 +653,17 @@ declared bases, the correct values are slot 10 to 3900, 11 to 4000, 12 to
 13 already hold their correct values, which is why the pairs collide rather
 than both being visibly broken.
 
-DECISION: a one-time port-repair pass restoring the correct
-`(N - 1) * block_size` values across the affected slots is executed as part of
-the same content-engine extraction PR, not as an urgent standalone fix. The
-first `worktree-slot ensure` runs against corrupted slots will legitimately
-block on the listener/collision diagnostic until remediated — expected,
-per the blocking-diagnostic rule above, not a bug in the allocator. Reconfirmed
-2026-08-02 with `worktree-slot ensure <N> --dry-run` rather than by grepping
-`.env.local`; that run also found `ensure 11 --dry-run` blocking on a *live*
-listener on port 9081 (an Expo dev server whose cwd is `content-engine-10`),
-so the repair needs that process moved, not just the config values fixed.
-
-The same remediation pass also:
-
-- Migrates the legacy `.worktree-claim` markers to the current format. Scope
-  is larger than an earlier draft of this document assumed: all 14
-  currently-claimed slots (1-14) carry a legacy non-JSON marker, in either the
-  key=value or the older colon-delimited form; only slot 15 is unclaimed (slot
-  3 was claimed partway through the 2026-08-02 investigation session, which is
-  why an earlier pass in that same session counted differently). The new claim
-  schema carries a generation/format version so future format changes are
-  explicit — justified because the format has already drifted once in the
-  wild.
-- Deletes `scripts/sync-env-worktrees.ts` together with its `package.json`
-  entries (`env:sync:worktrees`, `env:sync:worktrees:dry`) and its dangling
-  references — which are not in `AGENTS.md` or
-  `platform/gcp/protocols/env-rendering.md` (neither file holds one), but
-  inside two incident runbooks, `docs/notes/cicd/staging-ops.md:160` and
-  `docs/notes/cicd/env.md:65`. A dangling reference inside an incident runbook
-  is exactly what recreates this drift bug, and worse than an ordinary stale
-  doc pointer. Separately, `AGENTS.md:29-34` and `env-rendering.md:3,6,21` do
-  reference the `worktree:claim` scripts and the old linear port formula and
-  need updating for a different reason: see "Content-engine follow-up: a
-  separate PR" near the end of the smoke-testing section for the authoritative
-  checklist.
-- Converts Playwright's hardcoded port 3014
-  (`apps/tanstack/playwright.config.ts:47`) into a rendered per-slot service.
+DECISION, revised: `scripts/sync-env-worktrees.ts` is being kept, not
+deleted — it covers a real gap (non-port secrets) the global allocator
+doesn't render. See "Content-engine follow-up" near the end of the
+smoke-testing section for why, and for the authoritative remaining checklist
+(port repair on slots 10/12, per-slot marker migration, Playwright port
+conversion). None of that is bundled into a PR — it's live-state operator
+work, one-time and not urgent, but not part of the code-retirement PR
+(#431) that already shipped. The first `worktree-slot ensure` run against
+slots 10/12 will legitimately block on the listener/collision diagnostic
+until remediated — expected, per the blocking-diagnostic rule above, not a
+bug in the allocator.
 
 Supabase ruling and user intent: the local Supabase stack is a repository-wide
 singleton — identical `project_id` and ports in every slot. It is an accepted
@@ -1109,44 +1084,24 @@ without putting personal orchestration rules in those repositories.
 
 ### Relationship to content-engine
 
-Extraction fact: content-engine's `worktree-claim.ts` is a self-contained
-356 lines (confirmed by `wc -l` against `content-engine-1`; see "What the
-content-engine PR must change" near the end of the smoke-testing section),
-roughly 90% generic. Its only content-engine coupling is a single `env:pull`
-invocation. Claim-mechanics extraction is therefore low-risk.
-
-The personal claim implementation and directives should be extracted completely
-from content-engine:
-
-- Move claim/release/status, tmux ownership, slot claiming, and machine-writer
-  logic into the global dotfiles package.
-- Move numbered-slot mapping, port allocation, tier preparation, and personal
-  claim-time orchestration into dotfiles `config.json`.
-- Remove the claim implementation, claim-related package scripts, and personal
-  claim instructions from content-engine.
-- Remove `scripts/sync-env-worktrees.ts` and content-engine's numbered-worktree
-  port derivation once the global allocator and environment seam replace them.
-- Remove the repository-specific `.worktree-claim` ignore once the dotfiles Git
-  excludes file ignores it globally.
-- Do not retain a repository compatibility shim merely for the personal
-  workflow.
-
-Content-engine should retain genuine repository-owned facts and commands that
-are useful without this personal system: how to install dependencies, pull its
-environment, accept explicit environment-provided ports, run applications, and
-test changes. The global policy may invoke those public repository commands,
-but it owns numbered-slot derivation and the decision about when and why setup
-runs for a personal slot.
+Extraction fact: content-engine's `worktree-claim.ts` was a self-contained
+356 lines, roughly 90% generic, with its only content-engine coupling a
+single `env:pull` invocation — so claim-mechanics extraction was low-risk,
+and it shipped as one PR: https://github.com/kalem-edlin/content-engine/pull/431
+(`chore/retire-worktree-claim`, in review as of 2026-08-02). It deletes
+`worktree-claim.ts` and its three `package.json` scripts outright, drops the
+redundant `.worktree-claim` gitignore entry, and points `AGENTS.md` and
+`env-rendering.md` at the global dotfiles rules instead of restating them.
+`scripts/sync-env-worktrees.ts` was kept, not deleted — see "Content-engine
+follow-up" below for why.
 
 This separation prevents collaborators from inheriting a tmux/worktree process
 they did not choose, while allowing the same personal claim system to work
 across content-engine and any future opted-in repository.
 
-The concrete extraction checklist, what already works against content-engine
-without it, and the exact interim/advisory behavior on unmigrated slots are
-consolidated in "Content-engine follow-up: a separate PR" near the end of the
-smoke-testing section — that subsection, not this one, is the authority on
-what the content-engine-side PR must actually change.
+The remaining live-state work (port repair, per-slot marker migration) is not
+a PR at all — it's tracked in "Content-engine follow-up: a separate PR" near
+the end of the smoke-testing section, which is the authority on what remains.
 
 ### Relationship to workmux
 
@@ -1774,11 +1729,12 @@ Wave 6's live crash/restore drill (see the gating relationship above).
 
 **STATUS: dotfiles-side capability gaps DONE, verified 2026-08-02.** The two
 small gaps below (branch checkout on claim, dirty-tree guard on release) are
-closed. The content-engine-side retirement PR itself (deleting
-`worktree-claim.ts`/`sync-env-worktrees.ts`, migrating markers, repairing
-ports) is separate, non-gating work tracked in "Content-engine follow-up: a
-separate PR" and has not landed — closing the two gaps was the only part of
-(b) that gated anything, per the gating relationship above.
+closed. The content-engine-side code retirement itself is also done —
+shipped as one PR, https://github.com/kalem-edlin/content-engine/pull/431,
+in review as of 2026-08-02, not yet merged. Migrating markers and repairing
+ports are separate live-state operator work, not part of that PR, tracked in
+"Content-engine follow-up: a separate PR" — closing the two gaps was the
+only part of (b) that gated anything, per the gating relationship above.
 
 **Headline finding — this inverts the expected framing.** Investigated
 2026-08-02 against the live worktrees, verified by direct inspection rather
@@ -1804,7 +1760,7 @@ field (so it works for non-Node repos); a deterministic multi-service port
 allocator with global collision validation; and `status --json`, release
 tombstones, and a `format_version` field.
 
-Content-engine has, dotfiles does not — three gaps, two now closed:
+Content-engine has, dotfiles does not — three gaps, all now closed or resolved:
 
 1. **Branch checkout on claim — CLOSED 2026-08-02.** Content-engine's `claim`
    switches to or creates the branch and refuses on a dirty tree unless
@@ -1817,11 +1773,13 @@ Content-engine has, dotfiles does not — three gaps, two now closed:
    tracked changes only — deliberately not untracked-sensitive, because an
    untracked-sensitive check would have refused claim/release on 5 of the 15
    live slots that git itself would check out/switch cleanly.
-3. **Arbitrary env-key fan-out — still open.** `scripts/sync-env-worktrees.ts` propagates
-   whole `.env.local`/`.env.production` files across sibling worktrees.
-   `worktree-slot` only renders the port variables declared in `config.json`.
-   Deleting the old script drops the non-port propagation entirely — needs an
-   operator decision on whether anything beyond `_PORT` keys is relied on.
+3. **Arbitrary env-key fan-out — RESOLVED, kept.** `scripts/sync-env-worktrees.ts`
+   propagates whole `.env.local`/`.env.production` files across sibling
+   worktrees; `worktree-slot` only renders the four port variables declared
+   in `config.json`. A real `.env.local` in `content-engine-2` holds dozens
+   of non-port keys (API keys, `DATABASE_URL`, Apple/Meta/AppsFlyer secrets,
+   Supabase keys), so PR #431 keeps the script rather than deleting it — this
+   answers the operator question of whether non-port keys are relied on: yes.
 
 Shared gaps, not regressions: neither system expires stale claims, and neither
 prevents the same branch being live in two worktrees (both lock by path, not
@@ -1846,32 +1804,20 @@ marker adoption ever sees two markers at the same generation with different
 owners, it should mark conflicted rather than silently picking one. Small
 additive change; not required for the extraction.
 
-**Staged sequencing (so the 14 live worktrees never lose function).**
-
-1. Nothing needs to happen dotfiles-side to start — the tools already work in
-   advisory mode against live slots.
-2. Content-engine PR, staged:
-   a. Delete `sync-env-worktrees.ts` + its scripts + the doc references. Safe
-      immediately; nothing in the claim system depends on it.
-   b. Port repair on slots 10 and 12. This is the one step that can disrupt
-      in-flight work — a dev server already bound to the old port needs
-      restarting. Coordinate slot by slot.
-   c. Marker migration, by the current owner, one slot at a time — because
-      migration rewrites `owning_user`/`session_uuid`/`active_writer_host` to
-      whoever runs it, it must be run by the actual current owner of each
-      slot, never batch-scripted blind.
-   d. Only after a-c are stable in real use: delete `worktree-claim.ts` and its
-      scripts. This removes the fallback, so it goes last.
-3. Playwright port conversion: independent, low risk, any time.
-
-Reversible: 2a and 2c (git revert; `previous_owner` is recorded). Not cleanly
-reversible live: 2b, since a running dev server won't notice. Point of no
-return: 2d.
-
-Operator decisions needed: whether any non-port env keys are relied on before
-`sync-env-worktrees.ts` is deleted; the timing of the port repair against
-whichever slot has uncommitted work; whether to add the conflicted-state
-producer now or later.
+**What actually shipped.** PR #431 did the whole code retirement in one shot
+rather than the staged a-d sequence this document originally sketched —
+`worktree-claim.ts` and its `package.json` scripts deleted, `.gitignore`
+entry dropped, `AGENTS.md`/`env-rendering.md` pointed at the global rules,
+`sync-env-worktrees.ts` kept (see the capability-diff item 3 above). None of
+that touched the 14 live worktrees' running state, so there was no
+disruption to sequence around. What remains is live-state operator work the
+PR deliberately left out of scope: port repair on slots 10/12 (a dev server
+already bound to the old port needs restarting — coordinate slot by slot,
+not batch-scripted) and marker migration by each slot's actual current owner,
+one at a time, since migration rewrites `owning_user`/`session_uuid`/
+`active_writer_host` to whoever runs it. Playwright port conversion remains
+independent and low-risk, any time, but needs a matching service entry added
+to dotfiles' `config.json` first.
 
 **Verification (non-destructive, agent-runnable).** Safe against real slots
 right now, all read-only:
@@ -1902,18 +1848,14 @@ as part of verification — that mutates live claim state for a workspace that
 may have in-flight work.
 
 **Definition of done.** The dotfiles-side capability gaps (1 and 2 above) are
-DONE as of 2026-08-02. The remaining, non-gating part of (b) is done when: the
-content-engine PR has landed through step 2d of the staged sequencing above
-(or a later step is explicitly deferred with stated rationale); all 14
-currently-claimed markers are migrated by their actual owners; slots 10 and 12
-are repaired to their correct ports; the
-dangling `sync-env-worktrees` doc references are removed and the
-`worktree:claim`/port-formula references in `AGENTS.md` and
-`env-rendering.md` are updated (see "Content-engine follow-up: a separate PR"
-below for the authoritative checklist); and the read-only verification
-commands above are rerun clean against all 15 slots. This item does not gate
-any dotfiles-side smoke wave (see the gating relationship above) and can
-proceed in parallel with (a).
+DONE as of 2026-08-02. The code retirement is DONE, shipped as PR #431 (in
+review). The remaining, non-gating part of (b) is done when: PR #431 merges;
+all 14 currently-claimed markers are migrated by their actual owners; slots
+10 and 12 are repaired to their correct ports (see "Content-engine
+follow-up: a separate PR" below for the authoritative checklist); and the
+read-only verification commands above are rerun clean against all 15 slots.
+This item does not gate any dotfiles-side smoke wave (see the gating
+relationship above) and can proceed in parallel with (a).
 
 ### c. Operator auth: `gh auth login` on `agents-roll`
 
@@ -2510,79 +2452,92 @@ This plan is dotfiles-only. It implies real changes inside the separate
 `content-engine` repository (worktrees live under
 `~/Developer/content-engine-trees/content-engine-*` on this machine), but
 those changes are not part of this document's dotfiles work, are not part of
-the smoke-testing waves above, and do not gate them. They land as their own
-ad hoc PR against content-engine. This subsection is the single place that
-states what that PR must change, what already works today without it, and
-what stays broken or advisory-only until it lands.
+the smoke-testing waves above, and do not gate them. This subsection is the
+single place that states what the content-engine PR changed, what's left as
+live-state operator work, and what already works today independent of either.
 
-**What the content-engine PR must change.** Verified against the live
-checkout at `content-engine-1`:
+**Code retirement: DONE, shipped as one PR, in review as of 2026-08-02.**
+https://github.com/kalem-edlin/content-engine/pull/431
+(`chore/retire-worktree-claim`, off `origin/main` at `b29491933`, authored in
+an ephemeral worktree outside the claim system; not yet merged). It:
 
-- Delete `scripts/worktree-claim.ts` (356 lines, confirmed; roughly 90%
+- Deletes `scripts/worktree-claim.ts` (356 lines, confirmed; roughly 90%
   generic claim/release/status/tmux-ownership/slot-claiming/machine-writer
   logic per the extraction fact above, with its only content-engine coupling
-  being a single `env:pull` call) and remove its `package.json` scripts
-  `worktree:claim`, `worktree:release`, and `worktree:status`.
-- Delete `scripts/sync-env-worktrees.ts` and remove its `package.json`
-  scripts `env:sync:worktrees` and `env:sync:worktrees:dry`, plus its
-  dangling references. These are not in `AGENTS.md` or
-  `platform/gcp/protocols/env-rendering.md` — neither file holds one,
-  contrary to an earlier draft of this checklist — they are in two incident
-  runbooks, `docs/notes/cicd/staging-ops.md:160` and
-  `docs/notes/cicd/env.md:65`, which is worse than an ordinary stale doc
-  pointer: a runbook referencing a removed command during an incident is
-  exactly what recreates this drift bug.
-- Update `AGENTS.md:29-34` and `env-rendering.md:3,6,21`, which do reference
-  the `worktree:claim` scripts and the old linear port formula, for a
-  different reason than the dangling `sync-env-worktrees` references above —
-  these describe things that are being deleted or replaced by this PR and
-  need to describe the dotfiles-owned tools instead.
-- Migrate the legacy `.worktree-claim` markers from their pre-JSON format to
-  the current JSON claim schema. Migration scope is larger than an earlier
-  draft of this checklist stated: **all 14 currently-claimed slots** (1-14)
-  carry a legacy non-JSON marker, not only 5, 6, 7, and 9. Only slot 15 is
-  unclaimed (slot 3 was claimed partway through the 2026-08-02 investigation
-  session, which is why an earlier pass in that session counted slot 3 among
-  the unclaimed ones — not a tooling discrepancy). The live format on an
-  unmigrated slot is confirmed key=value, not colon-delimited — verified
-  directly from `content-engine-1/.worktree-claim`, which is itself one of
-  the 14 unmigrated slots despite being quoted here as the format example:
+  being a single `env:pull` call) and removes its `package.json` scripts
+  `worktree:claim`, `worktree:release`, `worktree:status` outright — not
+  replaced with wrappers, because content-engine cannot express or verify
+  that the dotfiles binary is on `PATH`, and a silently broken wrapper is
+  worse than a clear "command not found."
+- Removes the now-redundant `.worktree-claim` entry from content-engine's
+  `.gitignore` — the global `core.excludesfile` already covers it repo-wide
+  (see "already works" below).
+- Reduces `AGENTS.md`'s `### Worktrees` section to a pointer at the
+  agent-global dotfiles rules (naming `~/.claude/CLAUDE.md`,
+  `~/.codex/AGENTS.md`, `~/.pi/agent/AGENTS.md`), keeping only the two
+  genuinely content-engine-specific bits: the `pnpm -F @content-engine/gcp
+  env:pull --lane staging` follow-up and the legacy `../active/` grandfather
+  clause.
+- Strips the restated port formula and `worktree:claim` delegation prose out
+  of `platform/gcp/protocols/env-rendering.md`, keeping that file's
+  content-engine-specific URL-derivation/Bonjour/`LOCAL_HOST` behavior.
+
+**Resolved: `scripts/sync-env-worktrees.ts` is kept, not deleted.** It
+copies the entire `.env.local` (renumbering only `_PORT`-suffixed keys) and
+the entire `.env.production` verbatim to sibling worktrees. A real
+`.env.local` in `content-engine-2` holds dozens of non-port keys — API keys,
+`DATABASE_URL`, Apple/Meta/AppsFlyer secrets, Supabase keys — and
+`worktree-slot` only renders the four port variables declared in
+`worktrees/.config/worktrees/config.json` (`NEXT_PORT`, `DASHBOARD_PORT`,
+`ENGINE_PORT`, `EXPO_PORT`). The script covers a genuine gap rather than
+duplicating the new system, so its `package.json` entries
+(`env:sync:worktrees`, `env:sync:worktrees:dry`) and the two
+incident-runbook references (`docs/notes/cicd/staging-ops.md:160`,
+`docs/notes/cicd/env.md:65`) are correct as-is and untouched. This answers
+the operator question of whether non-port env keys are relied on: yes.
+
+Opting content-engine into the dotfiles-side registry was already done
+before this PR and required no code change: it is opted into
+`worktrees/.config/worktrees/config.json` today (repo identity
+`github.com/kalem-edlin/content-engine`, `slot_capacity: 20`, services
+`NEXT`/`DASHBOARD`/`ENGINE`/`EXPO`, `block_size: 100`, default tier `warm`).
+
+**Still open — live-state operator work, out of PR #431's scope, not a PR:**
+
+- Port repair on slots 10 and 12: one-time restoration of the correct
+  `(N - 1) * block_size` ports on slots 10/11 and 12/13, currently corrupted
+  by the old linear `slot - 1` formula (both pairs currently share identical
+  dev-server ports). Confirmed with `worktree-slot ensure <N> --dry-run`:
+  `ensure 11 --dry-run` also hit a *live* listener on port 9081 (an Expo dev
+  server whose cwd is `content-engine-10`), so the repair needs that process
+  stopped or moved, not just config values fixed.
+- Per-slot `.worktree-claim` marker migration for **all 14 currently-claimed
+  slots** (1-14; only slot 15 is unclaimed — slot 3 was claimed partway
+  through the 2026-08-02 investigation session, which is why an earlier pass
+  that session counted it among the unclaimed). Legacy markers are key=value
+  or colon-delimited (`worktree-claim`'s `wt_marker_is_legacy` treats both
+  identically — any `.worktree-claim` content that is not valid JSON).
+  Example, from `content-engine-1/.worktree-claim` (itself one of the 14
+  unmigrated slots):
   ```text
   holder=kalemedlin
   branch=fix/straight-to-app-attribution-readiness
   tmux_session=roll-1-web-billing
   date=2026-07-31T15:24:48.287Z
   ```
-  (Any of the 14 may carry either this key=value form or the older
-  colon-delimited variant; `worktree-claim`'s `wt_marker_is_legacy` treats
-  both identically — any `.worktree-claim` content that is not valid JSON.)
-  Because migration rewrites `owning_user`/`session_uuid`/`active_writer_host`
-  to whoever runs it, each slot must be migrated by its actual current owner,
-  one at a time — see "Pre-smoke-test work" above for the full staged
-  sequencing.
-- Run the one-time port-repair pass restoring the correct
-  `(N - 1) * block_size` ports on slots 10/11 and 12/13, currently corrupted
-  by the old linear `slot - 1` formula (verified: both pairs currently share
-  identical dev-server ports).
+  Migration rewrites `owning_user`/`session_uuid`/`active_writer_host` to
+  whoever runs it, so each slot must be migrated by its actual current
+  owner, one at a time — never batch-scripted blind.
 - Convert Playwright's hardcoded port 3014
-  (`apps/tanstack/playwright.config.ts:47`) into a rendered per-slot service.
-- Remove the now-redundant `.worktree-claim` entry from content-engine's own
-  `.gitignore` (currently line 55) — see "already works" below, this is
-  cleanup, not a functional requirement.
-- Opting content-engine into the dotfiles-side registry is **already done**
-  and does not need to happen in the content-engine PR: it is opted into
-  `worktrees/.config/worktrees/config.json` today (repo identity
-  `github.com/kalem-edlin/content-engine`, `slot_capacity: 20`, services
-  `NEXT`/`DASHBOARD`/`ENGINE`/`EXPO`, `block_size: 100`, default tier
-  `warm`). The content-engine PR only needs to remove its own competing
-  implementation and stale markers, not add configuration on the dotfiles
-  side.
+  (`apps/tanstack/playwright.config.ts:47`) into a rendered per-slot
+  service — needs a matching service entry added to dotfiles'
+  `worktrees/.config/worktrees/config.json` first.
 
-**What already works today, without the content-engine PR.** The dotfiles-side
-`worktree-slot` and `worktree-claim` executables are capable of operating
-against content-engine's opted-in configuration right now, including against
-slots that still carry a legacy marker — but capable is not the same as
-exercised: as of the 2026-08-02 investigation there are zero
+**What already works today, independent of PR #431 merging.** The
+dotfiles-side `worktree-slot` and `worktree-claim` executables are capable of
+operating against content-engine's opted-in configuration right now,
+including against slots that still carry a legacy marker — but capable is
+not the same as exercised: as of the 2026-08-02 investigation there are zero
 `.worktree-slot.json` manifests across any of the 15 slots, so no slot has
 ever actually had the new allocator run against it. `worktree-slot ensure`,
 `worktree-claim claim/release/status/verify-writer`, and the deterministic
@@ -2598,33 +2553,21 @@ claim marker (unmigrated — see content-engine extraction PR)" in
 NOT block writes. New claims and handoffs written by `worktree-claim` on any
 slot, migrated or not, always use the current JSON schema.
 
-**What stays broken or advisory-only until the content-engine PR lands:**
-
-- Slots 10/11 and 12/13 keep their colliding dev-server ports; the first
-  `worktree-slot ensure` against either pair legitimately blocks on the
-  listener/collision diagnostic in the meantime (expected, per the
-  blocking-diagnostic rule in "Deterministic port allocator" — not a bug).
-  Confirmed programmatically with `worktree-slot ensure <N> --dry-run` on
-  2026-08-02; `ensure 11 --dry-run` also hit a *live* listener on port 9081
-  (an Expo dev server whose cwd is `content-engine-10`), so the port repair
-  needs that process stopped or moved, not just config edited.
-- All 14 currently-claimed slots (1-14) remain on the legacy marker format
-  until migrated: visible and labeled, but not enforced. Slot 15 is unclaimed
-  and unaffected.
-- content-engine's own `worktree:claim`/`worktree:release`/`worktree:status`
-  scripts and `env:sync:worktrees` remain live and duplicate the
-  dotfiles-owned implementation until removed, and its two disagreeing port
-  derivations (`(slot - 1) * 100` in the GCP env renderer versus plain
-  `slot - 1` in `sync-env-worktrees.ts`) keep disagreeing until content-engine's
-  copy is deleted.
-- Enforcement over any unmigrated slot stays advisory-only — a warning, never
-  a block — until the content-engine migration PR lands, per the INTERIM
-  BEHAVIOR decision recorded in the adversarial-audit findings above.
+**What remains true until PR #431 merges:** content-engine's own
+`worktree:claim`/`worktree:release`/`worktree:status` scripts stay live on
+`main` and duplicate the dotfiles-owned implementation. Enforcement over any
+unmigrated slot stays advisory-only regardless of merge state — a warning,
+never a block — until each slot's marker is actually migrated, per the
+INTERIM BEHAVIOR decision recorded in the adversarial-audit findings above.
+The two disagreeing port derivations (`(slot - 1) * 100` in the GCP env
+renderer versus plain `slot - 1` in `sync-env-worktrees.ts`, which is being
+kept) are permanent, not merge-gated: slots 10/11 and 12/13 keep colliding
+until the port-repair item above runs, whether or not PR #431 has merged.
 
 See also "Content-engine inconsistency to replace" and "Relationship to
 content-engine" earlier in this document for the design rationale behind
-these items; this subsection is the authoritative checklist for what the
-separate PR actually has to do.
+these items; this subsection is the authoritative checklist for what
+remains.
 
 ### Wave 0 and Wave 1 results (2026-08-02)
 
