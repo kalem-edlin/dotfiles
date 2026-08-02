@@ -38,8 +38,11 @@ commands:
       Human-readable table of registered endpoints.
 
   doctor
-      Read-only diagnostics: local prerequisites, per-worker preflight,
-      registry/live-pane consistency, clipboard/passthrough checks.
+      Diagnostics: local prerequisites, per-worker preflight, local tmux
+      durability, registry/live-pane consistency, clipboard/passthrough
+      checks. Does not modify endpoints, workspaces, or worker state, but
+      is not literally side-effect free: per-worker preflight appends
+      entries to the events log like any other operation.
 
   handoff --worker <alias> [--workspace <path>|auto] [--pane <pane-id>]
           [--keep-local] [--check-lfs]

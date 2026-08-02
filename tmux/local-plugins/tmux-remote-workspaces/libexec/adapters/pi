@@ -114,13 +114,22 @@ cmd_versions() {
 
   command -v pi >/dev/null 2>&1 || ca_die "pi is not installed locally; nothing to compare." 1
   command -v node >/dev/null 2>&1 || ca_die "node is not installed locally; pi is an npm package and needs it." 1
+  # pi prints its version to STDERR, not stdout (verified against
+  # @mariozechner/pi-coding-agent 0.73.1, 2026-08-02): `pi --version
+  # 2>/dev/null` yields nothing at all, so discarding stderr here made
+  # `versions` die on line 1 for every worker, before the SSH seam was ever
+  # reached. Merge stderr for pi specifically. node is well-behaved and
+  # prints to stdout, so it keeps discarding stderr.
   local local_cli local_node
-  local_cli="$(pi --version 2>/dev/null | tr -d '[:space:]')"
+  local_cli="$(pi --version 2>&1 | tr -d '[:space:]')"
   local_node="$(node --version 2>/dev/null | tr -d '[:space:]')"
   [ -n "$local_cli" ] || ca_die "could not read local pi --version output." 1
 
+  # Same stderr merge on the worker side, for the same reason. The
+  # `command -v` guard still distinguishes "pi absent" from "pi present but
+  # quiet", so an empty result here remains unambiguous.
   local worker_cli worker_node
-  worker_cli="$(ca_ssh_run "$worker" 'command -v pi >/dev/null 2>&1 && pi --version' 2>/dev/null | tr -d '[:space:]')"
+  worker_cli="$(ca_ssh_run "$worker" 'command -v pi >/dev/null 2>&1 && pi --version 2>&1' 2>/dev/null | tr -d '[:space:]')"
   if [ -z "$worker_cli" ]; then
     ca_die "pi is not installed (or not on PATH) on worker '$worker'. Consume-never-provision: this adapter will not install it -- run 'make setup-headless' on '$worker', or install pi there manually, then retry." 1
   fi

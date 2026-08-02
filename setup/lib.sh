@@ -64,7 +64,13 @@
 #     $TMUX_RESURRECT_PATCH_MARKER already being present in save.sh, so a
 #     rerun neither fails nor double-applies; any genuine apply failure is
 #     FATAL, since a worker with unpatched tmux-resurrect on tmux >= 3.7 has
-#     a silently broken save/restore safety net. Afterwards asserts
+#     a silently broken save/restore safety net. Then, same idempotent
+#     pattern, applies setup/patches/tmux-resurrect-save-validity-gate.patch
+#     (save_all()'s only gate for repointing `last` was "did the new save
+#     differ from the previous one", which a 0-byte or truncated save
+#     trivially satisfies, silently making a failed save the authoritative
+#     restore source) — detected via $TMUX_RESURRECT_VALIDITY_PATCH_MARKER,
+#     also FATAL on genuine apply failure. Afterwards asserts
 #     ~/.config/tmux/plugins/tmux-resurrect/scripts/save.sh exists and is
 #     executable, and that the repo-owned local-plugins entrypoints
 #     ($DOTFILES_DIR/tmux/local-plugins/*/*.tmux) are readable. Requires
@@ -123,6 +129,26 @@ TMUX_RESURRECT_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-tmux37-delimite
 # patch fails — so this marker, not exit-code alone, is what makes patch
 # application idempotent across reruns.
 TMUX_RESURRECT_PATCH_MARKER="resurrect_detokenize"
+
+# Second local patch against the same pin, applied immediately after the
+# delimiter patch above (it is generated as a diff on top of that patch, so
+# it only applies cleanly once the delimiter patch is already in place).
+# save_all()'s only gate for repointing `last` — the file restore.sh
+# actually reads — was files_differ() ("did the new save differ from the
+# previous one"), which a 0-byte or truncated save trivially satisfies,
+# silently making a failed save the authoritative restore source (confirmed
+# on agents-roll: a genuine 0-byte tmux_resurrect_*.txt was `last` for 13
+# seconds). This patch adds a resurrect_file_looks_sane() gate — grounded in
+# what restore.sh's restore_pane/state parsing actually needs (a well-formed
+# "pane" record, and a well-formed trailing "state" record proving the save
+# completed) — before ever repointing `last`; on rejection the previous
+# `last` is left untouched and a warning goes to stderr. See
+# setup/patches/tmux-resurrect-save-validity-gate.patch for the full
+# rationale.
+TMUX_RESURRECT_VALIDITY_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-save-validity-gate.patch"
+# String unique to the applied patch (the gate function it adds to
+# save.sh). Same idempotency rationale as TMUX_RESURRECT_PATCH_MARKER above.
+TMUX_RESURRECT_VALIDITY_PATCH_MARKER="resurrect_file_looks_sane"
 
 activate_fnm() {
   if [ -d /opt/homebrew/bin ]; then
@@ -364,6 +390,34 @@ install_tmux_plugins() {
       return 1
     fi
     echo "  -> tmux-resurrect tmux37 delimiter patch applied"
+  fi
+
+  # Apply the save-validity gate patch, immediately after the delimiter
+  # patch (it is generated on top of it and only applies cleanly in that
+  # order). A worker running without this gate has the same silently-broken
+  # safety net class of problem as the unpatched-delimiter case — a failed
+  # save can become the authoritative restore source with no signal — so
+  # this is FATAL too, not a soft warning.
+  if grep -q "$TMUX_RESURRECT_VALIDITY_PATCH_MARKER" "$resurrect_save" 2>/dev/null; then
+    echo "  -> tmux-resurrect save-validity gate patch already applied"
+  else
+    if [ ! -f "$TMUX_RESURRECT_VALIDITY_PATCH" ]; then
+      echo "ERROR: tmux-resurrect save-validity gate patch not found: $TMUX_RESURRECT_VALIDITY_PATCH" >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply --check "$TMUX_RESURRECT_VALIDITY_PATCH") 2>/dev/null; then
+      echo "ERROR: tmux-resurrect save-validity gate patch does not apply cleanly against pin $TMUX_RESURRECT_PIN (checked out at $resurrect_dir). A worker without this gate can silently repoint 'last' at an empty/truncated save — refusing to continue." >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply "$TMUX_RESURRECT_VALIDITY_PATCH"); then
+      echo "ERROR: tmux-resurrect save-validity gate patch check passed but apply failed." >&2
+      return 1
+    fi
+    if ! grep -q "$TMUX_RESURRECT_VALIDITY_PATCH_MARKER" "$resurrect_save" 2>/dev/null; then
+      echo "ERROR: tmux-resurrect save-validity gate patch applied but marker '$TMUX_RESURRECT_VALIDITY_PATCH_MARKER' not found in $resurrect_save afterwards." >&2
+      return 1
+    fi
+    echo "  -> tmux-resurrect save-validity gate patch applied"
   fi
 
   echo "  -> installing tmux plugins via TPM"

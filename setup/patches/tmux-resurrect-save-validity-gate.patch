@@ -1,0 +1,75 @@
+diff --git a/scripts/save.sh b/scripts/save.sh
+index ce94cc6..23ecbf0 100755
+--- a/scripts/save.sh
++++ b/scripts/save.sh
+@@ -274,6 +274,50 @@ remove_old_backups() {
+ 		find "${files[@]}" -type f -mtime "+${delete_after}" -exec rm -v "{}" \; > /dev/null
+ }
+ 
++# Sanity gate for a just-written resurrect file, run before it is ever
++# allowed to become `last` (the file restore.sh actually reads). Without
++# this, save_all's only gate was files_differ() -- "did the new file differ
++# byte-for-byte from the previous last" -- which a 0-byte or truncated file
++# trivially satisfies, silently making a failed save the authoritative
++# restore source until the next successful one (confirmed on agents-roll:
++# tmux_resurrect_20260801T222232.txt, 0 bytes, briefly pointed to by `last`).
++#
++# What restore.sh actually needs to do anything useful:
++#   - check_saved_session_exists only tests `-f`, so it does not by itself
++#     reject empty/malformed files -- `main` proceeds straight into
++#     restore_all_panes, which silently restores nothing if there are no
++#     "pane" lines.
++#   - restore_pane (the only thing that recreates sessions/windows/panes)
++#     needs at least one well-formed "pane" line: `IFS=$d read line_type
++#     session_name window_number window_active window_flags pane_index
++#     pane_title dir pane_active pane_command pane_full_command` -- 11
++#     tab-separated fields, matching dump_panes' `echo` line exactly.
++#   - save_all writes the file in a fixed, strictly sequential order
++#     (grouped sessions, then dump_panes, then dump_windows, then
++#     dump_state last). A well-formed trailing "state" line -- 3
++#     tab-separated fields, matching dump_state's `state_format` -- is
++#     therefore proof the entire write completed; anything short of that
++#     (0 bytes, cut off mid dump_panes/dump_windows, or a state line
++#     truncated mid-write) leaves a last line that is not a complete
++#     3-field "state" record.
++#
++# So the minimal, cheap-to-check invariant grounded in restore.sh's actual
++# requirements is: the file is non-empty, contains at least one properly
++# shaped "pane" record (the substance restore.sh needs to rebuild anything),
++# and its last non-blank line is a properly shaped "state" record (proof
++# the save reached the end of save_all's write sequence intact). This is a
++# single linear awk pass over a file that is at most a few KB, so it stays
++# cheap enough to run on every autosave.
++resurrect_file_looks_sane() {
++	local file="$1"
++	[ -s "$file" ] || return 1
++	awk -F'\t' '
++		$1 == "pane" && NF == 11 { pane_ok = 1 }
++		NF > 0 { last_type = $1; last_nf = NF }
++		END { exit !(pane_ok && last_type == "state" && last_nf == 3) }
++	' "$file"
++}
++
+ save_all() {
+ 	local resurrect_file_path="$(resurrect_file_path)"
+ 	local last_resurrect_file="$(last_resurrect_file)"
+@@ -283,7 +327,18 @@ save_all() {
+ 	dump_windows >> "$resurrect_file_path"
+ 	dump_state   >> "$resurrect_file_path"
+ 	execute_hook "post-save-layout" "$resurrect_file_path"
+-	if files_differ "$resurrect_file_path" "$last_resurrect_file"; then
++	if ! resurrect_file_looks_sane "$resurrect_file_path"; then
++		# Never repoint `last` at a save that failed the sanity check -- a
++		# stale-but-valid snapshot always beats a fresh-but-empty one. Keep
++		# the bad file on disk (subject to the normal remove_old_backups
++		# pruning below, same as any other save) rather than deleting it, so
++		# there is forensic evidence instead of a second silent failure.
++		# stderr, not display_message: this must stay visible without
++		# requiring an attached client or breaking a quiet/timer-driven run
++		# (see setup/templates/tmux-resurrect-save.sh, launchd/systemd
++		# StandardErrorPath capture it).
++		echo "tmux-resurrect: WARNING - $resurrect_file_path failed the save sanity check (empty, or missing a complete pane/state record) -- leaving $last_resurrect_file pointed at the previous save." >&2
++	elif files_differ "$resurrect_file_path" "$last_resurrect_file"; then
+ 		ln -fs "$(basename "$resurrect_file_path")" "$last_resurrect_file"
+ 	else
+ 		rm "$resurrect_file_path"

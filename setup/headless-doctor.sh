@@ -552,6 +552,20 @@ else
   c_fail "tmux:resurrect-tmux37-patch" "$RESURRECT_SAVE missing the tmux37 delimiter patch (resurrect_detokenize marker not found)" "$SETUP_REMEDIATION"
 fi
 
+# save_all()'s only gate for repointing `last` -- the file restore.sh
+# actually reads -- was "did the new save differ from the previous one",
+# which a 0-byte or truncated save trivially satisfies, silently making a
+# failed save the authoritative restore source (see
+# setup/patches/tmux-resurrect-save-validity-gate.patch). install_tmux_plugins
+# always applies this patch too, so its marker should always be present
+# here -- also a required check, not version-gated, since an unguarded
+# `last` symlink is a silently broken safety net on any tmux version.
+if [ -f "$RESURRECT_SAVE" ] && grep -q "resurrect_file_looks_sane" "$RESURRECT_SAVE" 2>/dev/null; then
+  c_pass "tmux:resurrect-save-validity-patch" "$RESURRECT_SAVE has the save-validity gate patch applied"
+else
+  c_fail "tmux:resurrect-save-validity-patch" "$RESURRECT_SAVE missing the save-validity gate patch (resurrect_file_looks_sane marker not found)" "$SETUP_REMEDIATION"
+fi
+
 # glob_has <pattern> -> 0 if at least one file matches
 glob_has() {
   for f in $1; do

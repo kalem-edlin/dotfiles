@@ -166,6 +166,24 @@ wt_git_toplevel() {
   git -C "$1" rev-parse --show-toplevel 2>/dev/null || true
 }
 
+# True (exit 0) iff the worktree at $1 has uncommitted changes to TRACKED
+# files. Shared by worktree-claim's claim-time checkout guard and
+# release-time dirty-tree guard.
+#
+# --untracked-files=no is deliberate, not an oversight. git checkout only
+# refuses when an untracked file would actually be overwritten, and reports
+# which one; blocking on any untracked file at all is stricter than git
+# itself for no safety gain. Measured against the live content-engine
+# collection 2026-08-02: 5 of 15 slots (2, 3, 6, 7, 11) have zero tracked
+# modifications but nonzero untracked entries, so an untracked-sensitive
+# check would have refused claim/release on a third of the collection while
+# git would have completed the checkout cleanly.
+wt_worktree_dirty() {
+  local worktree_path="$1" status
+  status="$(git -C "$worktree_path" status --porcelain --untracked-files=no 2>/dev/null)"
+  [ -n "$status" ]
+}
+
 # ---------------------------------------------------------------------------
 # Atomic JSON writes
 # ---------------------------------------------------------------------------
