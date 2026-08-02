@@ -8,3 +8,5 @@
 .worktree-claim
 .worktree-slot.json
 .worktree-slot.env
+
+**/.claude/settings.local.json

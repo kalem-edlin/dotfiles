@@ -107,6 +107,29 @@ is not a valid replacement for this requirement.
   the focus machine.
 - **Claim**: metadata saying which responsibility/tmux owner owns a worktree and
   which host is currently allowed to act as its writer.
+- **Sidecar**: used in two related but distinct senses in this document.
+  1. The specific `tmux-workspace-resurrect` state file,
+     `workspace_state.json`, written alongside each plain `tmux-resurrect`
+     snapshot in the same Resurrect directory (`workspace_sidecar_file()` in
+     `tmux/local-plugins/tmux-workspace-resurrect/scripts/common.sh:31-33`),
+     plus its companion log, `workspace-resurrect.log`. `save.sh` writes it
+     atomically (temp file + `mv`) and enriches the bare Resurrect topology
+     snapshot with per-pane command buffers/ZLE state, Neovim session
+     pointers, Treemux sidebar/main-pane pairings, and AI coding-agent
+     session ids (`tmux/local-plugins/tmux-workspace-resurrect/scripts/save.sh:200-217`).
+     `restore.sh`, `doctor.sh`, and this repo's own `rw reconcile`
+     (`tmux/local-plugins/tmux-remote-workspaces/libexec/reconcile:106-130`)
+     all read this same file and treat a missing/invalid sidecar as "abort,
+     never delete" rather than an empty desired set.
+  2. A generic architectural description applied to `tmux-remote-workspaces`'
+     own endpoint registry: an "external sidecar" chained onto the same
+     upstream `@resurrect-hook-post-save-all`/`post-restore-all` hooks rather
+     than a fork of `tmux-workspace-resurrect`'s schema (see "Local restore
+     of remote attachments" below). This is not the `workspace_state.json`
+     file itself — the endpoint registry is a separate store under
+     `TMUX_REMOTE_WORKSPACES_STATE_DIR` — it is only sidecar *in the same
+     architectural sense*, i.e. a companion data store hung off the same
+     hooks instead of extending the primary plugin's own schema.
 
 The word "mirror" describes the user experience and relationship between the
 focus pane and worker endpoint. It must not be interpreted as permission for
@@ -622,7 +645,13 @@ must not retain a second numbered-worktree port formula.
 Verified live damage: 8 of the 15 existing slots carry ports corrupted by the
 linear `slot - 1` formula, apparently from an `env:sync:worktrees` run against
 slot 1. Concretely, claimed slot pairs 10/11 and 12/13 currently share
-identical dev-server ports.
+identical dev-server ports: slots 10 and 11 both render
+`NEXT_PORT=4000/DASHBOARD=4010/ENGINE=8500/EXPO=9081`, and slots 12 and 13 both
+render `NEXT=4200/DASHBOARD=4210/ENGINE=8700/EXPO=9281`. Per `config.json`'s
+declared bases, the correct values are slot 10 to 3900, 11 to 4000, 12 to
+4100, and 13 to 4200 — so slots 10 and 12 are the ones actually wrong; 11 and
+13 already hold their correct values, which is why the pairs collide rather
+than both being visibly broken.
 
 DECISION: a one-time port-repair pass restoring the correct
 `(N - 1) * block_size` values across the affected slots is executed as part of
@@ -633,14 +662,26 @@ per the blocking-diagnostic rule above, not a bug in the allocator.
 
 The same remediation pass also:
 
-- Migrates the legacy colon-format `.worktree-claim` files on slots 5, 6, 7,
-  and 9 to the current format. The new claim schema carries a
-  generation/format version so future format changes are explicit — justified
-  because the format has already drifted once in the wild.
+- Migrates the legacy `.worktree-claim` markers to the current format. Scope
+  is larger than an earlier draft of this document assumed: all 13
+  currently-claimed slots (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14) carry a
+  legacy non-JSON marker, in either the key=value or the older
+  colon-delimited form; only slots 3 and 15 are unclaimed. The new claim
+  schema carries a generation/format version so future format changes are
+  explicit — justified because the format has already drifted once in the
+  wild.
 - Deletes `scripts/sync-env-worktrees.ts` together with its `package.json`
-  entries (`env:sync:worktrees`, `env:sync:worktrees:dry`) and its references
-  in `AGENTS.md` and `platform/gcp/protocols/env-rendering.md`. A dangling doc
-  pointing at a removed command is exactly what recreates this drift bug.
+  entries (`env:sync:worktrees`, `env:sync:worktrees:dry`) and its dangling
+  references — which are not in `AGENTS.md` or
+  `platform/gcp/protocols/env-rendering.md` (neither file holds one), but
+  inside two incident runbooks, `docs/notes/cicd/staging-ops.md:160` and
+  `docs/notes/cicd/env.md:65`. A dangling reference inside an incident runbook
+  is exactly what recreates this drift bug, and worse than an ordinary stale
+  doc pointer. Separately, `AGENTS.md:29-34` and `env-rendering.md:3,6,21` do
+  reference the `worktree:claim` scripts and the old linear port formula and
+  need updating for a different reason: see "Content-engine follow-up: a
+  separate PR" near the end of the smoke-testing section for the authoritative
+  checklist.
 - Converts Playwright's hardcoded port 3014
   (`apps/tanstack/playwright.config.ts:47`) into a rendered per-slot service.
 
@@ -1063,10 +1104,11 @@ without putting personal orchestration rules in those repositories.
 
 ### Relationship to content-engine
 
-Extraction fact: content-engine's `worktree-claim.ts` is approximately 357
-self-contained lines, roughly 90% generic. Its only content-engine coupling is
-a single `env:pull` invocation. Claim-mechanics extraction is therefore
-low-risk.
+Extraction fact: content-engine's `worktree-claim.ts` is a self-contained
+356 lines (confirmed by `wc -l` against `content-engine-1`; see "What the
+content-engine PR must change" near the end of the smoke-testing section),
+roughly 90% generic. Its only content-engine coupling is a single `env:pull`
+invocation. Claim-mechanics extraction is therefore low-risk.
 
 The personal claim implementation and directives should be extracted completely
 from content-engine:
@@ -1596,6 +1638,257 @@ See commits `bbd0211` (this repo's sidecar/`rw` scripts) and `d232f42`
 
 See `docs/headless-workers.md` for the full campaign record.
 
+## Pre-smoke-test work
+
+The items below are not smoke-testing steps. They are the work that must land
+— or, for (c), be explicitly confirmed — before the smoke-testing plan that
+follows can start meaningfully. Each subsection states its own definition of
+done.
+
+Gating relationship, stated plainly: (a) and (b) are independent of each other
+and may proceed in parallel. (b), the worktree-claim extraction, is
+content-engine-side work and does not gate any dotfiles-side smoke wave — the
+dotfiles claim/slot tools already run in advisory mode against live slots
+regardless of migration state (see "Content-engine follow-up: a separate PR"
+below). (a), the autosave freshness indicator, is different: its entire
+purpose is letting the operator trust at a glance that the landscape about to
+be restored was actually saved, so it specifically must land before Wave 6's
+final live crash/restore drill — the serialized production canaries against
+the live focus-machine tmux server that the smoke plan below deliberately
+defers to "a final, explicitly-warned step." It is not required for Waves 0-5.
+(c), operator auth, gates only Wave 5's live provider handoff/return matrix
+and the real authenticated `codex resume` check, per the readiness gate and
+`BLOCKED`-item accounting already built into the smoke-testing section below.
+
+### a. Autosave freshness indicator
+
+**Why.** On 2026-08-01 the laptop's tmux-continuum autosave stopped arming
+itself and nothing said so. The last snapshot was 34 hours old before anyone
+noticed, and it was only found because someone went looking. The failure is
+silent by construction: continuum skips arming when any other tmux process
+exists, and a `source-file` (which re-runs catppuccin and rewrites
+`status-right`) drops the interpolation without an error. `rw doctor` now
+detects this, but only when run deliberately. The operator's requirement is an
+always-visible indicator that answers "has a save happened in the last five
+minutes?" so the session's recoverability can be trusted at a glance rather
+than audited on demand.
+
+**Behavior.** Read `@continuum-save-last-timestamp` (epoch seconds, set by
+continuum after each successful save) and compare against now, using the
+configured `@continuum-save-interval` (currently 5 minutes) rather than a
+hardcoded value. Three states:
+
+- **Fresh** — age <= interval + a small grace. Quiet, low-contrast (for
+  example `󰄬 2m`). This is the normal state and must not draw the eye.
+- **Late** — age > interval + grace but < 3x interval. Warning colour
+  (catppuccin yellow `#f9e2af`, for example `󰀦 7m`). Covers the benign case
+  where the status line simply has not refreshed because no client is
+  rendering.
+- **Stale / disarmed** — age >= 3x interval, OR `@continuum-save-last-timestamp`
+  is empty, OR `status-right` no longer contains `continuum_save.sh`. Alert
+  colour (catppuccin red `#f38ba8`), explicit text (`󰀦 NO SAVE 47m` or
+  `󰀦 AUTOSAVE OFF`). This disarmed case is the one that actually bit us and
+  must be visually distinct from merely late — of the seven verification
+  assertions below, it is the single most important one because it is the
+  exact failure that occurred.
+
+The empty-timestamp case needs care: continuum sets the option on first plugin
+load (`delay_saving_environment_on_first_plugin_load`), so empty means "armed
+but never saved yet" immediately after a reload, and must show as Late rather
+than Stale for the first interval after server start — compare against
+`#{start_time}` to distinguish the two.
+
+**Integration mechanism.** Do not add a catppuccin module. The installed
+plugin under `~/.config/tmux/plugins/catppuccin/tmux` uses the newer
+per-module `.conf` API (`status/host.conf`, `utils/status_module.conf`), which
+does not consume the `@catppuccin_status_modules_right` option
+`tmux/tmux.conf:62` sets — so the integration point is ambiguous and would
+need to be re-derived, and that route is rejected for exactly that reason. Use
+instead the mechanism already proven to work in this exact config: append our
+own `#(...)` interpolation to `status-right`, the same way tmux-continuum
+itself does. A `run-shell` line in `tmux/tmux.conf` placed after the TPM line
+(`tmux/tmux.conf:100`) so it survives catppuccin rewriting `status-right`,
+appending `#(~/.config/tmux/scripts/autosave_indicator.sh)` guarded so repeated
+`source-file` calls do not stack duplicates. Continuum appends its own
+interpolation during TPM load; appending after TPM means both survive. Verify
+after implementation that `status-right` contains both `continuum_save.sh` and
+`autosave_indicator.sh`, and that `source-file`-ing twice in a row does not
+duplicate either.
+
+**Performance constraint.** The script lives at
+`tmux/scripts/autosave_indicator.sh`, matching the existing
+`tmux/scripts/host_indicator.sh` precedent. It runs on every status refresh
+(every `status-interval`, default 15s, independent of continuum's own cadence),
+so it must be cheap: no subshell storms, no `git`, no filesystem walks — two
+`tmux show-option` calls and arithmetic, targeting well under 10ms. It must
+never fail loudly: any error path prints nothing rather than an error string,
+or the status line fills with noise. Colour is applied with tmux `#[fg=...]`
+inline styling and reset afterwards so it cannot leak into adjacent segments.
+
+**Verification (non-destructive, agent-runnable).** All seven assertions run
+against an isolated tmux server (separate `TMUX_TMPDIR`), never the live
+one — and per the continuum teardown rule described in the coordinator
+isolation contract below, that isolated server must be killed promptly
+afterwards, because its existence disarms continuum on the live server:
+
+1. Fresh state: set the timestamp to now, assert the fresh glyph and no
+   warning colour.
+2. Late state: set the timestamp to now minus (interval + grace + 1), assert
+   warning colour.
+3. Stale state: set it to now minus 3x interval, assert alert colour and the
+   explicit text.
+4. Disarmed state: strip `continuum_save.sh` out of `status-right`, assert the
+   AUTOSAVE OFF branch fires even when the timestamp is recent — the single
+   most important assertion, since it is the exact failure that occurred.
+5. Empty-timestamp-after-start: unset the option on a freshly started server,
+   assert Late rather than Stale.
+6. Idempotency: `source-file` the config twice, assert `status-right` contains
+   exactly one copy of each interpolation.
+7. Cost: time 100 invocations, assert the mean stays within the budget above.
+
+**Definition of done.** `tmux/scripts/autosave_indicator.sh` exists and is
+wired into `status-right` via `run-shell` after the TPM line; a `source-file`
+shows both interpolations present exactly once; all seven verification
+assertions above pass against an isolated, promptly-killed tmux server. This
+item is independent of (b) and can proceed in parallel, but must land before
+Wave 6's live crash/restore drill (see the gating relationship above).
+
+### b. Worktree-claim extraction (content-engine retirement, not a build)
+
+**Headline finding — this inverts the expected framing.** Investigated
+2026-08-02 against the live worktrees, verified by direct inspection rather
+than inferred. The dotfiles implementation
+(`worktrees/.local/bin/worktree-claim`, `worktree-slot`,
+`worktrees/.local/lib/worktrees/common.sh`) is already strictly more capable
+than content-engine's `scripts/worktree-claim.ts`. It is already stowed to
+both workers (`setup/linux-headless.sh:544-545`) and already wired into the
+Claude, Codex, and Pi hooks. Content-engine is already registered in
+`worktrees/.config/worktrees/config.json`. So the remaining work is not "build
+the global system" — it is: retire content-engine's copy, migrate the live
+markers, repair the port collisions its old script caused, and close two small
+capability gaps.
+
+**Capability diff.** Dotfiles has, content-engine does not: a cross-host
+writer model (responsibility owner vs. active writer host, with
+`handoff-writer`/`return-writer` and a `handoff_generation` counter); durable
+session identity (`@session-uuid`) rather than the renameable session name
+content-engine keys on; actual enforcement via `verify-writer` wired into all
+three provider hooks (content-engine's system had zero enforcement of its
+own); repo identity from the git remote rather than `package.json`'s name
+field (so it works for non-Node repos); a deterministic multi-service port
+allocator with global collision validation; and `status --json`, release
+tombstones, and a `format_version` field.
+
+Content-engine has, dotfiles does not — the three real gaps to close:
+
+1. **Branch checkout on claim.** Content-engine's `claim` switches to or
+   creates the branch and refuses on a dirty tree unless forced. Dotfiles'
+   `claim` is metadata-only: it records whatever branch the worktree is
+   already on and never runs `git checkout`.
+2. **Dirty-tree guard on release.** Content-engine refuses to release a dirty
+   worktree unless forced. Dotfiles' `release` has no cleanliness check.
+3. **Arbitrary env-key fan-out.** `scripts/sync-env-worktrees.ts` propagates
+   whole `.env.local`/`.env.production` files across sibling worktrees.
+   `worktree-slot` only renders the port variables declared in `config.json`.
+   Deleting the old script drops the non-port propagation entirely — needs an
+   operator decision on whether anything beyond `_PORT` keys is relied on.
+
+Shared gaps, not regressions: neither system expires stale claims, and neither
+prevents the same branch being live in two worktrees (both lock by path, not
+by branch).
+
+**Cross-host semantics — the recommendation.** The current design is a
+hybrid, and it is already built: each host keeps its own private authoritative
+registry under `~/.local/state/worktrees/claims/`, and the in-worktree
+`.worktree-claim` marker is the travel mechanism. `rw handoff` captures and
+re-places it as `claim-marker.json`; the focus machine bumps the generation
+before the snapshot, and the receiving side adopts lazily on next use.
+`worktree-claim` is never invoked over SSH — a worker does not even need the
+binary for handoff to work. **Recommendation: keep this. Do not build a shared
+registry.** It is a single-operator system; a shared store adds an
+availability dependency for a problem that only arises if the operator
+manually bypasses `rw handoff`. The generation counter plus `verify-writer`'s
+host check already hard-blocks the common failure (stale writer host
+attempting a write). One real unspecified edge worth closing as a scoped
+follow-up: the schema has a `state: "conflicted"` value that `verify-writer`
+and `flip_writer` both check for, but nothing in the codebase ever sets it. If
+marker adoption ever sees two markers at the same generation with different
+owners, it should mark conflicted rather than silently picking one. Small
+additive change; not required for the extraction.
+
+**Staged sequencing (so the 13 live worktrees never lose function).**
+
+1. Nothing needs to happen dotfiles-side to start — the tools already work in
+   advisory mode against live slots.
+2. Content-engine PR, staged:
+   a. Delete `sync-env-worktrees.ts` + its scripts + the doc references. Safe
+      immediately; nothing in the claim system depends on it.
+   b. Port repair on slots 10 and 12. This is the one step that can disrupt
+      in-flight work — a dev server already bound to the old port needs
+      restarting. Coordinate slot by slot.
+   c. Marker migration, by the current owner, one slot at a time — because
+      migration rewrites `owning_user`/`session_uuid`/`active_writer_host` to
+      whoever runs it, it must be run by the actual current owner of each
+      slot, never batch-scripted blind.
+   d. Only after a-c are stable in real use: delete `worktree-claim.ts` and its
+      scripts. This removes the fallback, so it goes last.
+3. Playwright port conversion: independent, low risk, any time.
+
+Reversible: 2a and 2c (git revert; `previous_owner` is recorded). Not cleanly
+reversible live: 2b, since a running dev server won't notice. Point of no
+return: 2d.
+
+Operator decisions needed: whether any non-port env keys are relied on before
+`sync-env-worktrees.ts` is deleted; the timing of the port repair against
+whichever slot has uncommitted work; whether to add the conflicted-state
+producer now or later.
+
+**Verification (non-destructive, agent-runnable).** Safe against real slots
+right now, all read-only:
+
+- `worktree-claim status --path <slot>` for all 15 slots — reproduces the
+  claimed/unclaimed inventory as a repeatable check.
+- `worktree-slot ensure <N> --dry-run` — guaranteed to write nothing, and the
+  right way to prove the port collisions programmatically instead of grepping
+  `.env.local` by hand.
+- `worktree-claim verify-writer --path <slot>` — never mutates.
+- Over SSH: `ssh <worker> 'worktree-claim status --path <slot>'` for a
+  reflected slot, confirming the worker's own install resolves the same
+  semantics against a traveled marker.
+
+Mutating tests (claim/release/handoff-writer/return-writer round trips) belong
+in a scratch git repo under the session scratchpad, never against a live slot.
+Do not run `claim` or `handoff-writer` against a real reflected slot over SSH
+as part of verification — that mutates live claim state for a workspace that
+may have in-flight work.
+
+**Definition of done.** The content-engine PR has landed through step 2d of
+the staged sequencing above (or a later step is explicitly deferred with
+stated rationale); all 13 currently-claimed markers are migrated by their
+actual owners; slots 10 and 12 are repaired to their correct ports; the
+dangling `sync-env-worktrees` doc references are removed and the
+`worktree:claim`/port-formula references in `AGENTS.md` and
+`env-rendering.md` are updated (see "Content-engine follow-up: a separate PR"
+below for the authoritative checklist); and the read-only verification
+commands above are rerun clean against all 15 slots. This item does not gate
+any dotfiles-side smoke wave (see the gating relationship above) and can
+proceed in parallel with (a).
+
+### c. Operator auth: `gh auth login` on `agents-roll`
+
+`gh auth login` on `agents-roll` is the only remaining authentication item.
+Everything else was verified 2026-08-02: Tailscale is up and online on both
+workers; `claude auth status` and `codex login status` both report logged in
+on both workers; Pi shows no model-downgrade fallback and has `auth.json`
+present on both workers. This verification date and scope is recorded here so
+it is not re-litigated — only the GitHub CLI login on `agents-roll` remains
+open.
+
+**Definition of done.** `gh auth login` succeeds on `agents-roll` (per "Never
+launch interactive gh auth login in the headless lane," this must not be done
+by an automated agent) and `gh auth status` confirms it there, matching the
+already-verified state on `mini`.
+
 ## Smoke testing — agent-first execution plan
 
 This section supersedes the earlier short, Mini-only checklist. Once the user
@@ -1738,7 +2031,8 @@ RUN_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/${RUN_ID}.XXXXXX")"
 LANE_ID="<assigned-lane>"
 LANE_ROOT="$RUN_ROOT/$LANE_ID"
 FOCUS_SOCKET="${RUN_ID}-${LANE_ID}"
-mkdir -p "$LANE_ROOT/tmp"
+FIXTURE="$LANE_ROOT/fixture"
+mkdir -p "$LANE_ROOT/tmp" "$FIXTURE"
 
 export TMUX_REMOTE_WORKSPACES_STATE_DIR="$LANE_ROOT/rw-state"
 export TMUX_WORKSPACE_RESURRECT_STATE_DIR="$LANE_ROOT/workspace-resurrect-state"
@@ -1751,7 +2045,12 @@ The coordinator or lane then:
 
 - starts a private focus tmux server with
   `tmux -L "$FOCUS_SOCKET" -f "$HOME/.config/tmux/tmux.conf" new-session -d
-  -s "$LANE_ID" -c "$FIXTURE"`, never the user's live socket;
+  -s "$LANE_ID" -c "$FIXTURE"`, never the user's live socket. `$FIXTURE` is
+  just the lane's disposable starting directory (`$LANE_ROOT/fixture`,
+  created above) so the session never opens in the operator's real cwd; it is
+  distinct from the disposable per-repository fixtures (each its own
+  `mktemp -d` checkout against a harmless bare origin) created later for
+  workspace-placement and handoff cases;
 - sets that server's `@resurrect-dir` to the lane's unique Resurrect directory
   with `tmux -L "$FOCUS_SOCKET" set-option -g @resurrect-dir
   "$TMUX_RESURRECT_DIR"` before any save — a private tmux socket alone does
@@ -1763,9 +2062,14 @@ The coordinator or lane then:
   referencing only disposable repositories, collections, and remote paths;
 - creates every repository with `mktemp -d`, uses a harmless disposable bare
   origin, and never touches a real content-engine slot or branch;
-- uses a reviewed lane-specific `RW_SSH_BIN`/`CA_SSH_BIN` wrapper with SSH
-  multiplexing disabled, so killing a test connection cannot kill a shared
-  ControlMaster; and
+- uses a reviewed lane-specific SSH-override wrapper with SSH multiplexing
+  disabled, so killing a test connection cannot kill a shared ControlMaster.
+  Both `RW_SSH_BIN` (honored by `tmux-remote-workspaces`' own scripts, see
+  `scripts/common.sh:404` and the README's "Testing without a reachable
+  worker" section) and `CA_SSH_BIN` (honored by the provider adapters'
+  shared helpers, `libexec/adapters/common-adapter.sh:40`, which falls back
+  to `RW_SSH_BIN` and then plain `ssh`) must point at the wrapper so both
+  seams are covered; and
 - records exact local pane ids, endpoint ids, remote session names, PIDs,
   workspaces, state paths, and backup paths before mutating or cleaning them.
 
@@ -1935,9 +2239,21 @@ agent provisions or logs in on the user's behalf.
   correct.
 - Inject port collision, prohibited port, pool ceiling, malformed collection,
   and over-capacity cases.
-- Exercise claim, idempotent same-owner claim, responsibility mismatch (10),
-  host mismatch (11), missing stable session (12), conflicted state (13), no
-  claim (14), handoff-writer, return-writer, takeover, and release.
+- Exercise claim, idempotent same-owner claim, responsibility mismatch,
+  host mismatch, missing stable session, conflicted state, no claim,
+  handoff-writer, return-writer, takeover, and release. The numbers in
+  parentheses below are `worktree-claim` process exit codes, not the
+  similarly-numbered content-engine slots discussed elsewhere in this
+  document (see "Content-engine inconsistency to replace") — do not confuse
+  the two: responsibility mismatch is exit 10, host mismatch is exit 11,
+  missing stable session is exit 12, conflicted state is exit 13, all
+  returned by `worktree-claim verify-writer`
+  (`worktrees/.local/bin/worktree-claim:378,382,368,361`) and consumed by the
+  Claude PreToolUse hook, which blocks only on 10/11/13 and treats 12 as a
+  pass-through (`claude/.claude/settings.json`). No claim is a distinct exit
+  14, returned only by the `handoff-writer`/`return-writer` path
+  (`flip_writer`, `worktrees/.local/bin/worktree-claim:406,412`), never by
+  `verify-writer` itself.
 - Confirm opted-out repos remain advisory and legacy marker formats are labeled
   as deliberately non-blocking until migration.
 
@@ -2167,22 +2483,40 @@ checkout at `content-engine-1`:
   being a single `env:pull` call) and remove its `package.json` scripts
   `worktree:claim`, `worktree:release`, and `worktree:status`.
 - Delete `scripts/sync-env-worktrees.ts` and remove its `package.json`
-  scripts `env:sync:worktrees` and `env:sync:worktrees:dry`, plus the
-  dangling references to it in `AGENTS.md` and
-  `platform/gcp/protocols/env-rendering.md`.
-- Migrate the legacy `.worktree-claim` markers on slots 5, 6, 7, and 9 from
-  their pre-JSON format to the current JSON claim schema. The live format on
+  scripts `env:sync:worktrees` and `env:sync:worktrees:dry`, plus its
+  dangling references. These are not in `AGENTS.md` or
+  `platform/gcp/protocols/env-rendering.md` — neither file holds one,
+  contrary to an earlier draft of this checklist — they are in two incident
+  runbooks, `docs/notes/cicd/staging-ops.md:160` and
+  `docs/notes/cicd/env.md:65`, which is worse than an ordinary stale doc
+  pointer: a runbook referencing a removed command during an incident is
+  exactly what recreates this drift bug.
+- Update `AGENTS.md:29-34` and `env-rendering.md:3,6,21`, which do reference
+  the `worktree:claim` scripts and the old linear port formula, for a
+  different reason than the dangling `sync-env-worktrees` references above —
+  these describe things that are being deleted or replaced by this PR and
+  need to describe the dotfiles-owned tools instead.
+- Migrate the legacy `.worktree-claim` markers from their pre-JSON format to
+  the current JSON claim schema. Migration scope is larger than an earlier
+  draft of this checklist stated: **all 13 currently-claimed slots** (1, 2,
+  4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14) carry a legacy non-JSON marker, not
+  only 5, 6, 7, and 9. Only slots 3 and 15 are unclaimed. The live format on
   an unmigrated slot is confirmed key=value, not colon-delimited — verified
-  directly from `content-engine-1/.worktree-claim`:
+  directly from `content-engine-1/.worktree-claim`, which is itself one of
+  the 13 unmigrated slots despite being quoted here as the format example:
   ```text
   holder=kalemedlin
   branch=fix/straight-to-app-attribution-readiness
   tmux_session=roll-1-web-billing
   date=2026-07-31T15:24:48.287Z
   ```
-  (Slots 5-7 and 9 may carry either this key=value form or the older
+  (Any of the 13 may carry either this key=value form or the older
   colon-delimited variant; `worktree-claim`'s `wt_marker_is_legacy` treats
   both identically — any `.worktree-claim` content that is not valid JSON.)
+  Because migration rewrites `owning_user`/`session_uuid`/`active_writer_host`
+  to whoever runs it, each slot must be migrated by its actual current owner,
+  one at a time — see "Pre-smoke-test work" above for the full staged
+  sequencing.
 - Run the one-time port-repair pass restoring the correct
   `(N - 1) * block_size` ports on slots 10/11 and 12/13, currently corrupted
   by the old linear `slot - 1` formula (verified: both pairs currently share
@@ -2202,11 +2536,15 @@ checkout at `content-engine-1`:
   side.
 
 **What already works today, without the content-engine PR.** The dotfiles-side
-`worktree-slot` and `worktree-claim` executables operate against
-content-engine's opted-in configuration right now, including against slots
-that still carry a legacy marker: `worktree-slot ensure`, `worktree-claim
-claim/release/status/verify-writer`, and the deterministic port allocator all
-run today. `.worktree-claim` is already globally ignored by dotfiles'
+`worktree-slot` and `worktree-claim` executables are capable of operating
+against content-engine's opted-in configuration right now, including against
+slots that still carry a legacy marker — but capable is not the same as
+exercised: as of the 2026-08-02 investigation there are zero
+`.worktree-slot.json` manifests across any of the 15 slots, so no slot has
+ever actually had the new allocator run against it. `worktree-slot ensure`,
+`worktree-claim claim/release/status/verify-writer`, and the deterministic
+port allocator would all run today if invoked. `.worktree-claim` is already
+globally ignored by dotfiles'
 `core.excludesfile` (`git/.gitignore_global`), independent of content-engine's
 own now-redundant `.gitignore` entry, so a claim marker never needs to be
 committed to get that behavior. `wt_marker_is_legacy` in
@@ -2223,8 +2561,9 @@ slot, migrated or not, always use the current JSON schema.
   `worktree-slot ensure` against either pair legitimately blocks on the
   listener/collision diagnostic in the meantime (expected, per the
   blocking-diagnostic rule in "Deterministic port allocator" — not a bug).
-- Slots 5, 6, 7, and 9 remain on the legacy marker format: visible and
-  labeled, but not enforced.
+- All 13 currently-claimed slots (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+  remain on the legacy marker format until migrated: visible and labeled, but
+  not enforced. Slots 3 and 15 are unclaimed and unaffected.
 - content-engine's own `worktree:claim`/`worktree:release`/`worktree:status`
   scripts and `env:sync:worktrees` remain live and duplicate the
   dotfiles-owned implementation until removed, and its two disagreeing port
