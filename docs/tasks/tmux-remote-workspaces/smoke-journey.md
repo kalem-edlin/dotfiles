@@ -35,7 +35,8 @@ Expect:
 
 Report: full doctor output oddities (or "all clean"), status row count.
 
-## [~] Bucket 1 — First remote pane + status anatomy + OSC 52 check
+## [!] Bucket 1 — First remote pane + status anatomy + OSC 52 check
+### (first run found defects — fixed; superseded by Bucket 1R below)
 
 1. Open a fresh local pane in a NON-git directory (e.g. `cd ~`).
 2. `rw ensure --worker mini`
@@ -45,14 +46,80 @@ Report: full doctor output oddities (or "all clean"), status row count.
 4. From a DIFFERENT local pane: `rw status` — expect exactly one row:
    worker=mini, mode=plain, path=mini's `$HOME`, bound pane id matches,
    liveness OK, last event `create`/`attach`.
-5. OSC 52 clipboard check (the blocked human item): inside the remote
-   pane, select/copy text via tmux copy-mode (or `printf` + your normal
-   copy binding), then paste on the LAPTOP (Cmd-V in another app).
-   Expect: remote-copied text lands in the laptop clipboard through the
-   nested tmux layers.
+5. OSC 52 clipboard check (the blocked human item). Outer-tmux copy-mode
+   is NOT a valid test (it writes the laptop clipboard directly). The
+   copy must ORIGINATE remote-side — run inside the remote pane's shell:
+   `printf '\033]52;c;%s\a' "$(printf 'rw-osc52-remote-test' | base64)"`
+   then Cmd-V on the laptop. Pass = `rw-osc52-remote-test` pasted,
+   proving remote-emitted OSC 52 traverses inner tmux → ssh → outer tmux
+   → terminal (the claude-code copy-key path).
 
 Report: hostname/session name seen, status row, and PASS/FAIL on the
 clipboard paste (this closes the OSC 52 item).
+
+### Bucket 1 findings (2026-08-03, first run)
+
+- Endpoint creation, @remote-host powerline segment, registry row: PASS.
+- DEFECT (fixed, 53af514): first attach after mini's reboot started the
+  worker tmux server → continuum auto-restore fired → restore.sh
+  switch-client stole the client off `rw-d157af95-29f40b78` onto a stale
+  campaign session `smoke-headless`. Everything anomalous the operator saw
+  (inner powerline visible, session name `smoke-headless`, window `zsh`,
+  dir `admin`) was that hijacked session — endpoint sessions themselves
+  run `status off`/`prefix None` as designed. Fixed with a third resurrect
+  patch (rw client-guard: restore switch-client no-ops for rw-* clients),
+  applied laptop + both workers, doctor-required. Stale session killed,
+  client re-pinned.
+- `hostname` on mini = `Mac.localdomain`: force-reset left scutil
+  HostName unset (LocalHostName still `Alfies-Mac-mini`, so ssh/LAN
+  routing unaffected). Optional operator fix:
+  `sudo scutil --set HostName Alfies-Mac-mini.local` on mini.
+- Split from a LOCAL pane created a remote endpoint: working as designed
+  per initial-plan Resolved decision #2 (@rw-window-worker window default
+  recorded by the first `rw ensure` in that window). Operator surprised —
+  decision pending on whether to drop window-default inheritance.
+- `rw status` inside a remote pane reads the WORKER's (empty) registry —
+  correct but confusing; candidate UX note in status output.
+- Enhancements decided + SHIPPED same day: split ALWAYS follows the
+  focused pane's host (window-default inheritance removed, plan decision
+  #2 amended); outer dir chip shows remote workspace basename for rw
+  panes; autosave chip shows the remote host's save age (30s-TTL cached
+  ssh, never blocks) when a remote pane is focused. Also: `rw close`
+  exit-1 via prefix-q could NOT be reproduced post-repair (exact
+  run-shell path exits 0) — attributed to the hijacked state; watch-item.
+- The prior `returned 1` panes were closed; registry at zero.
+
+## [~] Bucket 1R — Re-run with fixes applied
+
+Verifies: clean first-attach, both powerline enhancements, new split
+rule, close path, proper OSC 52. (The client-guard patch itself gets its
+true regression proof in Bucket 9's worker-reboot drill — this run only
+confirms normal attach behavior.)
+
+1. Fresh pane, `cd ~`, `rw ensure --worker mini`. Expect: pane becomes a
+   bare remote prompt with NO inner powerline; typing
+   `tmux display-message -p '#S'` in it prints `rw-d157af95-<id>`
+   (hostname will print `Mac.localdomain` — known cosmetic, optional fix
+   `sudo scutil --set HostName Alfies-Mac-mini.local`).
+2. With that pane focused, check the OUTER powerline: dir chip = `admin`
+   (remote workspace basename, not your local dir), host chip = `mini`,
+   autosave chip = mini's save age (may show `…` for one refresh, then
+   `Nm` in pink if ≤ ~6m).
+3. Focus any local pane: all three chips flip back to local values
+   (dir = local cwd, host = mac, autosave = laptop continuum age).
+4. OSC 52 (remote-originated): inside the remote pane run
+   `printf '\033]52;c;%s\a' "$(printf 'rw-osc52-remote-test' | base64)"`
+   then Cmd-V on the laptop. Pass = that string pastes.
+5. Split A — focus the REMOTE pane, `prefix \`: new pane is remote (own
+   endpoint; from a local pane `rw status` shows 2 rows).
+6. Split B — focus a LOCAL pane in the same window, `prefix \`: new pane
+   is LOCAL (`hostname` = your laptop; `rw status` still 2 rows). This is
+   the new always-follow-focused-pane-host rule.
+7. Close every remote pane with `prefix q`: panes die cleanly (no
+   "returned 1"), `rw status` returns to zero rows.
+
+Report: session name, chip behavior in both focus states, OSC 52
+PASS/FAIL, both split outcomes, close outcomes.
 
 ## [ ] Bucket 2 — Drop resilience + idempotent ensure
 
@@ -219,7 +286,8 @@ Report each drill separately before starting the next.
 | Bucket | Result | Notes |
 |--------|--------|-------|
 | 0 | PASS | doctor all clean, zero endpoints, zero orphans |
-| 1 | — | |
+| 1 | FAIL→FIXED | restore hijack (53af514 guard); split rule + chips reworked; re-run as 1R |
+| 1R | — | |
 | 2 | — | |
 | 3 | — | |
 | 4 | — | |

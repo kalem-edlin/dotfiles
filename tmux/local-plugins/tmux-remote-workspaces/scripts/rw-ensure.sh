@@ -228,16 +228,6 @@ rw_pane_set "$pane_id" @rw-workspace "$remote_path"
 rw_pane_set "$pane_id" @remote-host "$worker"
 [ -n "$session_uuid" ] && rw_pane_set "$pane_id" @rw-session-uuid "$session_uuid"
 
-# Window default for future splits (initial-plan.md, "Pane and window
-# model" / Resolved decision #2: "V1 assigns panes one at a time and sets a
-# window default for future splits, rather than transactionally
-# reassigning every pane in a window at once"). rw-split.sh consults this
-# when the SOURCE pane of a split is not itself remote-backed; pane-level
-# values (@rw-worker/@rw-workspace, set just above) always win over this
-# window default when both exist on the same pane.
-rw_window_set "$pane_id" @rw-window-worker "$worker"
-rw_window_set "$pane_id" @rw-window-workspace "$remote_path"
-
 # Opt this pane out of tmux-workspace-resurrect's command replay so a
 # restore never pastes a stale `ssh worker` command into a pane this plugin
 # now manages. See initial-plan.md, "Local restore of remote attachments".

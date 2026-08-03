@@ -1427,6 +1427,14 @@ does not build a general scheduler.
 2. V1 assigns panes one at a time and sets a window default for future
    splits, rather than transactionally reassigning every pane in a window at
    once — this matches the pane-based ownership model.
+   AMENDED 2026-08-03 (operator decision, manual smoke Bucket 1): the
+   window-default half is dropped. A split now ALWAYS follows the host of
+   the pane it was invoked from — remote-backed source pane inherits its
+   worker+workspace; local source pane splits locally, even when a sibling
+   pane in the window is remote-backed. Splitting from a local pane
+   (observed: the operator's Claude pane) and receiving a remote pane was
+   judged wrong in practice. @rw-window-worker/@rw-window-workspace and
+   their helpers were removed. One-pane-at-a-time assignment stands.
 3. An orphaned ad hoc checkout with unsynchronized work is retained
    indefinitely and surfaced in status. It is never auto-removed.
 4. The port scheme is the formalized per-service-base-plus-`block_size` model

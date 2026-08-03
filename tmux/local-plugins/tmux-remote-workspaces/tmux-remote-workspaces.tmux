@@ -56,6 +56,19 @@ case "$existing_host_text" in
     ;;
 esac
 
+# Same wrap for the directory chip: a focused remote-backed pane shows the
+# basename of its REMOTE workspace (@rw-workspace, pane-scoped cache) instead
+# of the local #{pane_current_path} the pane happened to be launched from.
+# Static workspace root, not the live remote cwd -- tracking the latter would
+# need per-refresh ssh round-trips in the status line.
+existing_dir_text="$(tmux show-option -gqv @catppuccin_directory_text 2>/dev/null || true)"
+case "$existing_dir_text" in
+  *'@rw-workspace'*) : ;; # already wrapped -- don't nest again
+  *)
+    tmux set-option -gq @catppuccin_directory_text "#{?@rw-workspace,#{=/17/…:#{b:@rw-workspace}},${existing_dir_text}}"
+    ;;
+esac
+
 # --- Post-restore re-establishment and reconciliation ----------------------
 # Chained onto the SAME @resurrect-hook-post-restore-all option
 # tmux-workspace-resurrect.tmux already appended its own restore.sh to --

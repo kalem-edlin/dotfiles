@@ -31,6 +31,13 @@
 
 set -u
 
+# $1 (optional): the focused pane's remote worker alias, expanded from
+# #{@rw-worker} by tmux BEFORE this command runs (see
+# wire_autosave_indicator.sh). Non-empty means the focused pane is
+# remote-backed and the chip shows THAT host's autosave freshness instead of
+# the local server's.
+worker="${1:-}"
+
 # catppuccin mocha, from plugins/catppuccin-tmux/catppuccin-mocha.tmuxtheme.
 THM_BG="#1e1e2e"
 THM_FG="#cdd6f4"
@@ -45,6 +52,16 @@ GRACE_SECONDS=60
 DEFAULT_INTERVAL_MIN=15
 DEFAULT_LSEP=""
 DEFAULT_RSEP=""
+
+# Remote mode: workers save on 5-minute durability timers (launchd/systemd,
+# setup-headless), so freshness thresholds derive from that, not from the
+# local @continuum-save-interval. The remote `last` mtime is cached and
+# refreshed by a detached background ssh so a status refresh NEVER blocks on
+# the network; between refreshes the chip shows the cached value.
+REMOTE_INTERVAL_MIN=5
+REMOTE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-rw-autosave"
+REMOTE_CACHE_TTL=30
+REMOTE_LOCK_STALE=120
 
 is_uint() {
   case "$1" in
@@ -106,6 +123,67 @@ while IFS= read -r line; do
       ;;
   esac
 done <<< "$opts"
+
+# Remote-backed focused pane: show the worker's autosave freshness. Only
+# safe alias characters reach ssh/the cache path; anything else means a
+# corrupt pane option, so fall through to the local chip.
+if [ -n "$worker" ]; then
+  case "$worker" in
+    *[!A-Za-z0-9._-]*) worker="" ;;
+  esac
+fi
+if [ -n "$worker" ]; then
+  now="$(date +%s)" || exit 0
+  cache="$REMOTE_CACHE_DIR/$worker"
+  cache_mtime=0
+  if [ -f "$cache" ]; then
+    cache_mtime="$(stat -f %m "$cache" 2>/dev/null || stat -c %Y "$cache" 2>/dev/null)" || cache_mtime=0
+    is_uint "$cache_mtime" || cache_mtime=0
+  fi
+  if [ $((now - cache_mtime)) -gt "$REMOTE_CACHE_TTL" ]; then
+    mkdir -p "$REMOTE_CACHE_DIR" 2>/dev/null
+    lock="$REMOTE_CACHE_DIR/.$worker.refresh"
+    if [ -d "$lock" ]; then
+      # A refresh that died (network drop, killed server) must not wedge the
+      # chip on a stale value forever.
+      lock_mtime="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null)" || lock_mtime=0
+      is_uint "$lock_mtime" || lock_mtime=0
+      [ $((now - lock_mtime)) -gt "$REMOTE_LOCK_STALE" ] && rmdir "$lock" 2>/dev/null
+    fi
+    if mkdir "$lock" 2>/dev/null; then
+      (
+        ts="$(ssh -o BatchMode=yes -o ConnectTimeout=3 "$worker" \
+          'f="$HOME/.local/share/tmux/resurrect/last"; stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null' 2>/dev/null)"
+        case "$ts" in
+          '' | *[!0-9]*) : ;;
+          *) printf '%s\n' "$ts" > "$cache.tmp" && mv -f "$cache.tmp" "$cache" ;;
+        esac
+        rmdir "$lock" 2>/dev/null
+      ) >/dev/null 2>&1 &
+    fi
+  fi
+  last_remote=""
+  [ -f "$cache" ] && last_remote="$(cat "$cache" 2>/dev/null)"
+  if ! is_uint "$last_remote"; then
+    # No successful fetch yet (first focus, or worker unreachable).
+    chip "$LATE_COLOR" "…"
+    exit 0
+  fi
+  age=$((now - last_remote))
+  [ "$age" -lt 0 ] && age=0
+  age_min=$((age / 60))
+  interval_sec=$((REMOTE_INTERVAL_MIN * 60))
+  fresh_max=$((interval_sec + GRACE_SECONDS))
+  stale_min=$((interval_sec * 3))
+  if [ "$age" -ge "$stale_min" ]; then
+    chip "$STALE_COLOR" "${age_min}m"
+  elif [ "$age" -gt "$fresh_max" ]; then
+    chip "$LATE_COLOR" "${age_min}m"
+  else
+    chip "$FRESH_COLOR" "${age_min}m"
+  fi
+  exit 0
+fi
 
 # The one failure mode this indicator exists to catch: continuum's own save
 # interpolation missing from status-right (disarmed autosave). This check

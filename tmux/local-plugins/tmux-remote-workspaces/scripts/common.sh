@@ -234,25 +234,6 @@ rw_pane_unset() {
 }
 
 # ---------------------------------------------------------------------------
-# Window options (initial-plan.md, "Pane and window model" / Resolved
-# decision #2: "V1 assigns panes one at a time and sets a window default for
-# future splits, rather than transactionally reassigning every pane in a
-# window at once"). Cache only, same lifetime caveat as the pane options
-# above. Target is a pane id -- tmux resolves it to its containing window
-# when combined with -w.
-# ---------------------------------------------------------------------------
-
-rw_window_get() {
-  local pane_id="$1" option="$2"
-  tmux show-option -wqvt "$pane_id" "$option" 2>/dev/null || true
-}
-
-rw_window_set() {
-  local pane_id="$1" option="$2" value="$3"
-  tmux set-option -wqt "$pane_id" "$option" "$value" 2>/dev/null || true
-}
-
-# ---------------------------------------------------------------------------
 # Registry: endpoints/<id>.json and tombstones/<id>.json (atomic writes)
 # ---------------------------------------------------------------------------
 
