@@ -215,9 +215,15 @@ cmd_sync() {
   mkdir -p "$snap_dir"
   local sq_source
   sq_source="$(rw_sync_shquote "$source_path")"
+  # NOTE: plain `git rev-parse HEAD` / `--abbrev-ref HEAD` echo the literal
+  # ref name to STDOUT even when it cannot be resolved (unborn branch, empty
+  # repo) while exiting nonzero -- so `2>/dev/null || fallback` captures
+  # "HEAD" (or "HEAD\nHEAD" with the fallback appended) instead of nothing.
+  # `--verify --quiet 'HEAD^{commit}'` prints only on success; symbolic-ref
+  # fails silently with -q when detached.
   local branch head_commit detached="false"
-  branch="$(exec_source "git -C $sq_source rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD")"
-  head_commit="$(exec_source "git -C $sq_source rev-parse HEAD 2>/dev/null || true")"
+  branch="$(exec_source "git -C $sq_source symbolic-ref --short -q HEAD 2>/dev/null || echo HEAD")"
+  head_commit="$(exec_source "git -C $sq_source rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true")"
   [ -n "$head_commit" ] || rw_die "handoff sync: --source-path has no commits (empty repo) -- nothing to hand off" 64
   [ "$branch" = "HEAD" ] && detached="true"
 
@@ -227,7 +233,7 @@ cmd_sync() {
   # it lacks (this is what lets unpushed commits travel without touching
   # origin at all).
   local dest_head
-  dest_head="$(exec_dest "git -C $(rw_sync_shquote "$dest_path") rev-parse HEAD 2>/dev/null || true" 2>/dev/null || true)"
+  dest_head="$(exec_dest "git -C $(rw_sync_shquote "$dest_path") rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true" 2>/dev/null || true)"
   dest_head="$(printf '%s' "$dest_head" | tr -d '\r\n')"
 
   # NOTE: "HEAD" (a ref), not the bare $head_commit sha -- `git bundle
