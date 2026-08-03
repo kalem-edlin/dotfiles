@@ -2637,52 +2637,167 @@ save-validity gate is now applied and both headless doctors pass fully
 also completed by the operator on 2026-08-03 (verified: account
 `kalem-edlin`, active), clearing the Wave 5 auth gate.
 
-### Remaining smoke-test surface (as of 2026-08-02)
+### Campaign record (2026-08-03): full Waves 1-6 run, defects, and fixes
+
+Run id `rw-smoke-20260803-w1r2`; evidence for every lane under the session
+scratchpad (`.../scratchpad/rw-smoke-20260803-w1r2/<lane>/`, per-lane
+`assertions.jsonl`/`manifest.json`/`cleanup.json`). Sonnet subagent lanes,
+coordinator-verified. Both workers tracked dotfiles main throughout
+(453fc1a -> af75b5a -> 41605ec -> d8630a5 -> fa120eb -> c9eec00 -> 601fe37);
+save-validity gate applied on both, headless doctors fully green
+(`agents-roll` 65/65, `mini` 66/66), `gh auth` on agents-roll completed.
+
+**Wave 1 re-run (hermetic, itemized — supersedes the 32/38 record):**
+- 1A config/commands 25/25; findings: `rw status` leaks jq noise on a
+  malformed registry entry (reconcile handles it cleanly); `rw doctor`
+  calls bare `tmux` with no test seam (lanes must PATH-shim).
+- 1B resolution + sync engine 94/94; exit contract 0/2/3/4 exact.
+- 1C adapters 108/108 (incl. smoke-test 11/11, pi stderr fix confirmed,
+  zero auth leakage against planted decoys).
+- 1D slots/ports/claims green; found+fixed REAL BUG: exit-12
+  no-session-identity was swallowed by command substitution in
+  claim/release/handoff-writer/return-writer -> identity-less claims with
+  empty session_uuid could silently overwrite each other (`41605ec`).
+- 1E/1E2 private focus tmux: CRITICAL harness finding — a private socket
+  does NOT isolate resurrect; on server recreate `@resurrect-dir` (runtime
+  option) is lost and save.sh falls back to the real
+  ~/.local/share/tmux/resurrect (a lane snapshot briefly became the real
+  `last`; self-healed by continuum; debris cleaned). Mitigation now
+  standard: lane conf via `-f` (mk-lane-conf.sh) pinning @resurrect-dir,
+  asserted before every save/restore. 1E2 redo 25/26 clean; the one FAIL
+  was harness methodology (prefix key table has no auto-expiry; a lone
+  C-a probe poisons the next sequence — pair keys atomically).
+
+**Waves 2-3 (endpoint/Treemux/transport, both workers):** core lifecycle,
+placement modes, splits/status/closes, remote-only Treemux guarantees,
+capped 1/2/4/../30s backoff, worker-server-loss rebuild, and both
+unwrapped production canaries PASS. Open question answered: the detach
+hook DOES fire on abrupt SIGKILL (~1s, far faster than the timer).
+Found+fixed (`d8630a5`): prefix q dead on remote panes (run-shell has no
+TMUX_PANE; binding now passes --pane #{pane_id}); prefix & closed only the
+first endpoint (ssh drained the while-read stdin); ghostty's
+TERM=xterm-ghostty broke every agents-roll attach (attach now pins
+TERM=screen-256color).
+
+**Wave 4 (handoff/return, both workers):** state fidelity byte-exact
+(porcelain-v2 index/worktree split, binary, rename, deletion, untracked,
+LFS materialization), divergence refusal + recoverable backups, transfer/
+apply failure guarantees all held. Found+fixed (`fa120eb`): rw return
+clobbered fresh sync metadata with its pre-sync snapshot (next sync
+spuriously "diverged"); failed handoff did not roll back the
+handoff-writer claim flip; --force-diverged was named in the error but
+rejected by the CLIs; --check-lfs was hardcoded into preflight (now
+caller-or-autodetect); macOS AppleDouble xattrs broke cross-OS fingerprint
+verify (COPYFILE_DISABLE=1 on all tar creates). Incident (w4m): a failed
+`cd` left a lane shell in the real dotfiles checkout and pushed junk to
+origin/main; reverted non-destructively (4 content-neutral commits:
+114a24e/05c8006/4999c18/bb0b197; `git diff d8630a5..bb0b197` empty).
+
+**Wave 5 (live provider matrix) + redo:** codex-on-mini delivered a fully
+clean cross-host resume with sentinel continuity. Found+fixed across
+`c9eec00`+`601fe37`: pi resume used the SOURCE-host transcript path
+(destination silently started a fresh session while the registry said
+"resumed"); claude_slug only slugged '/' while claude slugs EVERY
+non-alphanumeric (dotted fixture paths -> transcript in a dir claude never
+scans -> "No conversation found"; discovery is a pure filename scan of
+~/.claude/projects/<slug>/, no index — confirmed via docs agent); both
+provider-start verifiers had a host-global pgrep fallback that verified
+resumes off unrelated processes (now pane-PID-tree scoped +
+match-must-hold-twice stability); rw return dispatched the "local" resume
+into the REMOTE shell because the pane was still attach-loop->ssh (return
+now releases the pane first; attach-loop gained a pane-released exit that
+execs a login shell — plain exit killed the pane since the loop is the
+pane's root process); Node-only version drift (24.18.0 vs .1) blocked
+every pi/codex return (CLI-equality now proceeds per the adapter
+contract); `--pane X` handoffs hijacked the caller's terminal (now
+respawn X, and only when X is a plain shell — respawn-pane -k was
+destroying still-running source agents); originless git worktrees fell
+through to plain-$HOME placement and applied repo contents into workers'
+real $HOME in three lanes (now refused with guidance). Trust dialogs:
+claude/codex show per-directory trust prompts on fresh fixture dirs; lanes
+either pre-seed trust for lane-owned dirs (jq-only, no file contents read,
+removed at teardown) or record BLOCKED — never click through blind.
+
+**Wave 6 (agent-safe private drills):** 24 PASS — ambiguity safety,
+5-point reconciliation contract, namespace-scoped orphan cleanup (decoys
+byte-identical), worker-loss manifest rebuild, real resurrect dir/`last`
+untouched. Found+fixed (`601fe37`): rw-post-restore's session-UUID
+re-stamp was dead code (display-message missing -p); libexec/reconcile
+closed one orphan per invocation (ssh drained the here-string stdin);
+sibling-rebuild race — with 2+ endpoints on one worker server, the
+post-loss race loser saw "server up, session absent" and wrongly
+self-tombstoned as remote-intentional-close (session-absent now compares
+the server's start_time to the last successful attach; rebuilt server ->
+recreate, same server -> intentional close).
+
+**VERIFICATION PENDING — the final verification lane (W5F) was stopped by
+the operator mid-run.** The `601fe37` fix set is therefore shipped but NOT
+yet verified live. Outstanding proofs (V1-V6): pi cross-host sentinel
+continuity both directions; claude continuity with a dotted workspace
+path; cross-pane return leaves pane X alive as a local shell; two
+endpoints both survive a worker-server loss (no false tombstone);
+reconcile closes 4 orphans in one invocation; restored sessions re-resolve
+their original @session-uuid.
+
+**Design/robustness backlog (recorded, deliberately not hot-fixed):**
+retained endpoint after return is reusable/closeable only manually (fresh
+ensure mints a duplicate; no `rw close --endpoint <id>` form);
+force-diverged overwrite leaves destination-only untracked cruft (verify
+exit 4) and its backup excludes LFS objects; a killed remote session can
+wedge the attached worker tmux client for minutes before reconciliation;
+rapid concurrent `rw close` calls can misreport `remote=
+unreachable_or_absent` and leak live remote sessions (3s probe-timeout
+contention); Treemux worker-side registration options go stale after
+sidebar close; reflected-mode preflight demands origin reachability it
+does not need; a Ctrl-Z-suspended source agent survives the post-resume
+stop; ambiguous-restore panes keep a stale queued command in their buffer;
+`rw status` malformed-entry stderr noise; `rw doctor` bare-tmux seam.
+Worker provisioning: agents-roll Neovim 0.9.5 is too old for the Treemux
+plugin stack (needs >=0.10) — belongs in linux-headless.sh plus a doctor
+check.
+
+### Remaining smoke-test surface (as of 2026-08-03, end of campaign day)
 
 Honest accounting of where the waves above actually stand:
 
-PROVEN:
+PROVEN (see "Campaign record (2026-08-03)" above for full detail):
 
-- the sandboxed provider-adapter round-trip (`libexec/adapters/smoke-test`,
-  11/11, re-verified 2026-08-02);
-- the headless-install worker-provisioning contract (both workers' doctors,
-  the detached save-timer chain, and `rw doctor` run from the laptop);
-- Wave 0's SSH-only worker surface, 17/17 (see "Wave 0 and Wave 1 results"
-  above); and
-- most of Wave 1's hermetic contracts, 32/38 assertions (see above) —
-  proven but not yet a fully clean pass.
+- Wave 0 (17/17) and the full itemized Wave 1 re-run (1A-1E2, ~300
+  assertions, zero unresolved product FAILs);
+- Waves 2-3 on both workers: endpoint lifecycle, placement modes,
+  splits/closes/status, remote-only Treemux guarantees, connection-loss/
+  backoff, worker-server-loss rebuild, unwrapped production canaries; the
+  detach hook empirically FIRES on abrupt SIGKILL;
+- Wave 4 on both workers: byte-exact handoff/return state fidelity,
+  divergence refusal, recoverable backups, transfer/apply failure
+  guarantees;
+- Wave 5 partially: codex cross-host handoff/return with real sentinel
+  continuity (mini); the real authenticated `codex resume` works; the
+  duplicate-writer guard is registry-scoped (immune to process-scan
+  misfires);
+- Wave 6 agent-safe drills: ambiguity safety, the 5-point reconciliation
+  contract, namespace-scoped cleanup, worker-loss rebuild.
 
-UNBLOCKED 2026-08-03 (`gh auth login` on `agents-roll` completed by the
-operator; Tailscale, Claude, Codex, and Pi were already green on both
-workers) — now runnable:
-
-- all of Wave 5's six live provider handoff/return cases (Pi/Claude/Codex x
-  mini/agents-roll); and
-- the real authenticated `codex resume` check.
+PENDING VERIFICATION (fix set `601fe37` shipped, final lane W5F stopped by
+the operator before completing): V1 pi continuity both directions; V2
+claude continuity on a dotted workspace path; V3 cross-pane return leaves
+the target pane alive; V4 both endpoints survive worker-server loss; V5
+reconcile closes all orphans in one pass; V6 restored sessions re-resolve
+their original @session-uuid. Re-run lane W5F to close these.
 
 BLOCKED on a brief human check, unrelated to worker auth:
 
 - the final terminal-emulator OSC 52 clipboard confirmation.
-
-REMAINING on an isolated laptop tmux server, subject to the continuum
-teardown rule in the coordinator isolation contract above:
-
-- Waves 2-3 endpoint establishment/placement, pane/window/split/close
-  lifecycle, connection-loss/backoff, and the still-open
-  detach-hook-on-TCP-drop question;
-- the mandatory remote Treemux smoke;
-- Wave 4 handoff/return; and
-- Wave 6's private-variant resurrection/reconciliation drills.
 
 DEFERRED to a final, explicitly-warned step: Wave 6's serialized production
 canaries against the live focus-machine tmux server — real timer firing
 without isolation, default-server-loss inventory, worker reboot recovery,
 and the optional focus-Mac sleep/wake drill.
 
-Note: every Wave 0/1 result above ran against the workers at `453fc1a`;
-both workers have since been brought to `af75b5a` with the save-validity
-gate applied and doctors fully green (2026-08-03) — see "Wave 0 and Wave 1
-results" above.
+Operator items outstanding (unchanged): content-engine slot 10/12 port
+repair (slot 10's Expo still squats 9081); per-slot claim-marker migration
+(14 slots, each by its owner); PRs #431/#433 blocked on the red
+provision-supabase check; agents-roll Neovim >= 0.10 provisioning.
 
 ## Research references
 
