@@ -2481,19 +2481,18 @@ an ephemeral worktree outside the claim system; not yet merged). It:
   of `platform/gcp/protocols/env-rendering.md`, keeping that file's
   content-engine-specific URL-derivation/Bonjour/`LOCAL_HOST` behavior.
 
-**Resolved: `scripts/sync-env-worktrees.ts` is kept, not deleted.** It
-copies the entire `.env.local` (renumbering only `_PORT`-suffixed keys) and
-the entire `.env.production` verbatim to sibling worktrees. A real
-`.env.local` in `content-engine-2` holds dozens of non-port keys — API keys,
-`DATABASE_URL`, Apple/Meta/AppsFlyer secrets, Supabase keys — and
-`worktree-slot` only renders the four port variables declared in
-`worktrees/.config/worktrees/config.json` (`NEXT_PORT`, `DASHBOARD_PORT`,
-`ENGINE_PORT`, `EXPO_PORT`). The script covers a genuine gap rather than
-duplicating the new system, so its `package.json` entries
-(`env:sync:worktrees`, `env:sync:worktrees:dry`) and the two
-incident-runbook references (`docs/notes/cicd/staging-ops.md:160`,
-`docs/notes/cicd/env.md:65`) are correct as-is and untouched. This answers
-the operator question of whether non-port env keys are relied on: yes.
+**Reversed 2026-08-03: `scripts/sync-env-worktrees.ts` is DELETED** (PR
+#433, `chore/ports-from-env-ports-file`, commit `e886bfa3d`), superseding
+the earlier "kept" decision above this note replaced. Two reasons: its
+`_PORT` renumbering used stride 1 (slot 11 would get `NEXT_PORT=3010` —
+`DASHBOARD_PORT`'s base), a third allocator actively fighting `env:pull`'s
+`.env.ports` rendering; and its non-port propagation is superseded by each
+checkout rendering its own `.env.local` from Secret Manager via `env:pull`.
+Both `package.json` entries and the runbook references
+(`docs/notes/cicd/staging-ops.md`, `docs/notes/cicd/env.md`) were removed in
+the same commit, which also dropped the now-nonexistent `--no-ports` flag
+from every remaining `env:pull` caller (including CI's `render-sm-env.js`,
+which would otherwise have broken on the flag-removal in `b144b5e99`).
 
 Opting content-engine into the dotfiles-side registry was already done
 before this PR and required no code change: it is opted into
@@ -2527,10 +2526,15 @@ before this PR and required no code change: it is opted into
   Migration rewrites `owning_user`/`session_uuid`/`active_writer_host` to
   whoever runs it, so each slot must be migrated by its actual current
   owner, one at a time — never batch-scripted blind.
-- Convert Playwright's hardcoded port 3014
-  (`apps/tanstack/playwright.config.ts:47`) into a rendered per-slot
-  service — needs a matching service entry added to dotfiles'
-  `worktrees/.config/worktrees/config.json` first.
+- ~~Convert Playwright's hardcoded port 3014~~ DONE 2026-08-03 in PR #433,
+  and differently than proposed: no new dotfiles service entry needed.
+  `apps/tanstack/playwright.config.ts` now derives `baseURL` and
+  `webServer.port` from `DASHBOARD_PORT` (its `test:e2e` script already runs
+  under `with-local`, and `pnpm dev` binds `${DASHBOARD_PORT:-3010}` — the
+  3014 was a fossil of the old stride-1 formula and only ever matched a
+  checkout whose `.env.local` said 3014). `supabase/config.toml`'s
+  localhost redirect enumeration (3010-3014) was port-globbed in the same
+  commit.
 
 **What already works today, independent of PR #431 merging.** The
 dotfiles-side `worktree-slot` and `worktree-claim` executables are capable of
@@ -2558,10 +2562,12 @@ slot, migrated or not, always use the current JSON schema.
 unmigrated slot stays advisory-only regardless of merge state — a warning,
 never a block — until each slot's marker is actually migrated, per the
 INTERIM BEHAVIOR decision recorded in the adversarial-audit findings above.
-The two disagreeing port derivations (`(slot - 1) * 100` in the GCP env
-renderer versus plain `slot - 1` in `sync-env-worktrees.ts`, which is being
-kept) are permanent, not merge-gated: slots 10/11 and 12/13 keep colliding
-until the port-repair item above runs, whether or not PR #431 has merged.
+Of the two disagreeing port derivations, both are now gone from the code:
+the GCP renderer's `(slot - 1) * 100` was deleted with `worktreePorts.ts`
+and `sync-env-worktrees.ts`'s plain `slot - 1` was deleted with that script
+(both in PR #433). The live corruption they left behind persists: slots
+10/11 and 12/13 keep colliding until the port-repair item above runs,
+whether or not PRs #431/#433 have merged.
 
 See also "Content-engine inconsistency to replace" and "Relationship to
 content-engine" earlier in this document for the design rationale behind
@@ -2623,12 +2629,13 @@ Shipped as `setup/patches/tmux-resurrect-save-validity-gate.patch` with a
 `headless-doctor` check. The sibling `tmux-workspace-resurrect` writes via
 mktemp+mv and does not have this hole.
 
-All fixes above landed at commit `fa5cd83`. **The workers have not received
-them yet** — both are still at `453fc1a`, so every result in this subsection
-ran against that commit. The save-validity gate in particular needs a pull
-plus a rerun of each worker's normal headless-setup entrypoint before it
-protects anything there (idempotent; no plugin reinstall or tmux restart
-required).
+All fixes above landed at commit `fa5cd83`. Every result in this subsection
+ran against the workers at `453fc1a`. **Resolved 2026-08-03:** both workers
+were pulled to `af75b5a` and `install_tmux_plugins` was re-run on each; the
+save-validity gate is now applied and both headless doctors pass fully
+(`agents-roll` 65/65, `mini` 66/66). `gh auth login` on `agents-roll` was
+also completed by the operator on 2026-08-03 (verified: account
+`kalem-edlin`, active), clearing the Wave 5 auth gate.
 
 ### Remaining smoke-test surface (as of 2026-08-02)
 
@@ -2645,9 +2652,9 @@ PROVEN:
 - most of Wave 1's hermetic contracts, 32/38 assertions (see above) —
   proven but not yet a fully clean pass.
 
-BLOCKED on the one remaining operator-auth item, `gh auth login` on
-`agents-roll` (see (c) above; Tailscale, Claude, Codex, and Pi are already
-green on both workers):
+UNBLOCKED 2026-08-03 (`gh auth login` on `agents-roll` completed by the
+operator; Tailscale, Claude, Codex, and Pi were already green on both
+workers) — now runnable:
 
 - all of Wave 5's six live provider handoff/return cases (Pi/Claude/Codex x
   mini/agents-roll); and
@@ -2672,8 +2679,9 @@ canaries against the live focus-machine tmux server — real timer firing
 without isolation, default-server-loss inventory, worker reboot recovery,
 and the optional focus-Mac sleep/wake drill.
 
-Note: every Wave 0/1 result above ran against the workers at `453fc1a`, which
-has not yet received this round's fixes (`fa5cd83`) — see "Wave 0 and Wave 1
+Note: every Wave 0/1 result above ran against the workers at `453fc1a`;
+both workers have since been brought to `af75b5a` with the save-validity
+gate applied and doctors fully green (2026-08-03) — see "Wave 0 and Wave 1
 results" above.
 
 ## Research references
