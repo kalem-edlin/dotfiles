@@ -435,6 +435,35 @@ rw_provider_pattern() {
   esac
 }
 
+# rw_ps_tree_matches <pattern> <root-pid>... ; stdin: `ps axo pid=,ppid=,command=`
+#
+# True when any process at-or-under one of the root PIDs matches the ERE.
+# Scoped replacement for the old host-global `pgrep -f` fallback in the two
+# wait functions below: that fallback could "verify" a provider start off
+# any unrelated same-named process on the host (smoke lane w5 counted ~60
+# candidates on a busy focus machine) and let a handoff/return proceed to
+# stop the only real copy of the agent.
+rw_ps_tree_matches() {
+  local pattern="$1"
+  shift
+  awk -v roots="$*" '
+    BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) rootset[r[i]] = 1 }
+    {
+      pid = $1; ppid = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", line)
+      cmd[pid] = line; parent[pid] = ppid
+    }
+    END {
+      for (p in cmd) {
+        q = p
+        while (q && !(q in rootset) && (q in parent) && parent[q] != q) q = parent[q]
+        if (q in rootset) print cmd[p]
+      }
+    }
+  ' | grep -Eiq "$pattern"
+}
+
 # rw_wait_remote_provider_started <worker> <session_name> <provider> [tries]
 # Polls a few short retries for the provider process to show up in the
 # remote endpoint session: first via tmux's own #{pane_current_command}
@@ -444,7 +473,7 @@ rw_provider_pattern() {
 # provider never shows up within the polling budget.
 rw_wait_remote_provider_started() {
   local worker="$1" session_name="$2" provider="$3" tries="${4:-5}"
-  local pattern i pane_cmd
+  local pattern i pane_cmd remote_pane_pids
   pattern="$(rw_provider_pattern "$provider")"
   i=0
   while [ "$i" -lt "$tries" ]; do
@@ -453,7 +482,14 @@ rw_wait_remote_provider_started() {
     if printf '%s\n' "$pane_cmd" | grep -Eiq "$pattern"; then
       return 0
     fi
-    if rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "pgrep -f -- '$pattern'" >/dev/null 2>&1; then
+    # Scoped fallback: only processes under the endpoint session's own
+    # pane PIDs count (see rw_ps_tree_matches for why host-global pgrep
+    # was a correctness bug, not a convenience).
+    remote_pane_pids="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+      "tmux list-panes -t '$session_name' -F '#{pane_pid}' 2>/dev/null" 2>/dev/null | tr '\n' ' ')"
+    if [ -n "${remote_pane_pids// /}" ] &&
+      rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "ps axo pid=,ppid=,command=" 2>/dev/null |
+      rw_ps_tree_matches "$pattern" $remote_pane_pids; then
       return 0
     fi
     i=$((i + 1))
@@ -467,7 +503,7 @@ rw_wait_remote_provider_started() {
 # actually started before stopping the remote agent.
 rw_wait_local_provider_started() {
   local pane_id="$1" provider="$2" tries="${3:-5}"
-  local pattern i pane_cmd
+  local pattern i pane_cmd pane_pid
   pattern="$(rw_provider_pattern "$provider")"
   i=0
   while [ "$i" -lt "$tries" ]; do
@@ -475,7 +511,11 @@ rw_wait_local_provider_started() {
     if printf '%s\n' "$pane_cmd" | grep -Eiq "$pattern"; then
       return 0
     fi
-    if command -v pgrep >/dev/null 2>&1 && pgrep -f -- "$pattern" >/dev/null 2>&1; then
+    # Scoped fallback: only processes under this pane's own PID count (see
+    # rw_ps_tree_matches for why host-global pgrep was a correctness bug).
+    pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
+    if [ -n "$pane_pid" ] &&
+      ps axo pid=,ppid=,command= | rw_ps_tree_matches "$pattern" "$pane_pid"; then
       return 0
     fi
     i=$((i + 1))

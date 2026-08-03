@@ -70,7 +70,16 @@ fi
 identity="$(rw_git_remote_identity "$cwd")"
 
 if [ -z "$identity" ]; then
-  # Not a repo (or no `origin` remote): plain worker $HOME.
+  # A git worktree WITHOUT an origin remote must not fall through to the
+  # plain-$HOME mapping: a handoff would then apply the repo's contents
+  # directly into the worker's real home directory (happened in three
+  # separate smoke lanes before this guard). Plain mode remains for
+  # genuinely non-repo directories.
+  if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "rw: '$cwd' is a git worktree with no 'origin' remote -- auto workspace placement would land in the worker's home directory. Pass --workspace <path> explicitly." >&2
+    exit 1
+  fi
+  # Not a repo: plain worker $HOME.
   emit "plain" "" "$cwd" "$worker_home" false ""
   exit 0
 fi

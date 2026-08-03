@@ -241,16 +241,36 @@ cmd_install() {
   local slug
   slug="$(claude_slug "$dest_path")"
 
+  # Rewrite the transcript's embedded absolute `cwd` fields to the
+  # destination path. Claude records cwd on several line types and its
+  # resume path matches against them: a transcript copied verbatim across
+  # hosts fails with "No conversation found" even when the file sits in
+  # the correct project slug dir (smoke lane w5; same root cause codex's
+  # adapter already handles for payload.cwd). Only objects that carry a
+  # cwd key are re-encoded; jq's re-encoding is safe here because claude
+  # reads these lines with a real JSON parser.
+  local rewritten
+  rewritten="$(mktemp "${TMPDIR:-/tmp}/rw-claude-install.XXXXXX")"
+  if ! jq -c --arg cwd "$dest_path" \
+    'if (type == "object" and has("cwd")) then .cwd = $cwd else . end' \
+    <"$transcript" >"$rewritten" 2>/dev/null; then
+    rm -f "$rewritten"
+    ca_die "failed to rewrite transcript cwd fields for $dest_path." 1
+  fi
+
   if [ -n "$worker" ]; then
-    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.claude/projects/${slug}\" && cat > \"\$HOME/.claude/projects/${slug}/${session_id}.jsonl\"" <"$transcript"; then
+    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.claude/projects/${slug}\" && cat > \"\$HOME/.claude/projects/${slug}/${session_id}.jsonl\"" <"$rewritten"; then
+      rm -f "$rewritten"
       ca_die "failed to install claude transcript on worker '$worker'." 1
     fi
+    rm -f "$rewritten"
     printf 'installed claude transcript on %s: ~/.claude/projects/%s/%s.jsonl\n' "$worker" "$slug" "$session_id"
   else
     local dest_dir
     dest_dir="$(claude_projects_root_local)/$slug"
     mkdir -p "$dest_dir"
-    cp -p "$transcript" "$dest_dir/$session_id.jsonl"
+    cp -p "$rewritten" "$dest_dir/$session_id.jsonl"
+    rm -f "$rewritten"
     printf 'installed claude transcript: %s/%s.jsonl\n' "$dest_dir" "$session_id"
   fi
   printf 'note: per-path trust in ~/.claude.json is not seeded by this adapter -- claude may prompt to trust %s on first launch there.\n' "$dest_path" >&2

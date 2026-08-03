@@ -94,6 +94,21 @@ exit_intentional_close() {
   exit 0
 }
 
+# `rw return` releases a pane by clearing its @rw-endpoint cache and killing
+# this loop's ssh client: the endpoint registry/session survive (close is a
+# separate decision), but this pane must fall back to its local shell so the
+# return can resume the agent locally in it -- so exit WITHOUT killing the
+# pane, unlike an intentional close.
+pane_released() {
+  [ -n "$pane_id" ] || return 1
+  [ "$(rw_pane_get "$pane_id" @rw-endpoint 2>/dev/null || true)" != "$endpoint_id" ]
+}
+
+exit_pane_released() {
+  echo "rw: endpoint $endpoint_id was returned; this pane is local again."
+  exit 0
+}
+
 # remote_state <worker> <session_name>
 # Prints exactly one of: unreachable | no-server | session-absent |
 # session-present. A single short-timeout ssh round trip (multiplexed via
@@ -149,6 +164,9 @@ ask_worker_to_restore_then_recheck() {
 while true; do
   if intentional_close; then
     exit_intentional_close
+  fi
+  if pane_released; then
+    exit_pane_released
   fi
 
   endpoint_json="$(rw_read_endpoint "$endpoint_id")" || {
@@ -264,6 +282,10 @@ while true; do
   if intentional_close; then
     rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "closed" "exit=$exit_code"
     exit_intentional_close
+  fi
+  if pane_released; then
+    rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "returned" "exit=$exit_code"
+    exit_pane_released
   fi
 
   if [ "$exit_code" -eq 0 ] && [ "$duration_ms" -gt 2000 ]; then

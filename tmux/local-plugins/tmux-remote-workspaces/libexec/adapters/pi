@@ -319,12 +319,28 @@ cmd_resume_cmd() {
   ca_require "$dest_path" "--dest-path"
   ca_require "$session_id" "--session-id"
 
-  # pi resolves both full paths and partial UUIDs on its own -- no need to
-  # re-derive the installed path here (verified fact, initial-plan.md).
+  # pi resolves partial UUIDs on its own, but a session id that is a PATH
+  # is a SOURCE-host transcript path: install() relocated the transcript to
+  # the destination-encoded sessions dir, so passing the path verbatim
+  # makes pi on the destination silently start a FRESH session (smoke lane
+  # w5: destination answered UNKNOWN to the pre-handoff sentinel while the
+  # registry recorded "resumed"). Emit a command that resolves the
+  # installed transcript on the DESTINATION at runtime instead.
+  local session_ref
+  case "$session_id" in
+    */*)
+      local slug
+      slug="$(pi_slug "$dest_path")"
+      session_ref="\"\$(ls -t \"\$HOME/.pi/agent/sessions/${slug}\"/*.jsonl 2>/dev/null | head -n1)\""
+      ;;
+    *)
+      session_ref="$(printf '%q' "$session_id")"
+      ;;
+  esac
   if [ "$fork" -eq 1 ]; then
-    printf 'pi --fork %q\n' "$session_id"
+    printf 'pi --fork %s\n' "$session_ref"
   else
-    printf 'pi --session %q\n' "$session_id"
+    printf 'pi --session %s\n' "$session_ref"
   fi
 }
 

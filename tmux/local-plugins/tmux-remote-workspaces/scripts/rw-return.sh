@@ -133,10 +133,21 @@ if [ -n "$agent_provider" ] && [ -n "$agent_session_id" ] && [ -x "$ADAPTERS_DIR
   if [ "$version_status" -eq 0 ]; then
     version_policy="$(printf '%s' "$version_json" | jq -r '.policy // empty' 2>/dev/null)"
     if [ "$version_policy" = "newer_worker" ]; then
-      rw_warn "rw return: $agent_provider version policy blocks this return -- local CLI is older than the worker's that authored this transcript. This plugin never updates itself -- update the LOCAL $agent_provider install (e.g. the same command rw-handoff.sh would print for the reverse direction) and retry."
-      rw_log_event "return" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$return_start_ts")" "fail" "agent_version_blocked:$agent_provider"
-      rm -f "$version_err"
-      exit 1
+      # Codex/pi adapters report newer_worker for a Node-ONLY mismatch with
+      # equal CLI packages (adapters/README.md), and the contract says only
+      # CLI *oldness* blocks -- so compare the CLI fields before blocking.
+      # (Real occurrence: node v24.18.0 vs v24.18.1 blocked every pi/codex
+      # return in smoke lane w5 with identical CLIs on both hosts.)
+      version_local_cli="$(printf '%s' "$version_json" | jq -r 'if (.local | type) == "object" then .local.cli // empty else .local // empty end' 2>/dev/null)"
+      version_worker_cli="$(printf '%s' "$version_json" | jq -r 'if (.worker | type) == "object" then .worker.cli // empty else .worker // empty end' 2>/dev/null)"
+      if [ -n "$version_local_cli" ] && [ "$version_local_cli" = "$version_worker_cli" ]; then
+        rw_warn "rw return: notice -- $agent_provider CLI versions match ($version_local_cli) and only the Node runtime differs; proceeding (only CLI oldness blocks, per the adapter contract)."
+      else
+        rw_warn "rw return: $agent_provider version policy blocks this return -- local CLI is older than the worker's that authored this transcript. This plugin never updates itself -- update the LOCAL $agent_provider install (e.g. the same command rw-handoff.sh would print for the reverse direction) and retry."
+        rw_log_event "return" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$return_start_ts")" "fail" "agent_version_blocked:$agent_provider"
+        rm -f "$version_err"
+        exit 1
+      fi
     fi
   elif [ "$version_status" -eq 3 ]; then
     rw_warn "rw return: notice -- local $agent_provider is newer than the worker's; proceeding (mirror image of the newer-worker-proceeds policy). $(cat "$version_err")"
@@ -193,6 +204,60 @@ if [ "$local_is_git" = "true" ] && { [ "$had_claim" = "true" ] || [ -f "$focus_p
     rw_warn "rw return: worktree-claim return-writer failed (exit $claim_status): $(cat "$claim_out_file") -- workspace content was already returned; resolve the claim manually with 'worktree-claim status --path $focus_path'."
   fi
   rm -f "$claim_out_file"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2.5: make the pane LOCAL again before any resume dispatch. A
+# handed-off pane's foreground is attach-loop -> ssh, so anything typed
+# into it lands in the REMOTE shell (smoke lane w5 proved the "local"
+# resume executing on the worker while the registry recorded resumed).
+# Clearing the pane's endpoint cache is attach-loop's release signal (it
+# exits to the local shell instead of reattaching -- see pane_released in
+# attach-loop.sh); killing the pane's own ssh client wakes it immediately.
+# The endpoint registry/session are untouched: close remains a separate
+# explicit decision.
+# ---------------------------------------------------------------------------
+
+rw_pane_unset "$pane_id" @rw-endpoint
+rw_pane_unset "$pane_id" @rw-worker
+rw_pane_unset "$pane_id" @rw-workspace
+rw_pane_unset "$pane_id" @remote-host
+rw_pane_unset "$pane_id" @workspace-resurrect-skip
+
+localize_pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
+if [ -n "$localize_pane_pid" ]; then
+  # Kill only THIS pane's own ssh client (never a shared ControlMaster or
+  # any other pane's connection): descendants of the pane PID whose
+  # command is ssh.
+  localize_ssh_pids="$(ps axo pid=,ppid=,command= | awk -v root="$localize_pane_pid" '
+    {
+      pid = $1; ppid = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", line)
+      cmd[pid] = line; parent[pid] = ppid
+    }
+    END {
+      for (p in cmd) {
+        q = p
+        while (q && q != root && (q in parent) && parent[q] != q) q = parent[q]
+        if (q == root && p != root && cmd[p] ~ /(^|\/)ssh([[:space:]]|$)/) print p
+      }
+    }')"
+  for localize_sp in $localize_ssh_pids; do
+    kill -TERM "$localize_sp" 2>/dev/null || true
+  done
+fi
+localize_i=0
+while [ "$localize_i" -lt 20 ]; do
+  localize_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
+  case "$localize_cmd" in
+    zsh | bash | sh | fish | -zsh | -bash) break ;;
+  esac
+  localize_i=$((localize_i + 1))
+  sleep 0.5
+done
+if [ "$localize_i" -ge 20 ]; then
+  rw_warn "rw return: pane $pane_id did not come back to a local shell after release; any agent resume below may not reach a local shell."
 fi
 
 # ---------------------------------------------------------------------------

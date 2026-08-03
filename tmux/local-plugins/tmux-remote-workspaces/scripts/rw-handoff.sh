@@ -521,4 +521,14 @@ duration_ms="$(rw_elapsed_ms "$handoff_start_ts")"
 rw_log_event "handoff" "$endpoint_id" "$worker" "$duration_ms" "success" \
   "generation=$sync_generation agent=${agent_provider:-none} agent_outcome=$agent_outcome keep_local=$keep_local"
 
-exec "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id" --fresh
+# The attach loop must own the TARGET pane's tty. When --pane named a pane
+# other than the calling one, exec-ing here would hijack the CALLER's
+# terminal instead (smoke lane w5: pane Y got attached, and closing pane
+# X's endpoint later collaterally killed Y) -- respawn the target pane
+# into the loop in that case.
+if [ "$pane_id" = "${TMUX_PANE:-}" ]; then
+  exec "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id" --fresh
+else
+  tmux respawn-pane -k -t "$pane_id" "$SCRIPT_DIR/attach-loop.sh '$endpoint_id' --fresh" 2>/dev/null ||
+    rw_warn "rw handoff: could not start the attach loop in pane $pane_id -- attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
+fi
