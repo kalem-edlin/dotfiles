@@ -255,7 +255,12 @@ cmd_sync() {
 
   local untracked_list="$work_dir/untracked.list"
   exec_source "git -C $sq_source ls-files --others --exclude-standard -z" >"$untracked_list"
-  exec_source "tar -C $sq_source --null -T - -cf -" <"$untracked_list" >"$snap_dir/untracked.tar" 2>"$work_dir/untracked.log" ||
+  # COPYFILE_DISABLE=1: on macOS, bsdtar otherwise embeds AppleDouble
+  # (._*) companions for files carrying xattrs (com.apple.provenance is
+  # near-universal); a Linux destination's GNU tar materializes those as
+  # literal ._* files, polluting the untracked inventory and failing the
+  # post-apply fingerprint verify. Harmless no-op everywhere else.
+  exec_source "COPYFILE_DISABLE=1 tar -C $sq_source --null -T - -cf -" <"$untracked_list" >"$snap_dir/untracked.tar" 2>"$work_dir/untracked.log" ||
     rw_die "handoff sync: failed to archive untracked files: $(cat "$work_dir/untracked.log")" 1
   local untracked_count
   untracked_count="$(tr -cd '\0' <"$untracked_list" | wc -c | tr -d ' ')"
@@ -264,7 +269,7 @@ cmd_sync() {
   if [ "$check_lfs" = "true" ] && exec_source "git -C $sq_source lfs env" >/dev/null 2>&1; then
     exec_source "git -C $sq_source lfs pull" >"$work_dir/lfs.log" 2>&1 || true
     if exec_source "[ -d $sq_source/.git/lfs/objects ] && [ -n \"\$(find $sq_source/.git/lfs/objects -type f -print -quit 2>/dev/null)\" ]" 2>/dev/null; then
-      if exec_source "tar -C $sq_source/.git/lfs/objects -cf - ." >"$snap_dir/lfs-snapshot.tar" 2>"$work_dir/lfs-tar.log"; then
+      if exec_source "COPYFILE_DISABLE=1 tar -C $sq_source/.git/lfs/objects -cf - ." >"$snap_dir/lfs-snapshot.tar" 2>"$work_dir/lfs-tar.log"; then
         lfs_present="true"
       fi
     fi
@@ -381,7 +386,7 @@ git -C "$__RW_BK_PATH" diff --binary -M --cached >"$__RW_BK_DIR/staged.patch" 2>
 git -C "$__RW_BK_PATH" diff --binary -M >"$__RW_BK_DIR/unstaged.patch" 2>/dev/null || : >"$__RW_BK_DIR/unstaged.patch"
 __rw_bk_list="$(mktemp "${TMPDIR:-/tmp}/rw-bk-list.XXXXXX")"
 git -C "$__RW_BK_PATH" ls-files --others --exclude-standard -z >"$__rw_bk_list" 2>/dev/null || : >"$__rw_bk_list"
-tar -C "$__RW_BK_PATH" --null -T "$__rw_bk_list" -cf "$__RW_BK_DIR/untracked.tar"
+COPYFILE_DISABLE=1 tar -C "$__RW_BK_PATH" --null -T "$__rw_bk_list" -cf "$__RW_BK_DIR/untracked.tar"
 rm -f "$__rw_bk_list"
 printf 'backup-ok\n'
 EOS

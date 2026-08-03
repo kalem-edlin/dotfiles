@@ -44,6 +44,7 @@ workspace_arg="auto"
 pane_id="${TMUX_PANE:-}"
 keep_local="false"
 check_lfs="false"
+force_diverged="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
     --pane) pane_id="${2:?}"; shift 2 ;;
     --keep-local) keep_local="true"; shift ;;
     --check-lfs) check_lfs="true"; shift ;;
+    --force-diverged) force_diverged="true"; shift ;;
     *) rw_die "rw handoff: unknown argument: $1" 64 ;;
   esac
 done
@@ -73,7 +75,18 @@ cwd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null
 # workspace whenever cwd has an origin remote -- pass it along so
 # preflight.sh adds its worker-side git-host authentication check.
 cwd_repo_remote="$(git -C "$cwd" remote get-url origin 2>/dev/null || true)"
-preflight_args=(--worker "$worker" --check-lfs)
+# LFS preflight only when the caller asked for it or the workspace actually
+# tracks LFS content. Auto-detect matters in both directions: a non-LFS
+# handoff must not be blocked by a worker that lacks git-lfs it never
+# needs, and an LFS checkout sent without the check fails later at
+# destination checkout (required smudge filter) instead of failing loud
+# here.
+if [ "$check_lfs" != "true" ] &&
+  [ -n "$(git -C "$cwd" lfs ls-files --name-only 2>/dev/null | head -1)" ]; then
+  check_lfs="true"
+fi
+preflight_args=(--worker "$worker")
+[ "$check_lfs" = "true" ] && preflight_args+=(--check-lfs)
 [ -n "$cwd_repo_remote" ] && preflight_args+=(--repo-remote "$cwd_repo_remote")
 
 preflight_status=0
@@ -278,6 +291,7 @@ if [ "$local_is_git" = "true" ]; then
     --endpoint "$endpoint_id"
     --backup-root "$sync_backup_root" --staging-root "$sync_staging_root")
   [ "$check_lfs" = "true" ] && sync_args+=(--check-lfs)
+  [ "$force_diverged" = "true" ] && sync_args+=(--force-diverged)
 
   sync_err_file="$(mktemp "${TMPDIR:-/tmp}/rw-handoff-sync.XXXXXX")"
   sync_status=0
@@ -290,6 +304,13 @@ if [ "$local_is_git" = "true" ]; then
     # so a failed handoff leaves no registry trace at all, matching "abort
     # leaves local untouched" for the registry layer too.
     [ "$reattach" = "true" ] || rm -f "$(rw_endpoint_file "$endpoint_id")"
+    # Roll back the writer flip made before the transfer: without this the
+    # worktree stays claimed to a worker that has no endpoint, and
+    # verify-writer then blocks the focus machine itself.
+    if [ "$had_claim" = "true" ] && [ -n "$claim_bin" ]; then
+      "$claim_bin" return-writer --path "$local_worktree_root" >/dev/null 2>&1 ||
+        rw_warn "rw handoff: could not roll back the writer claim after the failed transfer -- run 'worktree-claim return-writer --path $local_worktree_root' manually."
+    fi
     rw_log_event "handoff" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" "sync_failed:$sync_status"
     exit 1
   fi

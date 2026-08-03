@@ -22,7 +22,7 @@
 #   5. Release the writer back to the focus host via `worktree-claim
 #      return-writer` (claims are optional; skipped cleanly when absent).
 #
-# Usage: rw-return.sh [--pane <pane-id>] [--keep-remote] [--check-lfs]
+# Usage: rw-return.sh [--pane <pane-id>] [--keep-remote] [--check-lfs] [--force-diverged]
 
 set -uo pipefail
 
@@ -42,12 +42,14 @@ rw_need_jq
 pane_id="${TMUX_PANE:-}"
 keep_remote="false"
 check_lfs="false"
+force_diverged="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --pane) pane_id="${2:?}"; shift 2 ;;
     --keep-remote) keep_remote="true"; shift ;;
     --check-lfs) check_lfs="true"; shift ;;
+    --force-diverged) force_diverged="true"; shift ;;
     *) rw_die "rw return: unknown argument: $1" 64 ;;
   esac
 done
@@ -80,7 +82,16 @@ return_start_ts="$(rw_now_epoch)"
 # along, when it has one, so preflight.sh adds its worker-side git-host
 # authentication check.
 focus_repo_remote="$(git -C "$focus_path" remote get-url origin 2>/dev/null || true)"
-preflight_args=(--worker "$worker" --check-lfs)
+# LFS preflight only when requested or the workspace actually tracks LFS
+# content (same auto-detect rationale as rw-handoff.sh: never block a
+# non-LFS return on missing worker git-lfs, never let an LFS return fail
+# late at checkout instead of loud at preflight).
+if [ "$check_lfs" != "true" ] &&
+  [ -n "$(git -C "$focus_path" lfs ls-files --name-only 2>/dev/null | head -1)" ]; then
+  check_lfs="true"
+fi
+preflight_args=(--worker "$worker")
+[ "$check_lfs" = "true" ] && preflight_args+=(--check-lfs)
 [ -n "$focus_repo_remote" ] && preflight_args+=(--repo-remote "$focus_repo_remote")
 
 preflight_status=0
@@ -152,6 +163,7 @@ if [ "$local_is_git" = "true" ]; then
     --dest-mode ssh --dest-worker "$worker"
     --endpoint "$endpoint_id")
   [ "$check_lfs" = "true" ] && sync_args+=(--check-lfs)
+  [ "$force_diverged" = "true" ] && sync_args+=(--force-diverged)
 
   sync_err_file="$(mktemp "${TMPDIR:-/tmp}/rw-return-sync.XXXXXX")"
   sync_status=0
@@ -270,6 +282,12 @@ fi
 # ---------------------------------------------------------------------------
 
 now="$(rw_now_iso)"
+# Re-read the registry: libexec/sync/handoff just wrote fresh
+# workspace.sync bookkeeping (fingerprint/head_commit/branch/synced_at)
+# onto it. Patching the pre-sync snapshot instead would clobber that with
+# stale data and make the NEXT sync through this endpoint spuriously
+# refuse as diverged (mirrors rw-handoff.sh's explicit re-merge).
+endpoint_json="$(rw_read_endpoint "$endpoint_id" 2>/dev/null || printf '%s' "$endpoint_json")"
 registry_json="$(printf '%s' "$endpoint_json" | jq -c \
   --arg now "$now" \
   --argjson sync_generation "$sync_generation" \

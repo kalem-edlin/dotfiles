@@ -45,12 +45,12 @@ commands:
       entries to the events log like any other operation.
 
   handoff --worker <alias> [--workspace <path>|auto] [--pane <pane-id>]
-          [--keep-local] [--check-lfs]
+          [--keep-local] [--check-lfs] [--force-diverged]
       Transactional handoff of the current pane's workspace (and, if a
       supported AI agent is running there, its conversation) to a durable
       remote endpoint on <alias>.
 
-  return [--pane <pane-id>] [--keep-remote] [--check-lfs]
+  return [--pane <pane-id>] [--keep-remote] [--check-lfs] [--force-diverged]
       Mirror of handoff: bring a remote-backed pane's workspace (and agent,
       if one was handed off) back to the focus machine.
 EOF
