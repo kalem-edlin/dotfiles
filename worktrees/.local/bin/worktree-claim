@@ -189,7 +189,11 @@ checkout_branch_for_claim() {
 cmd_claim() {
   wt_sync_claim_from_marker "$WORKTREE_PATH"
   local session_uuid session_name existing_json existing_state
-  session_uuid="$(wt_require_session_identity)"
+  # wt_die's `exit 12` inside $(...) only kills the subshell; without this
+  # status check the claim proceeds with an empty session_uuid -- and two
+  # identity-less callers then compare equal, silently overwriting each
+  # other's claims without --force-takeover.
+  session_uuid="$(wt_require_session_identity)" || exit $?
   session_name="$(wt_session_name)"
 
   existing_json="$(wt_read_claim_registry "$WORKTREE_PATH")" || existing_json=""
@@ -315,7 +319,9 @@ cmd_release() {
 
   if [ "$opt_force" -ne 1 ]; then
     local session_uuid
-    session_uuid="$(wt_require_session_identity)"
+    # See cmd_claim: without the status check, exit 12 dies only in the
+    # subshell and the release proceeds identity-less.
+    session_uuid="$(wt_require_session_identity)" || exit $?
     local existing_focus existing_session existing_host
     existing_focus="$(jq -r '.focus_machine_id // ""' <<<"$existing_json")"
     existing_session="$(jq -r '.session_uuid // ""' <<<"$existing_json")"
@@ -480,7 +486,9 @@ flip_writer() {
   fi
 
   local session_uuid
-  session_uuid="$(wt_require_session_identity)"
+  # See cmd_claim: without the status check, exit 12 dies only in the
+  # subshell and the writer flip proceeds identity-less.
+  session_uuid="$(wt_require_session_identity)" || exit $?
   local claim_focus claim_session claim_host
   claim_focus="$(jq -r '.focus_machine_id // ""' <<<"$existing_json")"
   claim_session="$(jq -r '.session_uuid // ""' <<<"$existing_json")"
