@@ -340,7 +340,9 @@ rw_create_remote_session() {
     tmux set-option -t '$session_name' prefix2 None &&
     tmux set-option -t '$session_name' mouse off &&
     tmux set-option -t '$session_name' escape-time 10 &&
-    tmux set-option -t '$session_name' status off
+    tmux set-option -t '$session_name' status off &&
+    tmux set-option -t '$session_name' set-titles on &&
+    tmux set-option -t '$session_name' set-titles-string '#{pane_current_path}'
   "
 }
 

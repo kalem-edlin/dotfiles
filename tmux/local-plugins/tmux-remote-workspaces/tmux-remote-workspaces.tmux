@@ -56,16 +56,25 @@ case "$existing_host_text" in
     ;;
 esac
 
-# Same wrap for the directory chip: a focused remote-backed pane shows the
-# basename of its REMOTE workspace (@rw-workspace, pane-scoped cache) instead
-# of the local #{pane_current_path} the pane happened to be launched from.
-# Static workspace root, not the live remote cwd -- tracking the latter would
-# need per-refresh ssh round-trips in the status line.
+# Same wrap for the directory chip: a focused remote-backed pane shows its
+# LIVE remote cwd, local panes keep the existing local format. The live cwd
+# arrives with no ssh round-trips: endpoint sessions are created with
+# set-titles on + set-titles-string '#{pane_current_path}' (see
+# rw_create_remote_session in scripts/common.sh), so the worker-side tmux
+# pushes its pane_current_path through the ssh tty as an OSC 0 title and the
+# local pane's #{pane_title} tracks it. The m:/* guard only trusts a title
+# that looks like an absolute path (programs freely overwrite titles with
+# arbitrary text); anything else falls back to the static workspace root
+# (@rw-workspace, pane-scoped cache).
+# Format nesting note: #{b:...} silently no-ops over a nested #{?...}
+# conditional, so the conditional must be OUTERMOST with a plain
+# #{=/17/…:#{b:var}} in each branch (that nesting is verified working).
 existing_dir_text="$(tmux show-option -gqv @catppuccin_directory_text 2>/dev/null || true)"
+rw_dir_fmt="#{?#{m:/*,#{pane_title}},#{=/17/…:#{b:pane_title}},#{=/17/…:#{b:@rw-workspace}}}"
 case "$existing_dir_text" in
   *'@rw-workspace'*) : ;; # already wrapped -- don't nest again
   *)
-    tmux set-option -gq @catppuccin_directory_text "#{?@rw-workspace,#{=/17/…:#{b:@rw-workspace}},${existing_dir_text}}"
+    tmux set-option -gq @catppuccin_directory_text "#{?@rw-workspace,${rw_dir_fmt},${existing_dir_text}}"
     ;;
 esac
 

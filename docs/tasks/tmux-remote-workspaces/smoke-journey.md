@@ -89,12 +89,68 @@ clipboard paste (this closes the OSC 52 item).
   run-shell path exits 0) — attributed to the hijacked state; watch-item.
 - The prior `returned 1` panes were closed; registry at zero.
 
-## [~] Bucket 1R — Re-run with fixes applied
+## [!] Bucket 1R — Re-run with fixes applied
+### (second run: 4/6 PASS; dir-chip + OSC 52 defects root-caused & fixed; re-run as 1R2)
 
-Verifies: clean first-attach, both powerline enhancements, new split
-rule, close path, proper OSC 52. (The client-guard patch itself gets its
-true regression proof in Bucket 9's worker-reboot drill — this run only
-confirms normal attach behavior.)
+### Bucket 1R findings (2026-08-03, second run)
+
+- PASS: bare remote prompt, `#S` = `rw-d157af95-f25e4d91`, host chip,
+  autosave chip, chip flip-back, split rule both directions, prefix-q
+  close.
+- INFO (not a defect): a "restoring session" message appeared in the
+  remote pane on first ensure. The worker server had exited (previous
+  close emptied it), so this ensure booted it fresh → continuum
+  auto-restore ran. The client-guard patch WORKED (you stayed on your
+  rw-* session; pre-patch you'd have been yanked onto a restored one).
+  Side effect: the restore resurrected the previously-closed endpoint
+  session `rw-d157af95-29f40b78` from the worker's last save file as a
+  zombie (no laptop endpoint). Killed manually; a worker-side save
+  cycle drops closed endpoints from the save file within ~5m, so this
+  only bites when the server dies inside that window. Watch-item, not
+  chased further.
+- FAIL → FIXED: dir chip stuck on `admin` after `cd ~/Developer` in the
+  remote pane. `@rw-workspace` is a static ensure-time value. Fix:
+  endpoint sessions now set `set-titles on` +
+  `set-titles-string '#{pane_current_path}'` (common.sh), so the worker
+  tmux pushes its live cwd through the ssh tty as an OSC 0 title; the
+  outer dir chip now prefers `#{b:pane_title}` when the title is an
+  absolute path, falling back to the workspace root
+  (tmux-remote-workspaces.tmux).
+- FAIL → FIXED: remote-originated OSC 52 never reached the laptop
+  clipboard. Root cause found in tmux.conf itself: the
+  `,*:Ms=\E]52;c;%p2%s\a` terminal-override is a %p2-only capability
+  string that FAILS tiparm expansion ("could not expand Ms" in
+  `tmux -vvv`) — tmux consumed every OSC 52 into a buffer (the test
+  payload was found still sitting in mini's tmux buffer) and silently
+  emitted nothing, on BOTH hops. The override also clobbered the
+  working terminfo Ms of xterm/ghostty clients. Fix: override deleted;
+  `set -s terminal-features[8] '*:clipboard'` installs tmux's canonical
+  Ms for every client TERM including the `screen-256color` that
+  attach-loop pins (attach-loop.sh:309). Verified end-to-end against
+  throwaway tmux servers with captured client ttys.
+
+## [~] Bucket 1R2 — Final re-verify (dir chip live cwd + OSC 52)
+
+Only the two fixed areas plus one attach sanity pass. IMPORTANT
+pre-step: your current Ghostty tmux client still carries the broken Ms
+from before the fix (tmux builds a client's capability table once, at
+attach). Detach and reattach once first: `prefix d`, then `tmux attach`
+(or close and reopen the Ghostty tab).
+
+1. Reattach your outer tmux client (above). Then fresh pane, `cd ~`,
+   `rw ensure --worker mini`. Worker servers were left stopped, so
+   expect one "restoring session" flash (benign, see 1R findings) and a
+   bare remote prompt.
+2. Dir chip live cwd: with the remote pane focused the dir chip starts
+   at `admin`; `cd ~/Developer` in the remote pane → chip flips to
+   `Developer` within a couple of seconds. `cd /tmp` → `tmp`. Focus a
+   local pane → local cwd again.
+3. OSC 52 remote-originated: in the remote pane,
+   `printf '\033]52;c;%s\a' "$(printf 'rw-osc52-remote-test' | base64)"`
+   then Cmd-V locally. Pass = pastes `rw-osc52-remote-test`. This is
+   the same path a remote program's copy key (e.g. claude code's
+   copy-last-message) uses, so it stands in for those too.
+4. `prefix q` the remote pane: clean close, `rw status` zero rows.
 
 1. Fresh pane, `cd ~`, `rw ensure --worker mini`. Expect: pane becomes a
    bare remote prompt with NO inner powerline; typing
@@ -287,7 +343,8 @@ Report each drill separately before starting the next.
 |--------|--------|-------|
 | 0 | PASS | doctor all clean, zero endpoints, zero orphans |
 | 1 | FAIL→FIXED | restore hijack (53af514 guard); split rule + chips reworked; re-run as 1R |
-| 1R | — | |
+| 1R | 4/6→FIXED | split rule, close, host/autosave chips PASS; dir chip made live-cwd (set-titles→pane_title); OSC 52 root cause = broken Ms override in tmux.conf, replaced with terminal-features clipboard; re-run as 1R2 |
+| 1R2 | — | |
 | 2 | — | |
 | 3 | — | |
 | 4 | — | |
