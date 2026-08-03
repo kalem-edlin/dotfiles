@@ -1,0 +1,69 @@
+diff --git a/scripts/restore.sh b/scripts/restore.sh
+index 1a5e3f9..9583e6c 100755
+--- a/scripts/restore.sh
++++ b/scripts/restore.sh
+@@ -20,6 +20,22 @@ RESTORING_FROM_SCRATCH="false"
+ 
+ RESTORE_PANE_CONTENTS="false"
+ 
++# dotfiles patch (tmux-resurrect-rw-client-guard): a client attached to a
++# tmux-remote-workspaces endpoint session (rw-*) was put there by `rw
++# ensure`/attach-loop -- that attachment IS the client's purpose. A restore
++# triggered around worker tmux-server start (continuum auto-restore) must
++# never switch such a client away from its endpoint session. Sessions,
++# windows, and panes are still restored (they are created detached); only
++# switch-client becomes a no-op for an rw-* client.
++rw_client_guard_switch_client() {
++	local current_session
++	current_session="$(tmux display-message -p '#{client_session}' 2>/dev/null)"
++	case "$current_session" in
++		rw-*) return 0 ;;
++	esac
++	tmux switch-client "$@"
++}
++
+ is_line_type() {
+ 	local line_type="$1"
+ 	local line="$2"
+@@ -209,8 +225,8 @@ restore_state() {
+ 	local state="$1"
+ 	echo "$state" |
+ 	while IFS=$d read line_type client_session client_last_session; do
+-		tmux switch-client -t "$client_last_session"
+-		tmux switch-client -t "$client_session"
++		rw_client_guard_switch_client -t "$client_last_session"
++		rw_client_guard_switch_client -t "$client_session"
+ 	done
+ }
+ 
+@@ -229,10 +245,10 @@ restore_active_and_alternate_windows_for_grouped_sessions() {
+ 		alternate_window_index="$(remove_first_char "$alternate_window_index")"
+ 		active_window_index="$(remove_first_char "$active_window_index")"
+ 		if [ -n "$alternate_window_index" ]; then
+-			tmux switch-client -t "${grouped_session}:${alternate_window_index}"
++			rw_client_guard_switch_client -t "${grouped_session}:${alternate_window_index}"
+ 		fi
+ 		if [ -n "$active_window_index" ]; then
+-			tmux switch-client -t "${grouped_session}:${active_window_index}"
++			rw_client_guard_switch_client -t "${grouped_session}:${active_window_index}"
+ 		fi
+ 	done
+ }
+@@ -318,7 +334,7 @@ restore_all_pane_processes() {
+ restore_active_pane_for_each_window() {
+ 	awk 'BEGIN { FS="\t"; OFS="\t" } /^pane/ && $9 == 1 { print $2, $3, $6; }' $(last_resurrect_file) |
+ 		while IFS=$d read session_name window_number active_pane; do
+-			tmux switch-client -t "${session_name}:${window_number}"
++			rw_client_guard_switch_client -t "${session_name}:${window_number}"
+ 			tmux select-pane -t "$active_pane"
+ 		done
+ }
+@@ -343,7 +359,7 @@ restore_active_and_alternate_windows() {
+ 	awk 'BEGIN { FS="\t"; OFS="\t" } /^window/ && $6 ~ /[*-]/ { print $2, $5, $3; }' $(last_resurrect_file) |
+ 		sort -u |
+ 		while IFS=$d read session_name active_window window_number; do
+-			tmux switch-client -t "${session_name}:${window_number}"
++			rw_client_guard_switch_client -t "${session_name}:${window_number}"
+ 		done
+ }
+ 

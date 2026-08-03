@@ -566,6 +566,21 @@ else
   c_fail "tmux:resurrect-save-validity-patch" "$RESURRECT_SAVE missing the save-validity gate patch (resurrect_file_looks_sane marker not found)" "$SETUP_REMEDIATION"
 fi
 
+# restore.sh ends a restore by switch-client-ing to whatever the save said
+# was active. On a worker the first rw attach after reboot is what starts
+# the tmux server (triggering continuum auto-restore), so an unguarded
+# restore steals that client off its rw-* endpoint session (observed live
+# on mini 2026-08-03; see
+# setup/patches/tmux-resurrect-rw-client-guard.patch). install_tmux_plugins
+# always applies this patch; required check, not version- or
+# profile-gated, since the steal needs only continuum-restore=on.
+RESURRECT_RESTORE="$TMUX_CFG_DIR/plugins/tmux-resurrect/scripts/restore.sh"
+if [ -f "$RESURRECT_RESTORE" ] && grep -q "rw_client_guard_switch_client" "$RESURRECT_RESTORE" 2>/dev/null; then
+  c_pass "tmux:resurrect-rw-client-guard-patch" "$RESURRECT_RESTORE has the rw client-guard patch applied"
+else
+  c_fail "tmux:resurrect-rw-client-guard-patch" "$RESURRECT_RESTORE missing the rw client-guard patch (rw_client_guard_switch_client marker not found)" "$SETUP_REMEDIATION"
+fi
+
 # glob_has <pattern> -> 0 if at least one file matches
 glob_has() {
   for f in $1; do

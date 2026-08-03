@@ -150,6 +150,25 @@ TMUX_RESURRECT_VALIDITY_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-save-v
 # save.sh). Same idempotency rationale as TMUX_RESURRECT_PATCH_MARKER above.
 TMUX_RESURRECT_VALIDITY_PATCH_MARKER="resurrect_file_looks_sane"
 
+# Third local patch against the same pin, independent of the two save.sh
+# patches above (it touches scripts/restore.sh only, so apply order against
+# them does not matter). restore.sh's restore_state()/active-window helpers
+# end a restore with `tmux switch-client` to whatever the save file said was
+# active. On a worker, the first `rw ensure`/attach-loop attach after a
+# reboot is what STARTS the tmux server, which triggers continuum
+# auto-restore -- and that switch-client yanked the freshly attached client
+# off its rw-* endpoint session onto a restored session (observed live on
+# mini 2026-08-03: client stolen from rw-d157af95-29f40b78 onto a stale
+# `smoke-headless`). The patch adds rw_client_guard_switch_client(): every
+# restore switch-client becomes a no-op when the current client sits on an
+# rw-* session; restores themselves still happen (sessions are created
+# detached). Laptop behavior is unchanged -- a laptop client is never
+# attached to an rw-* session (those names exist only on worker servers).
+TMUX_RESURRECT_RW_GUARD_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-rw-client-guard.patch"
+# String unique to the applied patch (the guard function it adds to
+# restore.sh). Same idempotency rationale as TMUX_RESURRECT_PATCH_MARKER.
+TMUX_RESURRECT_RW_GUARD_PATCH_MARKER="rw_client_guard_switch_client"
+
 activate_fnm() {
   if [ -d /opt/homebrew/bin ]; then
     case ":$PATH:" in
@@ -418,6 +437,34 @@ install_tmux_plugins() {
       return 1
     fi
     echo "  -> tmux-resurrect save-validity gate patch applied"
+  fi
+
+  # Apply the rw client-guard patch (restore.sh only; order-independent of
+  # the two save.sh patches). A worker without it can steal the very client
+  # whose attach started the server (continuum auto-restore switch-client),
+  # leaving an rw endpoint pane showing the wrong session — FATAL on genuine
+  # apply failure, same doctrine as the other two.
+  resurrect_restore="$resurrect_dir/scripts/restore.sh"
+  if grep -q "$TMUX_RESURRECT_RW_GUARD_PATCH_MARKER" "$resurrect_restore" 2>/dev/null; then
+    echo "  -> tmux-resurrect rw client-guard patch already applied"
+  else
+    if [ ! -f "$TMUX_RESURRECT_RW_GUARD_PATCH" ]; then
+      echo "ERROR: tmux-resurrect rw client-guard patch not found: $TMUX_RESURRECT_RW_GUARD_PATCH" >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply --check "$TMUX_RESURRECT_RW_GUARD_PATCH") 2>/dev/null; then
+      echo "ERROR: tmux-resurrect rw client-guard patch does not apply cleanly against pin $TMUX_RESURRECT_PIN (checked out at $resurrect_dir). A worker without this guard can switch an rw endpoint client off its session during auto-restore — refusing to continue." >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply "$TMUX_RESURRECT_RW_GUARD_PATCH"); then
+      echo "ERROR: tmux-resurrect rw client-guard patch check passed but apply failed." >&2
+      return 1
+    fi
+    if ! grep -q "$TMUX_RESURRECT_RW_GUARD_PATCH_MARKER" "$resurrect_restore" 2>/dev/null; then
+      echo "ERROR: tmux-resurrect rw client-guard patch applied but marker '$TMUX_RESURRECT_RW_GUARD_PATCH_MARKER' not found in $resurrect_restore afterwards." >&2
+      return 1
+    fi
+    echo "  -> tmux-resurrect rw client-guard patch applied"
   fi
 
   echo "  -> installing tmux plugins via TPM"
