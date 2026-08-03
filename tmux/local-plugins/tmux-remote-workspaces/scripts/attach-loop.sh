@@ -247,7 +247,13 @@ while true; do
   start_ts="$(rw_now_epoch)"
   echo "rw: attaching to $worker ($session_name), attempt $attempt..."
 
-  "$(rw_ssh_bin)" -t \
+  # TERM=screen-256color: the only ssh call here that allocates a PTY, so the
+  # only one that forwards TERM. The focus terminal may be one the worker's
+  # terminfo has never heard of (ghostty's xterm-ghostty broke agents-roll:
+  # every attach died with "missing or unsuitable terminal" and backed off
+  # forever). screen-256color is universally present and fine for an outer
+  # client whose only job is displaying the remote tmux.
+  TERM=screen-256color "$(rw_ssh_bin)" -t \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
     "$worker" "tmux attach-session -t '=${session_name}'"
   exit_code=$?
