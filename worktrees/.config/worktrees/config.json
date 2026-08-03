@@ -15,6 +15,7 @@
       "block_size": 100,
       "default_branch": "main",
       "default_tier": "warm",
+      "ports_file": ".env.ports",
       "services": {
         "NEXT": 3000,
         "DASHBOARD": 3010,

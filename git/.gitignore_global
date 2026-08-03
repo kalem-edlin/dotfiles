@@ -7,6 +7,11 @@
 # repository to add its own .gitignore entry.
 .worktree-claim
 .worktree-slot.json
-.worktree-slot.env
+
+# NOT listed here: the per-repo development ports file (`ports_file` in
+# worktrees/config.json, e.g. content-engine's `.env.ports`). That filename is
+# declared and owned by the repository, so the repository ignores it in its own
+# .gitignore -- a developer reading that repo should be able to see the file is
+# expected and generated without knowing these dotfiles exist.
 
 **/.claude/settings.local.json

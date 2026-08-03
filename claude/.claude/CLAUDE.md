@@ -31,8 +31,17 @@ there.
 - Run slot validation/port rendering (`worktree-slot ensure`) before
   dependency preparation or server startup.
 - Never copy another slot's port file, infer ports from its current
-  listeners, or hand-edit assigned port variables (`.worktree-slot.json`,
-  `.worktree-slot.env`).
+  listeners, or hand-edit assigned port variables (`.worktree-slot.json`, or
+  the repo's declared ports file).
+- Ports reach a repository through a file the *repository* declares and
+  `worktree-slot` fills: the `ports_file` in the repo's `config.json` entry
+  (content-engine: `.env.ports`, plain dotenv, gitignored by that repo). The
+  repo must fall back to its own defaults when the file is absent, so the same
+  checkout works on CI, on a worker, and for anyone not running these dotfiles.
+- Never add code to a repository that derives ports from its own path, slot
+  number, or a block-size formula. That is a second allocator -- blind to what
+  is actually bound on the machine, to reserved ranges, and to every other repo
+  sharing the pool -- and the two will drift.
 - A branch/task swap keeps the slot's ports and preparation tier -- do not
   reset or reassign them.
 - Promote a preparation tier only when explicitly requested or required by
