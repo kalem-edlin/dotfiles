@@ -560,19 +560,18 @@ bases are hand-assigned lines in `config.json`; automatic pool arbitration is
 only built when a second repository actually opts in and a real conflict
 needs resolving.
 
-The allocator renders ignored private runtime files such as:
+The allocator renders `.worktree-slot.json` -- an ignored private manifest
+recording repository identity, slot, tier, host, allocation generation, and
+named ports -- plus, when the repository declares one, a ports file at the
+filename the repository chose.
 
-```text
-.worktree-slot.json
-.worktree-slot.env
-```
-
-The JSON manifest records repository identity, slot, tier, host, allocation
-generation, and named ports. The env file exports the repository's configured
-variable names. An opted-in repository provides a small environment-loading
-seam so its ordinary development commands automatically load the generated
-file after their normal local environment. Agents never hand-edit assigned
-ports.
+That filename is the repository's, not ours: it names a `ports_file` in its
+`config.json` entry (content-engine: `.env.ports`), ignores that name in its
+own `.gitignore`, and falls back to its own defaults when the file is absent,
+so the same checkout works on CI, on a worker, and for anyone not running
+these dotfiles. We write plain dotenv into it and nothing else. A repository
+that declares no `ports_file` gets no ports file. Agents never hand-edit
+assigned ports.
 
 Port generation is idempotent. Re-running it for the same
 repository/slot/host generation produces the same result.

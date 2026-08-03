@@ -65,8 +65,19 @@ predictable ports are part of the slot identity.
 
 Per-service bases and the shared `block_size` are declared centrally in
 dotfiles so different slot-enabled repositories cannot overlap. Generated
-manifests and environment files are ignored runtime state, not committed
-repository policy.
+manifests and ports files are ignored runtime state, not committed repository
+policy.
+
+Ports reach a repository through a file that repository declares — the
+`ports_file` in its `config.json` entry, e.g. content-engine's `.env.ports` —
+which we write as plain dotenv and it reads as data. The repository owns the
+filename, ignores it in its own `.gitignore`, and falls back to its own
+defaults when the file is absent, so the same checkout still works on CI, on a
+worker, and for anyone not running these dotfiles. A repository that declares
+no `ports_file` gets none. A repository must never derive ports from its own
+directory name or an index: that is a second allocator, blind to what is
+actually bound on the machine and to every other repository sharing the pool,
+and the two will drift.
 
 Repository-wide singleton services — for example a local Supabase stack — are
 outside slot scaling; only one slot runs them at a time. Parallel migration
