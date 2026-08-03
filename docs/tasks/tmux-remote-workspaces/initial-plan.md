@@ -2730,14 +2730,41 @@ self-tombstoned as remote-intentional-close (session-absent now compares
 the server's start_time to the last successful attach; rebuilt server ->
 recreate, same server -> intentional close).
 
-**VERIFICATION PENDING — the final verification lane (W5F) was stopped by
-the operator mid-run.** The `601fe37` fix set is therefore shipped but NOT
-yet verified live. Outstanding proofs (V1-V6): pi cross-host sentinel
-continuity both directions; claude continuity with a dotted workspace
-path; cross-pane return leaves pane X alive as a local shell; two
-endpoints both survive a worker-server loss (no false tombstone);
-reconcile closes 4 orphans in one invocation; restored sessions re-resolve
-their original @session-uuid.
+**VERIFICATION COMPLETE (lanes W5F/W5F2/V6R, 2026-08-03): all six
+`601fe37` proofs VERIFIED-FIXED.** The first W5F run was stopped by the
+operator during teardown — its assertions later proved all six checks had
+already passed, but only V5's artifacts (dry-run predicted 4 orphan ids;
+one real reconcile closed all 4; both decoys survived) were decisive on
+their own. Re-run lane W5F2 independently re-proved V1 (pi sentinel
+continuity both directions incl. slug-dir fallback on return), V2 (claude
+continuity on a dotted workspace path, expected slug independently
+computed and matched), V3 (pane X survived cross-pane return as a plain
+login shell), V4 (both sibling endpoints rebuilt after worker-server
+kill, zero remote-intentional-close tombstones); it halted before V5/V6
+on the resurrect-dir tripwire — a false alarm (the new file was the live
+server's own continuum autosave, verified by content), which is the
+tripwire working as designed. Laptop-only lane V6R closed V6 decisively:
+recreated sessions got fresh-minted UUIDs, then rw-post-restore re-stamped
+both back to their original @session-uuid values, pane re-establishment
+included.
+
+Fallout fixed along the way (`7782d51`): the `HEAD\nHEAD` handoff-capture
+bug both W5F lanes tripped on — `git rev-parse` echoes an unresolvable
+ref name to stdout while exiting nonzero, so an unborn-branch (no-commit)
+source repo fabricated branch `HEAD\nHEAD` and dodged the empty-repo
+guard; an unborn dest likewise produced dest_head="HEAD" and an
+empty-range bundle. Now `symbolic-ref -q` + `rev-parse --verify --quiet`
+(print nothing on failure), repro-tested on unborn/normal/detached repos.
+
+Incidental real-world datum: worker `mini` was unplugged and force-reset
+mid-day. At reset time zero endpoints were registered against it, so
+nothing needed reconciliation; post-boot it came back clean (ssh fine, no
+tmux server, rw state dir intact, no stale lane dirs). The stopped-W5F
+leftovers the re-run lane flagged were all cleaned and re-verified: two
+lane trust entries in the laptop `~/.claude.json` (24->22 projects, zero
+rw-smoke entries remain), seven dead lane socket files, and a stray
+wave-era tmux process on agents-roll. Both workers fast-forwarded to
+`7782d51`.
 
 **Design/robustness backlog (recorded, deliberately not hot-fixed):**
 retained endpoint after return is reusable/closeable only manually (fresh
@@ -2776,14 +2803,12 @@ PROVEN (see "Campaign record (2026-08-03)" above for full detail):
   duplicate-writer guard is registry-scoped (immune to process-scan
   misfires);
 - Wave 6 agent-safe drills: ambiguity safety, the 5-point reconciliation
-  contract, namespace-scoped cleanup, worker-loss rebuild.
-
-PENDING VERIFICATION (fix set `601fe37` shipped, final lane W5F stopped by
-the operator before completing): V1 pi continuity both directions; V2
-claude continuity on a dotted workspace path; V3 cross-pane return leaves
-the target pane alive; V4 both endpoints survive worker-server loss; V5
-reconcile closes all orphans in one pass; V6 restored sessions re-resolve
-their original @session-uuid. Re-run lane W5F to close these.
+  contract, namespace-scoped cleanup, worker-loss rebuild;
+- Fix set `601fe37`, all six proofs (lanes W5F/W5F2/V6R): pi continuity
+  both directions; claude continuity on a dotted workspace path;
+  cross-pane return leaves the target pane alive; both endpoints survive
+  worker-server loss; reconcile closes all orphans in one pass; restored
+  sessions re-resolve their original @session-uuid.
 
 BLOCKED on a brief human check, unrelated to worker auth:
 
