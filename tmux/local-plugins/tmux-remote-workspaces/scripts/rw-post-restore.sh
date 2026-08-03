@@ -144,7 +144,11 @@ for f in "$endpoints_dir"/*.json; do
   session_id=""
   while IFS= read -r cand_session_id; do
     [ -n "$cand_session_id" ] || continue
-    cand_session_name="$(tmux display-message -t "$cand_session_id" -F '#{session_name}' 2>/dev/null || true)"
+    # -p is load-bearing: without it display-message routes to the client
+    # status line, the substitution is always empty, and the session-UUID
+    # re-stamp below never fires (smoke lane w6: restored sessions kept
+    # fresh UUIDs instead of re-resolving to their saved ones).
+    cand_session_name="$(tmux display-message -pt "$cand_session_id" -F '#{session_name}' 2>/dev/null || true)"
     if [ "$cand_session_name" = "$session_name" ]; then
       session_id="$cand_session_id"
       break

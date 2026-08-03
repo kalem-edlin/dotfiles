@@ -40,7 +40,13 @@ shift
 # absolute path becomes "-". Verified against a live ~/.claude/projects/
 # entry, e.g. "/Users/k/Developer/dotfiles" -> "-Users-k-Developer-dotfiles".
 claude_slug() {
-  printf '%s' "$1" | tr '/' '-'
+  # Claude's project-dir slug replaces EVERY non-alphanumeric character
+  # with '-', not just '/'. The old tr-only version kept dots (e.g. a
+  # mktemp dir /tmp/rw-x.AbC123) so the installed transcript sat in a dir
+  # claude's resume scan never looks at -- "No conversation found" with a
+  # perfectly valid transcript (smoke lane w5r; discovery is a pure
+  # filename scan of ~/.claude/projects/<slug-of-cwd>/).
+  printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'
 }
 
 claude_projects_root_local() { printf '%s/.claude/projects\n' "$HOME"; }

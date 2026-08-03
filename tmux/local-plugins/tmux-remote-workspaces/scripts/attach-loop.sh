@@ -64,6 +64,10 @@ fi
 pane_id="${TMUX_PANE:-}"
 
 backoff_seconds=1
+# Epoch of the last attach that meaningfully held (see the session-absent
+# branch: a worker server whose start_time is newer than this was rebuilt
+# out from under us, not intentionally cleared).
+last_attached_epoch=0
 backoff_cap=30
 attempt=0
 
@@ -106,7 +110,15 @@ pane_released() {
 
 exit_pane_released() {
   echo "rw: endpoint $endpoint_id was returned; this pane is local again."
-  exit 0
+  # This loop is normally the pane's ROOT process (rw-handoff/rw-ensure
+  # exec it, or respawn-pane runs it directly), so a plain exit would KILL
+  # the pane -- smoke lane w5r destroyed the target pane in 4/4 cross-pane
+  # returns before this. Become the local shell instead, in the endpoint's
+  # focus path when it is still known.
+  local released_dir=""
+  released_dir="$(rw_read_endpoint "$endpoint_id" 2>/dev/null | jq -r '.workspace.focus_path // empty' 2>/dev/null)"
+  [ -n "$released_dir" ] && [ -d "$released_dir" ] && cd "$released_dir" 2>/dev/null
+  exec "${SHELL:-bash}" -l
 }
 
 # remote_state <worker> <session_name>
@@ -251,13 +263,36 @@ while true; do
         continue
       fi
       # The worker's tmux server is up but our specific endpoint session is
-      # gone. Nothing else can do that except a deliberate `tmux
-      # kill-session` run directly on the worker -- reconcile it as an
-      # intentional close instead of recreating it.
-      rw_close_endpoint_core "$endpoint_id" "remote-intentional-close"
-      echo "rw: endpoint $endpoint_id was closed directly on $worker; exiting."
-      [ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null
-      exit 0
+      # gone. Two very different causes look identical here:
+      #   1. a deliberate `tmux kill-session` on the worker -- reconcile as
+      #      an intentional close; or
+      #   2. the shared server was LOST and a sibling endpoint's loop won
+      #      the race to rebuild it -- our session vanished with the old
+      #      server, and self-closing would punish infrastructure loss
+      #      (smoke lane w6: the losing endpoint tombstoned itself and
+      #      killed its own pane).
+      # Distinguish them by the server's start_time: newer than our last
+      # successful attach means a REBUILT server -> recreate our session.
+      server_start="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+        "tmux display-message -p '#{start_time}'" 2>/dev/null | tr -cd '0-9')"
+      if [ -n "$server_start" ] && [ "${last_attached_epoch:-0}" -gt 0 ] &&
+        [ "$server_start" -gt "$last_attached_epoch" ]; then
+        duration_ms="$(rw_elapsed_ms "$probe_start_ts")"
+        rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "drop" "server_rebuilt:recreating-session"
+        status "worker tmux server was rebuilt; recreating $session_name..."
+        if ! rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)"; then
+          sleep "$backoff_seconds"
+          backoff_seconds=$((backoff_seconds * 2))
+          [ "$backoff_seconds" -gt "$backoff_cap" ] && backoff_seconds="$backoff_cap"
+          continue
+        fi
+        # Session recreated -- fall through to the plain attach below.
+      else
+        rw_close_endpoint_core "$endpoint_id" "remote-intentional-close"
+        echo "rw: endpoint $endpoint_id was closed directly on $worker; exiting."
+        [ -n "$pane_id" ] && tmux kill-pane -t "$pane_id" 2>/dev/null
+        exit 0
+      fi
       ;;
     session-present) : ;; # fall through to the plain attach below
   esac
@@ -293,6 +328,7 @@ while true; do
     # a successful attach; reset backoff so the next drop retries fast.
     rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "success" ""
     backoff_seconds=1
+    last_attached_epoch="$(date +%s)"
   else
     rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "drop" "exit=$exit_code"
   fi

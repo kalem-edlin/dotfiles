@@ -206,7 +206,11 @@ while [ "$i" -lt "$worker_count" ]; do
       # registry entry to read the worker alias back from (that absence is
       # exactly what makes it orphaned) -- we already know it from the ssh
       # listing loop above, so pass it through explicitly.
-      rw_close_endpoint_core "$id" "reconcile:orphan" "$worker_alias"
+      # </dev/null: the close shells out to ssh, which otherwise inherits
+      # and DRAINS this loop's here-string stdin -- reconcile then closed
+      # exactly one orphan per invocation, leaking the rest (smoke lane
+      # w6; same bug class as rw-close-window.sh's fix).
+      rw_close_endpoint_core "$id" "reconcile:orphan" "$worker_alias" </dev/null
     fi
     closed=$((closed + 1))
   done <<<"$remote_sessions"

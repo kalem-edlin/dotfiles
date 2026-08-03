@@ -529,6 +529,19 @@ rw_log_event "handoff" "$endpoint_id" "$worker" "$duration_ms" "success" \
 if [ "$pane_id" = "${TMUX_PANE:-}" ]; then
   exec "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id" --fresh
 else
-  tmux respawn-pane -k -t "$pane_id" "$SCRIPT_DIR/attach-loop.sh '$endpoint_id' --fresh" 2>/dev/null ||
-    rw_warn "rw handoff: could not start the attach loop in pane $pane_id -- attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
+  # respawn-pane -k kills whatever the target pane is running. Only safe
+  # when that is a plain shell: with --keep-local, or when the source stop
+  # could not be verified, the pane may still hold the RUNNING source
+  # agent, and respawning would destroy the only live copy (smoke lane
+  # w5r: "source untouched" message was false for exactly this reason).
+  target_pane_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
+  case "$target_pane_cmd" in
+    zsh | bash | sh | fish | -zsh | -bash)
+      tmux respawn-pane -k -t "$pane_id" "$SCRIPT_DIR/attach-loop.sh '$endpoint_id' --fresh" 2>/dev/null ||
+        rw_warn "rw handoff: could not start the attach loop in pane $pane_id -- attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
+      ;;
+    *)
+      rw_warn "rw handoff: pane $pane_id still runs '$target_pane_cmd' (possibly the source agent) -- NOT respawning it into the attach loop. Attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
+      ;;
+  esac
 fi

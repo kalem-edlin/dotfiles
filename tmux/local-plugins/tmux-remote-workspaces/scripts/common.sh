@@ -472,15 +472,24 @@ rw_ps_tree_matches() {
 # pane_current_command and loses its distinguishing name). Returns 1 if the
 # provider never shows up within the polling budget.
 rw_wait_remote_provider_started() {
-  local worker="$1" session_name="$2" provider="$3" tries="${4:-5}"
-  local pattern i pane_cmd remote_pane_pids
+  local worker="$1" session_name="$2" provider="$3" tries="${4:-7}"
+  local pattern i pane_cmd remote_pane_pids stable=0
   pattern="$(rw_provider_pattern "$provider")"
   i=0
   while [ "$i" -lt "$tries" ]; do
     pane_cmd="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
       "tmux list-panes -t '$session_name' -F '#{pane_current_command}' 2>/dev/null" 2>/dev/null || true)"
     if printf '%s\n' "$pane_cmd" | grep -Eiq "$pattern"; then
-      return 0
+      # Require the match to HOLD on a second probe: a provider that
+      # starts and immediately crashes (bad resume args, missing
+      # transcript) matched once and was recorded as resumed -- letting
+      # the other side's only live agent be stopped (smoke lane w5r).
+      stable=$((stable + 1))
+      if [ "$stable" -ge 2 ]; then
+        return 0
+      fi
+      sleep 1
+      continue
     fi
     # Scoped fallback: only processes under the endpoint session's own
     # pane PIDs count (see rw_ps_tree_matches for why host-global pgrep
@@ -490,8 +499,14 @@ rw_wait_remote_provider_started() {
     if [ -n "${remote_pane_pids// /}" ] &&
       rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "ps axo pid=,ppid=,command=" 2>/dev/null |
       rw_ps_tree_matches "$pattern" $remote_pane_pids; then
-      return 0
+      stable=$((stable + 1))
+      if [ "$stable" -ge 2 ]; then
+        return 0
+      fi
+      sleep 1
+      continue
     fi
+    stable=0
     i=$((i + 1))
     [ "$i" -lt "$tries" ] && sleep 0.5
   done
@@ -502,22 +517,35 @@ rw_wait_remote_provider_started() {
 # Local mirror of the above, used by rw-return.sh to verify a local resume
 # actually started before stopping the remote agent.
 rw_wait_local_provider_started() {
-  local pane_id="$1" provider="$2" tries="${3:-5}"
-  local pattern i pane_cmd pane_pid
+  local pane_id="$1" provider="$2" tries="${3:-7}"
+  local pattern i pane_cmd pane_pid stable=0
   pattern="$(rw_provider_pattern "$provider")"
   i=0
   while [ "$i" -lt "$tries" ]; do
     pane_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
     if printf '%s\n' "$pane_cmd" | grep -Eiq "$pattern"; then
-      return 0
+      # Same stability requirement as the remote variant: one transient
+      # match (start-then-crash) must not verify a resume.
+      stable=$((stable + 1))
+      if [ "$stable" -ge 2 ]; then
+        return 0
+      fi
+      sleep 1
+      continue
     fi
     # Scoped fallback: only processes under this pane's own PID count (see
     # rw_ps_tree_matches for why host-global pgrep was a correctness bug).
     pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
     if [ -n "$pane_pid" ] &&
       ps axo pid=,ppid=,command= | rw_ps_tree_matches "$pattern" "$pane_pid"; then
-      return 0
+      stable=$((stable + 1))
+      if [ "$stable" -ge 2 ]; then
+        return 0
+      fi
+      sleep 1
+      continue
     fi
+    stable=0
     i=$((i + 1))
     [ "$i" -lt "$tries" ] && sleep 0.5
   done

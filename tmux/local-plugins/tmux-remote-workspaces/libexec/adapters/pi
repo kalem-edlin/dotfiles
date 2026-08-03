@@ -198,7 +198,15 @@ cmd_export() {
     # (partial) id, mirroring pi's own lookup.
     local remote_find
     if [[ "$session_id" == /* ]]; then
-      remote_find="$session_id"
+      # A path-shaped id may be the OTHER host's transcript path (a return
+      # after handoff): install() relocated the transcript to THIS host's
+      # slug dir for the project, so fall back there when the literal path
+      # does not exist (smoke lane w5r, symmetric to the resume-cmd fix).
+      if ca_ssh_run "$worker" "[ -f '$session_id' ]" 2>/dev/null; then
+        remote_find="$session_id"
+      else
+        remote_find="$(ca_ssh_run "$worker" "command ls -t \"\$HOME/.pi/agent/sessions/$(pi_slug "$project_path")\"/*.jsonl 2>/dev/null | head -n1")"
+      fi
     else
       remote_find="$(ca_ssh_run "$worker" "find \"\$HOME/.pi/agent/sessions\" -type f -iname '*${session_id}*.jsonl' 2>/dev/null | head -n1")"
     fi
@@ -331,7 +339,11 @@ cmd_resume_cmd() {
     */*)
       local slug
       slug="$(pi_slug "$dest_path")"
-      session_ref="\"\$(ls -t \"\$HOME/.pi/agent/sessions/${slug}\"/*.jsonl 2>/dev/null | head -n1)\""
+      # `command ls`: the destination shell is interactive (the command is
+      # typed into a pane), where ls is commonly aliased to eza -- whose -t
+      # takes a FIELD argument and would swallow the glob (live failure in
+      # smoke lane w5r).
+      session_ref="\"\$(command ls -t \"\$HOME/.pi/agent/sessions/${slug}\"/*.jsonl 2>/dev/null | head -n1)\""
       ;;
     *)
       session_ref="$(printf '%q' "$session_id")"
