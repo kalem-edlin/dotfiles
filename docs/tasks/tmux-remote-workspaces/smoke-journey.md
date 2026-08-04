@@ -187,7 +187,7 @@ attach). Detach and reattach once first: `prefix d`, then `tmux attach`
   the laptop clipboard is not readable from remote by design (OSC 52
   reads stop at the first tmux). Re-verify as 1R3.
 
-## [~] Bucket 1R3 — Remote nvim yank + worker picker + sessionx keys
+## [x] Bucket 1R3 — Remote nvim yank + worker picker + sessionx keys
 
 New fix plus two new features (2026-08-04): `prefix e` worker-picker
 popup and sessionx ctrl-n/ctrl-p direction swap. All laptop-side except
@@ -243,7 +243,11 @@ Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
   queries the terminal — it returns nvim's own unnamed register, so
   `p` pastes anything yanked in that nvim and can never hang.
   Laptop→remote paste stays unsupported by design (OSC 52 reads stop
-  at the first tmux). Re-verify = step 2 only.
+  at the first tmux; mirroring the laptop clipboard onto workers would
+  leak every copy, secrets included). Sanctioned path for
+  local→remote: Cmd-V terminal paste (bracketed, works in shell +
+  nvim insert). Re-verified: `p` pastes remote registers instantly,
+  no hang — PASS. Bucket complete.
 - INFO (chip showed 520m on reconnect, 11:43): NOT a defect and NOT a
   durability gap. Closing the last endpoint ~03:03 emptied the worker
   server, so it exited; zero sessions existed all night — nothing to
@@ -426,7 +430,7 @@ Report each drill separately before starting the next.
 | 1 | FAIL→FIXED | restore hijack (53af514 guard); split rule + chips reworked; re-run as 1R |
 | 1R | 4/6→FIXED | split rule, close, host/autosave chips PASS; dir chip made live-cwd (set-titles→pane_title); OSC 52 root cause = broken Ms override in tmux.conf, replaced with terminal-features clipboard; re-run as 1R2 |
 | 1R2 | PASS | all steps PASS; bonus: existing-repo workspace materialization observed; new defect: remote nvim yank used worker pbcopy, fixed via SSH-guarded OSC 52 provider → 1R3 |
-| 1R3 | — | |
+| 1R3 | PASS | yank, paste (no-hang fix e7145f8), picker rework, sessionx keys all PASS; 520m chip + detached-save timer resolved (already installed Aug 2, live-verified) |
 | 2 | — | |
 | 3 | — | |
 | 4 | — | |
