@@ -390,8 +390,23 @@ confusion?
   upstream toggle.sh pairing across two tmux servers, second unmanaged
   ssh channel, new orphan classes; logged as post-smoke candidate only
   if dispatch UX proves insufficient).
-- Re-verify pending: operator to reload config and re-run steps 1–3
-  plus nav/resize/close exercises.
+- Re-verify pending: operator to re-run steps 1–3 plus nav/resize/close
+  exercises (config already reloaded live by coordinator).
+- INCIDENT (2026-08-05): coordinator instructed `prefix C-r` for config
+  reload off reset.conf line 51 — but TPM loads after that file and
+  tmux-resurrect's DEFAULT restore binding is ALSO `prefix C-r`, so the
+  reload had been silently shadowed by a one-keystroke, no-confirmation
+  landscape restore. Operator triggered it; restore was structurally a
+  no-op (snapshot was minutes old, all 16 sessions pre-existed →
+  resurrect skipped them) but blocked ALL tmux input while post-restore
+  hooks (reconcile) waited out 8s ssh timeouts against the powered-off
+  mini, twice. FIX: `@resurrect-restore` parked to `M-F11`; `prefix C-r`
+  now genuinely reloads; restore is deliberate-only behind
+  `prefix C-M-r` confirm prompt. LESSON: verify hotkeys against
+  `tmux list-keys` (live truth), never against config files (load-order
+  lies). Worker note: mini offline is fine — ensure-time sweeps only
+  contact the TARGET worker (3s timeout); only `rw doctor` and
+  post-restore reconcile ping all workers and will stall ~8s on mini.
 
 ## [ ] Bucket 5 — Workspace handoff / return (ad hoc, dirty state)
 
