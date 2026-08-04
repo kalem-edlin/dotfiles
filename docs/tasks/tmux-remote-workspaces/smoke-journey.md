@@ -189,11 +189,14 @@ the nvim change (deployed to both workers).
    report — that would mean the worker tmux didn't answer the query.
    Note pasting the LAPTOP clipboard into remote nvim is not expected
    to work (OSC 52 reads stop at the first tmux).
-3. Picker: from a local pane, `prefix e` → popup lists mini +
-   agents-roll, reachability column fills in (… → online/offline);
-   ctrl-n moves DOWN, ctrl-p moves UP; enter on `mini` → new window
-   opens and runs `rw ensure --worker mini` (inherits the pane's cwd);
-   `prefix q` closes it cleanly. Esc aborts the popup with no window.
+3. Picker: from a local pane at a shell prompt, `prefix e` → popup
+   lists mini + agents-roll, reachability column fills in
+   (… → online/offline); ctrl-n moves DOWN, ctrl-p moves UP; enter on
+   `mini` → `rw ensure --worker mini` runs in THAT pane (the focused
+   one, not a new window; the pane's cwd drives workspace resolution);
+   `prefix q` closes it cleanly. Esc aborts with no side effects.
+   Guard checks: `prefix e` from an already-remote pane or from a pane
+   running a program (e.g. nvim) → status-line message, nothing typed.
 4. sessionx: `prefix o` → ctrl-n now steps DOWN the session list,
    ctrl-p UP.
 
