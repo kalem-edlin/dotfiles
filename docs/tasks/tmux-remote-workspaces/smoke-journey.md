@@ -408,6 +408,32 @@ confusion?
   round-trip to agents-roll included; bindings re-armed live. During
   the outage the coordinator live-reverted all nine keys to stock to
   unblock the operator, then re-armed after the verified fix.
+- INCIDENT 3 (2026-08-05, close-cycle + latency redesign): with the parse
+  bug fixed, operator retested and hit two close bugs: (a) `q` on the
+  NON-sidebar worker pane closed the sidebar; (b) `q` after the sidebar
+  was gone REOPENED it — an uncloseable pane cycling open/close. Root
+  cause: dispatch detected "sidebar" via treemux's `@-treemux-*` global
+  options and closed through toggle.sh — but upstream NEVER unsets those
+  options (liveness is checked via list-panes), so the editor pane
+  matched forever and toggle re-created the sidebar once it was dead.
+  Worker server wreckage confirmed it: 8 stale sidebar registrations
+  (%6–%13) for one editor, one per lap of the loop (all cleaned; pane-id
+  recycling makes stale entries a misdetection hazard). FIX: close no
+  longer touches toggle.sh or option-sniffing at all — focused-pane
+  semantics, `kill-pane` on the active worker pane, lone pane = endpoint
+  close. ALSO: measured forwarding cost ~150ms/keypress (~45ms RTT to
+  agents-roll; physics, not config) — validated operator's latency
+  concern, so forwarding is now gated on local pane hint
+  `@rw-sidebar-open` (set by rw-treemux.sh from post-toggle pane count,
+  self-healed by dispatch whenever a verdict reports ≤1 worker pane).
+  No sidebar → every key local, ~30ms, zero ssh. Verdict protocol now
+  `<verdict> <pane-count>`. Verified: remote close/nav verdicts on a
+  scratch worker session (forwarded 1 / endpoint 1 / edge 1), fast path
+  29ms live, slow-path self-heal clears the hint. Treemux-fork
+  alternative (local tree over remote FS) re-examined against upstream
+  toggle.sh and re-rejected: tree nvim, editor pane, watcher broker, and
+  FS are single-machine assumptions throughout; dispatch keeps upstream
+  100% stock on the worker.
 - INCIDENT (2026-08-05): coordinator instructed `prefix C-r` for config
   reload off reset.conf line 51 — but TPM loads after that file and
   tmux-resurrect's DEFAULT restore binding is ALSO `prefix C-r`, so the

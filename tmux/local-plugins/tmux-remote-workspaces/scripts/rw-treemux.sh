@@ -108,7 +108,10 @@ if [ -z "$active_pane" ]; then
   exit 23
 fi
 
-"$toggle" "$args" "$active_pane"
+# Toggle output is noise; the one thing the local side needs back is the
+# post-toggle pane count, which drives the @rw-sidebar-open dispatch hint.
+"$toggle" "$args" "$active_pane" >/dev/null 2>&1
+tmux display-message -pt "=$session_name:" -F '#{window_panes}' 2>/dev/null || echo 0
 REMOTE_TREEMUX
 remote_status=$?
 remote_output="$(cat "$remote_output_file")"
@@ -120,5 +123,20 @@ if [ "$remote_status" -ne 0 ]; then
   show_error "$remote_output"
   exit "$remote_status"
 fi
+
+# Maintain the local fast-path hint for rw-dispatch.sh: >1 worker pane means
+# a sidebar (or other worker split) is open and nav/resize/close must be
+# forwarded; <=1 means every key can stay local with zero ssh.
+panes_after="$(printf '%s\n' "$remote_output" | tail -n 1)"
+case "$panes_after" in
+  '' | *[!0-9]*) : ;; # count unreadable: leave the hint untouched
+  *)
+    if [ "$panes_after" -gt 1 ]; then
+      tmux set-option -p -t "$pane_id" @rw-sidebar-open 1 2>/dev/null || true
+    else
+      tmux set-option -p -t "$pane_id" -u @rw-sidebar-open 2>/dev/null || true
+    fi
+    ;;
+esac
 
 exit 0
