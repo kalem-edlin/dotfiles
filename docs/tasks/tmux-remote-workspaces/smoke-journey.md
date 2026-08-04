@@ -244,12 +244,19 @@ Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
   `p` pastes anything yanked in that nvim and can never hang.
   Laptop→remote paste stays unsupported by design (OSC 52 reads stop
   at the first tmux). Re-verify = step 2 only.
-- INFO (chip showed 520m on reconnect, 11:43): confirmed the
-  attach-gated save model, not a new defect. Mini's save files: 03:03
-  (last connection ended) then nothing until 11:44 + 11:45 — two fresh
-  saves within ~2m of reattach. 520m = the real detached gap.
-  Strengthens the launchd/systemd periodic-save TODO (operator
-  decision, matters before Bucket 6 detached agents).
+- INFO (chip showed 520m on reconnect, 11:43): NOT a defect and NOT a
+  durability gap. Closing the last endpoint ~03:03 emptied the worker
+  server, so it exited; zero sessions existed all night — nothing to
+  save, nothing at risk. RESOLVED the earlier "launchd timer TODO":
+  the timer ALREADY EXISTS — misc-headless.sh installed a 5-min
+  periodic-save net on both workers Aug 2 (launchd agent on mini,
+  systemd --user timer on agents-roll, templates/tmux-resurrect-save.*).
+  Verified live 2026-08-04: agents-roll timer active + firing; mini
+  launchd job healthy (last exit 0, no log errors since Aug 2) and a
+  save landed at 11:51:30 with the server fully DETACHED
+  (attached=0). Detached background agents are therefore snapshotted
+  within ≤5 min. Chip age = last save file age, so it counts up
+  whenever the server is empty/absent — cosmetic only.
 
 ## [ ] Bucket 2 — Drop resilience + idempotent ensure
 
