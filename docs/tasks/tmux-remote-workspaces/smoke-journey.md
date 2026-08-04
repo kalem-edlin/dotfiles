@@ -129,7 +129,8 @@ clipboard paste (this closes the OSC 52 item).
   attach-loop pins (attach-loop.sh:309). Verified end-to-end against
   throwaway tmux servers with captured client ttys.
 
-## [~] Bucket 1R2 — Final re-verify (dir chip live cwd + OSC 52)
+## [x] Bucket 1R2 — Final re-verify (dir chip live cwd + OSC 52)
+### (2026-08-04: ALL PASS; one new defect found → fixed → re-verify as 1R3)
 
 Only the two fixed areas plus one attach sanity pass. IMPORTANT
 pre-step: your current Ghostty tmux client still carries the broken Ms
@@ -152,30 +153,51 @@ attach). Detach and reattach once first: `prefix d`, then `tmux attach`
    copy-last-message) uses, so it stands in for those too.
 4. `prefix q` the remote pane: clean close, `rw status` zero rows.
 
-1. Fresh pane, `cd ~`, `rw ensure --worker mini`. Expect: pane becomes a
-   bare remote prompt with NO inner powerline; typing
-   `tmux display-message -p '#S'` in it prints `rw-d157af95-<id>`
-   (hostname will print `Mac.localdomain` — known cosmetic, optional fix
-   `sudo scutil --set HostName Alfies-Mac-mini.local`).
-2. With that pane focused, check the OUTER powerline: dir chip = `admin`
-   (remote workspace basename, not your local dir), host chip = `mini`,
-   autosave chip = mini's save age (may show `…` for one refresh, then
-   `Nm` in pink if ≤ ~6m).
-3. Focus any local pane: all three chips flip back to local values
-   (dir = local cwd, host = mac, autosave = laptop continuum age).
-4. OSC 52 (remote-originated): inside the remote pane run
-   `printf '\033]52;c;%s\a' "$(printf 'rw-osc52-remote-test' | base64)"`
-   then Cmd-V on the laptop. Pass = that string pastes.
-5. Split A — focus the REMOTE pane, `prefix \`: new pane is remote (own
-   endpoint; from a local pane `rw status` shows 2 rows).
-6. Split B — focus a LOCAL pane in the same window, `prefix \`: new pane
-   is LOCAL (`hostname` = your laptop; `rw status` still 2 rows). This is
-   the new always-follow-focused-pane-host rule.
-7. Close every remote pane with `prefix q`: panes die cleanly (no
-   "returned 1"), `rw status` returns to zero rows.
+### Bucket 1R2 findings (2026-08-04)
 
-Report: session name, chip behavior in both focus states, OSC 52
-PASS/FAIL, both split outcomes, close outcomes.
+- PASS: dir chip tracks live remote cwd; OSC 52 printf → laptop
+  clipboard; splits; `prefix q`; `#S` format.
+- INFO (bonus validation): `rw ensure` from inside an existing repo
+  checkout materialized the workspace at
+  `~/rw-workspaces/<focus-id>/github.com-kalem-edlin-dotfiles` on the
+  worker — early confirmation of repo-identity workspace materialization
+  ahead of Buckets 5/7.
+- NEW DEFECT → FIXED: yank in remote nvim (`vi`→nvim alias) did NOT
+  reach the laptop clipboard, while the raw OSC 52 printf in the same
+  pane did. Root cause: `clipboard=unnamedplus` makes nvim resolve a
+  clipboard PROVIDER, and on the mini it finds `pbcopy` — yanks landed
+  on the MINI's own clipboard and no OSC 52 was ever emitted (the printf
+  bypassed the provider entirely, which is why it worked). Fix in
+  nvim/init.lua: when `SSH_TTY`/`SSH_CONNECTION` is set (and
+  nvim ≥ 0.10), force `vim.g.clipboard` to the built-in OSC 52 provider
+  so yanks ride the exact tty path the printf test proved. Paste (`p`)
+  queries the innermost tmux, which answers from its own paste buffer;
+  the laptop clipboard is not readable from remote by design (OSC 52
+  reads stop at the first tmux). Re-verify as 1R3.
+
+## [~] Bucket 1R3 — Remote nvim yank + worker picker + sessionx keys
+
+New fix plus two new features (2026-08-04): `prefix e` worker-picker
+popup and sessionx ctrl-n/ctrl-p direction swap. All laptop-side except
+the nvim change (deployed to both workers).
+
+1. Remote nvim yank: `rw ensure --worker mini`, open `vi something`,
+   type a line, `yy`, then Cmd-V locally → pastes that line. (`dd` also
+   lands on the laptop clipboard, same as local behavior.)
+2. Remote nvim paste: still inside remote nvim, `p` pastes the last
+   yank. If it ever hangs "waiting for clipboard", press a key and
+   report — that would mean the worker tmux didn't answer the query.
+   Note pasting the LAPTOP clipboard into remote nvim is not expected
+   to work (OSC 52 reads stop at the first tmux).
+3. Picker: from a local pane, `prefix e` → popup lists mini +
+   agents-roll, reachability column fills in (… → online/offline);
+   ctrl-n moves DOWN, ctrl-p moves UP; enter on `mini` → new window
+   opens and runs `rw ensure --worker mini` (inherits the pane's cwd);
+   `prefix q` closes it cleanly. Esc aborts the popup with no window.
+4. sessionx: `prefix o` → ctrl-n now steps DOWN the session list,
+   ctrl-p UP.
+
+Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
 
 ## [ ] Bucket 2 — Drop resilience + idempotent ensure
 
@@ -344,7 +366,8 @@ Report each drill separately before starting the next.
 | 0 | PASS | doctor all clean, zero endpoints, zero orphans |
 | 1 | FAIL→FIXED | restore hijack (53af514 guard); split rule + chips reworked; re-run as 1R |
 | 1R | 4/6→FIXED | split rule, close, host/autosave chips PASS; dir chip made live-cwd (set-titles→pane_title); OSC 52 root cause = broken Ms override in tmux.conf, replaced with terminal-features clipboard; re-run as 1R2 |
-| 1R2 | — | |
+| 1R2 | PASS | all steps PASS; bonus: existing-repo workspace materialization observed; new defect: remote nvim yank used worker pbcopy, fixed via SSH-guarded OSC 52 provider → 1R3 |
+| 1R3 | — | |
 | 2 | — | |
 | 3 | — | |
 | 4 | — | |

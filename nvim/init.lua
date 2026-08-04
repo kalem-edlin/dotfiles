@@ -19,6 +19,22 @@ vim.opt.guicursor = "a:block"
 -- Use system clipboard for normal yanks, deletes, and pastes.
 vim.opt.clipboard = "unnamedplus"
 
+-- Over ssh (rw endpoints included), default provider resolution finds the
+-- REMOTE machine's clipboard tool (pbcopy on a Mac worker) and yanks die
+-- there. Emit OSC 52 instead so yanks travel remote tmux -> ssh -> local
+-- tmux -> local clipboard, the same path tmux.conf's clipboard
+-- terminal-feature enables. Paste queries the innermost tmux, which answers
+-- from its own buffer (set-clipboard on); the LOCAL machine's clipboard is
+-- not readable from remote -- OSC 52 reads stop at the first tmux by design.
+if (vim.env.SSH_TTY or vim.env.SSH_CONNECTION) and vim.fn.has("nvim-0.10") == 1 then
+  local osc52 = require("vim.ui.clipboard.osc52")
+  vim.g.clipboard = {
+    name = "OSC 52",
+    copy = { ["+"] = osc52.copy("+"), ["*"] = osc52.copy("*") },
+    paste = { ["+"] = osc52.paste("+"), ["*"] = osc52.paste("*") },
+  }
+end
+
 local mocha = {
   text = "#cdd6f4",
   subtext0 = "#a6adc8",
