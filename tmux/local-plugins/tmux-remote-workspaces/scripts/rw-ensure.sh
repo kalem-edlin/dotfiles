@@ -107,6 +107,16 @@ if [ "$preflight_status" -ne 0 ]; then
 fi
 worker_home="$(printf '%s' "$preflight_json" | jq -r '.home')"
 
+# Worker-side zombie sweep (smoke-journey 1R findings): a worker's own
+# continuum auto-restore resurrects rw-<focus-id>-* sessions whose laptop
+# endpoints no longer exist, and later save cycles persist them. Best
+# effort -- failures never block ensure. Runs before this invocation
+# creates anything remotely, so its own about-to-be-born session cannot be
+# a candidate; concurrent OTHER ensures are shielded by the sweep's
+# min-age window.
+"$RW_PLUGIN_DIR/libexec/reconcile-worker" --worker "$worker" \
+  ${existing_endpoint:+--exclude "$existing_endpoint"} </dev/null || true
+
 if [ "$reattach" = "true" ]; then
   endpoint_id="$existing_endpoint"
   endpoint_json="$(rw_read_endpoint "$endpoint_id")"

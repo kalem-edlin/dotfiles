@@ -247,6 +247,15 @@ while true; do
           continue
         fi
       fi
+      # The worker resurrection that just ran (whichever branch) may have
+      # also resurrected zombie siblings: endpoints closed AFTER that save
+      # was written come back as unregistered sessions, and later worker
+      # saves would persist them (smoke-journey 1R findings). Sweep them at
+      # birth. min-age narrowed to 15s: restored zombies are seconds old,
+      # while 15s still shields a concurrent ensure's create-to-registry
+      # gap (pure-local bash+jq, no network). Best effort, never blocks.
+      "$RW_PLUGIN_DIR/libexec/reconcile-worker" --worker "$worker" \
+        --exclude "$endpoint_id" --min-age 15 </dev/null >/dev/null 2>&1 || true
       # Fall through to the plain attach below -- the session now exists.
       ;;
     session-absent)

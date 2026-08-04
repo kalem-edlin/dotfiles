@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Worker-side zombie sweep -- the ensure-time / post-restore companion to
+# libexec/reconcile (which is laptop-post-resurrection scoped, all
+# workers). Continuum auto-restore on a worker server (re)start resurrects
+# rw-<focus-id>-* sessions whose laptop endpoints no longer exist, and
+# later worker save cycles PERSIST those zombies instead of dropping them
+# (smoke-journey Bucket 1R findings, observed twice 2026-08-03/04). This
+# script lists one worker's sessions in this focus machine's namespace and
+# closes the unregistered ones via rw_close_endpoint_core.
+#
+# Usage: reconcile-worker --worker <alias> [--exclude <endpoint-id>]
+#                         [--min-age <seconds>] [--dry-run]
+#
+# Safety posture (kill logic -- every guard is deliberate):
+#   - namespace: only sessions prefixed rw-<this machine's short id>-;
+#     other focus machines' sessions and ordinary sessions are invisible.
+#   - registry is authoritative: an endpoint file in the laptop registry
+#     means NOT a zombie, no further questions.
+#   - min-age window (default 120s, callers may narrow): a concurrent
+#     `rw ensure` creates its remote session BEFORE writing the registry
+#     entry (rw-ensure.sh create at ~line 157, registry write at ~223), so
+#     a just-born session can look unregistered for a moment. Ages are
+#     computed against the WORKER's own clock (fetched in the same ssh
+#     round-trip as the listing) so laptop/worker clock skew is irrelevant.
+#   - attached sessions are never touched: killing one would yank a live
+#     client, and a real zombie has no client.
+#   - unreachable worker / no server / garbled output = ZERO candidates,
+#     never "everything is a zombie" (same rule as libexec/reconcile).
+#   - closes go through rw_close_endpoint_core (tombstone + registry-file
+#     removal + exact-match remote kill + "close" event), stdin-guarded
+#     with </dev/null against the ssh-drains-caller-stdin bug documented
+#     in libexec/reconcile.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../scripts/common.sh
+source "$SCRIPT_DIR/../scripts/common.sh"
+
+rw_need_jq
+rw_config_valid || rw_die "reconcile-worker: config.json ($RW_CONFIG_FILE) is invalid"
+
+worker=""
+exclude=""
+dry_run="false"
+min_age="${RW_WORKER_RECONCILE_MIN_AGE_SECONDS:-120}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --worker) worker="${2:?}"; shift 2 ;;
+    --exclude) exclude="${2:-}"; shift 2 ;;
+    --min-age) min_age="${2:?}"; shift 2 ;;
+    --dry-run) dry_run="true"; shift ;;
+    *) rw_die "reconcile-worker: unknown argument: $1" 64 ;;
+  esac
+done
+[ -n "$worker" ] || rw_die "reconcile-worker: --worker is required" 64
+rw_worker_known "$worker" || rw_die "reconcile-worker: worker '$worker' is not declared in config.json"
+case "$min_age" in *[!0-9]* | '') rw_die "reconcile-worker: --min-age must be a non-negative integer" 64 ;; esac
+
+prefix="$(rw_session_prefix)"
+start_ts="$(rw_now_epoch)"
+
+# One batched round-trip: every session (name, created-epoch, attached
+# count) plus the worker's own clock as the final line.
+remote_listing="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+  "tmux list-sessions -F '#{session_name} #{session_created} #{session_attached}' 2>/dev/null; date +%s" 2>/dev/null || true)"
+
+remote_now="$(printf '%s\n' "$remote_listing" | tail -n1)"
+case "$remote_now" in
+  *[!0-9]* | '') exit 0 ;; # unreachable or garbled: zero candidates
+esac
+
+zombies=()
+while read -r sname screated sattached; do
+  [ -n "$sname" ] || continue
+  case "$sname" in "$prefix"*) : ;; *) continue ;; esac
+  id="${sname#"$prefix"}"
+  [ -n "$id" ] || continue
+  [ "$id" = "$exclude" ] && continue
+  rw_endpoint_exists "$id" && continue
+  case "$screated" in *[!0-9]* | '') continue ;; esac
+  [ $((remote_now - screated)) -ge "$min_age" ] || continue
+  case "$sattached" in 0) : ;; *) continue ;; esac
+  zombies+=("$id")
+done < <(printf '%s\n' "$remote_listing" | sed '$d')
+
+count="${#zombies[@]}"
+[ "$count" -gt 0 ] || exit 0 # quiet no-op: no event spam on ordinary ensures
+
+if [ "$dry_run" = "true" ]; then
+  echo "rw reconcile-worker: dry-run worker=$worker would_close=$count ids=${zombies[*]}"
+  exit 0
+fi
+
+for id in ${zombies[@]+"${zombies[@]}"}; do
+  rw_close_endpoint_core "$id" "reconcile:worker-zombie" "$worker" </dev/null
+done
+
+duration_ms="$(rw_elapsed_ms "$start_ts")"
+rw_log_event "reconcile" "" "$worker" "$duration_ms" "success" "scope=worker closed=$count ids=${zombies[*]}"
+echo "rw reconcile-worker: worker=$worker closed=$count ids=${zombies[*]}"

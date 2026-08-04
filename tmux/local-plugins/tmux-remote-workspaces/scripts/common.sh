@@ -282,7 +282,8 @@ rw_write_tombstone() {
 # Never touches a local pane -- callers that own a bound pane (rw-close.sh)
 # still clear their own @rw-* cache options and close the pane themselves
 # afterward. Shared by rw-close.sh (pane-driven, interactive/keybinding
-# path), libexec/reconcile (id-driven orphan disposal, no local pane), and
+# path), libexec/reconcile (id-driven orphan disposal, no local pane),
+# libexec/reconcile-worker (worker-scoped zombie sweep), and
 # attach-loop.sh (id-driven, remote-intentional-close discrimination).
 #
 # [worker_override] is required for a PURE remote orphan: reconcile
@@ -314,7 +315,7 @@ rw_close_endpoint_core() {
   remote_outcome="skipped"
   if [ -n "$worker" ]; then
     if rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
-      "tmux kill-session -t '$session_name'" >/dev/null 2>&1; then
+      "tmux kill-session -t '=$session_name'" >/dev/null 2>&1; then
       remote_outcome="killed"
     else
       remote_outcome="unreachable_or_absent"

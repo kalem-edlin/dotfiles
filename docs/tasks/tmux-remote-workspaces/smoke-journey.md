@@ -110,7 +110,16 @@ clipboard paste (this closes the OSC 52 item).
   zombies persist across restores until manually killed (second
   occurrence killed 02:59). Proper fix: worker-side reconcile at ensure
   (kill `rw-<focus-id>-*` sessions absent from the laptop registry) —
-  open TODO.
+  IMPLEMENTED 2026-08-04 as `libexec/reconcile-worker`, called from
+  ensure-start (pre-create) and from attach-loop's worker-restore path.
+  Guards: focus-machine namespace only, registry-membership is
+  authoritative, min-age window vs the concurrent-ensure
+  create-to-registry gap (ages computed in the worker's own clock),
+  attached sessions never touched, unreachable = zero candidates,
+  exact-match kills. Verified live on mini: swept one organic + one
+  synthetic zombie, real sessions untouched, tombstones + events
+  written. Known gap: zombies born from a FRESH-BOOT ensure's own
+  restore are swept by the NEXT ensure, not the same one.
 - FAIL → FIXED: dir chip stuck on `admin` after `cd ~/Developer` in the
   remote pane. `@rw-workspace` is a static ensure-time value. Fix:
   endpoint sessions now set `set-titles on` +
@@ -220,7 +229,10 @@ Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
   TODO, operator decision.
 - Restore-zombie recurred (see 1R findings UPDATE): killed
   `rw-d157af95-29f40b78` exact-match 02:59; worker-side ensure-time
-  reconcile is the systemic fix.
+  reconcile implemented + live-verified same day (see 1R UPDATE).
+  Organic verification available to the operator: any future ensure
+  that sweeps prints `rw reconcile-worker: worker=<w> closed=N ids=…`
+  in the pane before the remote prompt appears.
 
 ## [ ] Bucket 2 — Drop resilience + idempotent ensure
 
