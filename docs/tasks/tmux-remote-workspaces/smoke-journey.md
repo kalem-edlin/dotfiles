@@ -370,6 +370,29 @@ should have survived (or vice versa).
 Report: sidebar rooted correctly remote-side? any local-sidebar
 confusion?
 
+### Bucket 4 findings (2026-08-04, partial)
+
+- DEFECT (operator): remote sidebar unusable in practice — it is a
+  worker-side split, so the local server sees the remote rectangle as ONE
+  pane: `prefix h/l` could not move focus between sidebar and shell,
+  `prefix , .` could not resize it (stuck ~50% width), and `prefix q`
+  tore down the ENTIRE endpoint when the intent was "close the sidebar".
+- FIX: `rw-dispatch.sh` — nav/resize/close on an `@rw-endpoint` pane now
+  forward the equivalent tmux command into the worker session over the
+  multiplexed ssh channel (~50ms/keypress; ControlPersist already on).
+  Nav at the worker window edge falls back to local `select-pane`
+  (cursor crosses out of the remote rectangle); `q` closes the sidebar
+  via its own Treemux toggle (registration torn down), a non-Treemux
+  worker split via kill-pane, and only a LONE worker pane closes the
+  endpoint; every failure path degrades to the exact pre-dispatch
+  behavior. Plain local panes keep stock commands via if-shell.
+- Considered + rejected: moving the sidebar to a local pane (fork of
+  upstream toggle.sh pairing across two tmux servers, second unmanaged
+  ssh channel, new orphan classes; logged as post-smoke candidate only
+  if dispatch UX proves insufficient).
+- Re-verify pending: operator to reload config and re-run steps 1–3
+  plus nav/resize/close exercises.
+
 ## [ ] Bucket 5 — Workspace handoff / return (ad hoc, dirty state)
 
 Low-stakes scratch repo so mistakes cost nothing:

@@ -43,8 +43,21 @@ directly after setup. It can still be invoked by full path,
 
 ## Keybindings (tmux.reset.conf)
 
-- `prefix q`: closes through `rw close` when the pane has a live
-  `@rw-endpoint`; otherwise unchanged `kill-pane`.
+- `prefix q`: for a pane with a live `@rw-endpoint`, `rw-dispatch.sh close`
+  decides scope on the worker: a Treemux sidebar (or other worker-side
+  split) closes just THAT pane -- the sidebar via its own toggle so the
+  registration is torn down -- while a lone worker pane closes the whole
+  endpoint through `rw close`. Plain panes keep unchanged `kill-pane`.
+- `prefix h/j/k/l` (nav) and `prefix , . - =` (resize): on a remote-backed
+  pane these forward the equivalent tmux command into the worker session
+  over the multiplexed ssh channel (`rw-dispatch.sh`) -- the worker-side
+  Treemux sidebar is otherwise invisible to the local server, so nav,
+  resize, and close could never reach it (smoke-journey Bucket 4 finding).
+  Nav at the worker window's edge falls back to LOCAL `select-pane`, so the
+  cursor crosses out of the remote rectangle into the local layout
+  seamlessly. Any failure (worker unreachable, session gone) degrades to
+  the stock local command; close's failure path degrades to `rw close`,
+  the exact pre-dispatch behavior.
 - `prefix \` / `prefix /`: unchanged local splits, *unless* the source pane
   is remote-backed, in which case the new pane inherits the same
   worker+workspace and becomes its own endpoint via `rw ensure` (new
