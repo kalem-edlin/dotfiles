@@ -314,7 +314,8 @@ status still one row.
   endpoint, no reconnect duplicates; the second row was the orphan
   above, not a duplicate). Bucket closed.
 
-## [ ] Bucket 3 — Splits inherit remote; close semantics
+## [x] Bucket 3 — Splits inherit remote; close semantics
+### (2026-08-04: ALL PASS)
 
 1. With the remote pane active: `prefix \` (vertical split). Expect the
    new pane is ALSO on mini, same workspace, but its OWN endpoint —
@@ -332,6 +333,27 @@ status still one row.
 
 Report: status counts after each step, any pane that died when it
 should have survived (or vice versa).
+
+### Bucket 3 findings (2026-08-04)
+
+- Splits + `prefix q`: PASS. Split minted its own endpoint (5003742d,
+  two rows alongside f9b422bb); `prefix q` closed it cleanly
+  (`remote=killed reason=prefix+q`, tombstone written, sibling row
+  untouched).
+- `prefix &` window close: PASS. 3de9fa04 created in own window, confirm
+  prompt shown, `y` killed window AND endpoint
+  (`remote=killed reason=window-close`, tombstone written).
+- `rw close --pane %65 --no-kill-pane`: PASS. Endpoint f9b422bb closed
+  (`remote=killed`, tombstone), attach-loop exited via pane-release
+  (`reconnect ... outcome=closed exit=0`), pane survived as local shell.
+- Operator UX friction (noted, not built): (1) `--pane` takes a tmux
+  pane id (%65), operator naturally tried the endpoint id — an
+  `--endpoint <id>` alias would help; (2) CLI close without `--reason`
+  logs `reason=prefix+q` (the default), which is misleading in
+  events.jsonl for non-keybinding closes.
+- Operator challenged `prefix &` as YAGNI; kept — it intercepts tmux's
+  STOCK kill-window (removing the bind reverts to a hard kill that leaks
+  the Bucket-2 orphan class); teardown is shared with rw-close.sh.
 
 ## [ ] Bucket 4 — Remote Treemux
 
@@ -466,7 +488,7 @@ Report each drill separately before starting the next.
 | 1R2 | PASS | all steps PASS; bonus: existing-repo workspace materialization observed; new defect: remote nvim yank used worker pbcopy, fixed via SSH-guarded OSC 52 provider → 1R3 |
 | 1R3 | PASS | yank, paste (no-hang fix e7145f8), picker rework, sessionx keys all PASS; 520m chip + detached-save timer resolved (already installed Aug 2, live-verified) |
 | 2 | PASS | detach-reattach + no-duplicate PASS; Wi-Fi drill skipped (README field-validation note); found+fixed local-pane-death orphan class (reconcile-local sweep) |
-| 3 | — | |
+| 3 | PASS | splits mint own endpoints; prefix q, prefix & window-close, `rw close --no-kill-pane` all clean (tombstones + remote=killed verified); UX notes: want `--endpoint` alias, CLI default reason misleads |
 | 4 | — | |
 | 5 | — | |
 | 6 | — | |
