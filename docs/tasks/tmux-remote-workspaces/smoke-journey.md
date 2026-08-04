@@ -280,6 +280,26 @@ Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
 Report: reconnect observed (rough time), any screen/mouse garbling,
 status still one row.
 
+### Bucket 2 findings (2026-08-04, partial)
+
+- PASS: inner `tmux detach` → attach-loop reattached same session,
+  history intact, no garbling.
+- DEFECT FOUND (step 3): `rw status` showed TWO rows with one live
+  pane. Endpoint 0783d52a's local pane %60 was killed hard while
+  connected (only a `create` event ever logged — ssh never exited
+  normally; some non-`prefix q` kill during the morning nvim-hang
+  shuffle). NO cleanup path covers this class: attach-loop dies with
+  the pane so it can't self-clean; laptop `reconcile` deliberately
+  keeps every registry entry desired (soft pane-match failures must
+  never gate remote deletion); worker sweep spares it because it IS
+  registered. Orphan lingers forever. Cleaned manually via
+  rw_close_endpoint_core (tombstone + exact-match kill + events);
+  registry back to one row. Durable fix PROPOSED (pending operator
+  go): ensure-time/doctor local-pane sweep — close endpoints whose
+  recorded pane id is absent from the live local server, guarded by
+  endpoint-generation vs server start time so post-crash stale pane
+  ids are never swept before rw-post-restore re-stamps them.
+
 ## [ ] Bucket 3 — Splits inherit remote; close semantics
 
 1. With the remote pane active: `prefix \` (vertical split). Expect the
