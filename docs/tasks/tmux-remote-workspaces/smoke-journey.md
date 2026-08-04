@@ -392,6 +392,22 @@ confusion?
   if dispatch UX proves insufficient).
 - Re-verify pending: operator to re-run steps 1–3 plus nav/resize/close
   exercises (config already reloaded live by coordinator).
+- INCIDENT 2 (2026-08-05, lockout): first live use of rw-dispatch on an
+  agents-roll pane errored `returned 1` on EVERY dispatched key — nav,
+  resize, and q all dead, operator locked on the remote pane. Root
+  cause: macOS bash 3.2's `$()` parser chokes on the unbalanced `)` of
+  case patterns when a heredoc is attached inside the substitution — it
+  ended the substitution early and executed the rest of the REMOTE
+  script locally, dying on `set -u` BEFORE local_fallback could run
+  (the safety net existed; the parser never let execution reach it).
+  `bash -n` cannot catch this class. FIX: temp-file capture instead of
+  `verdict="$(ssh …heredoc)"`, mirroring rw-treemux.sh (which is why
+  treemux's ssh block never hit it) + standing rule in the script:
+  heredoc-bearing ssh calls never go inside `$()` in this plugin.
+  Verified end-to-end from run-shell (tmux server) context, ssh
+  round-trip to agents-roll included; bindings re-armed live. During
+  the outage the coordinator live-reverted all nine keys to stock to
+  unblock the operator, then re-armed after the verified fix.
 - INCIDENT (2026-08-05): coordinator instructed `prefix C-r` for config
   reload off reset.conf line 51 — but TPM loads after that file and
   tmux-resurrect's DEFAULT restore binding is ALSO `prefix C-r`, so the

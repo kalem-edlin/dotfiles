@@ -82,8 +82,17 @@ if [ -z "$worker" ]; then
 fi
 session_name="$(rw_session_name "$endpoint_id")"
 
-verdict="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
-  bash -s -- "$session_name" "$action" 2>/dev/null <<'REMOTE_DISPATCH'
+# Temp-file capture instead of command substitution (mirrors rw-treemux.sh):
+# macOS bash 3.2's $() parser chokes on the unbalanced `)` of case patterns
+# when a heredoc is attached inside the substitution -- it ends the
+# substitution early and executes the rest of the REMOTE script LOCALLY
+# (2026-08-05 lockout incident: every dispatched key died on `set -u` before
+# reaching local_fallback). bash -n does not catch it; keep heredoc-bearing
+# ssh calls out of $() in this plugin.
+remote_out="$(mktemp "${TMPDIR:-/tmp}/rw-dispatch.XXXXXX")"
+trap 'rm -f "$remote_out"' EXIT
+rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+  bash -s -- "$session_name" "$action" >"$remote_out" 2>/dev/null <<'REMOTE_DISPATCH'
 set -uo pipefail
 session_name="${1:?}"
 action="${2:?}"
@@ -143,8 +152,10 @@ case "$action" in
     ;;
 esac
 REMOTE_DISPATCH
-)"
 ssh_status=$?
+verdict="$(cat "$remote_out")"
+rm -f "$remote_out"
+trap - EXIT
 
 if [ "$action" = "close" ]; then
   case "$verdict" in
