@@ -23,15 +23,20 @@ vim.opt.clipboard = "unnamedplus"
 -- REMOTE machine's clipboard tool (pbcopy on a Mac worker) and yanks die
 -- there. Emit OSC 52 instead so yanks travel remote tmux -> ssh -> local
 -- tmux -> local clipboard, the same path tmux.conf's clipboard
--- terminal-feature enables. Paste queries the innermost tmux, which answers
--- from its own buffer (set-clipboard on); the LOCAL machine's clipboard is
--- not readable from remote -- OSC 52 reads stop at the first tmux by design.
+-- terminal-feature enables. Paste never queries the terminal: tmux answers
+-- OSC 52 reads only when it already holds a paste buffer and hangs the
+-- editor otherwise, and the LOCAL clipboard is unreadable from remote
+-- either way (reads stop at the first tmux). Pasting the unnamed register
+-- keeps `p` working for anything yanked in this nvim.
 if (vim.env.SSH_TTY or vim.env.SSH_CONNECTION) and vim.fn.has("nvim-0.10") == 1 then
   local osc52 = require("vim.ui.clipboard.osc52")
+  local function paste_reg()
+    return { vim.split(vim.fn.getreg('"'), "\n"), vim.fn.getregtype('"') }
+  end
   vim.g.clipboard = {
     name = "OSC 52",
     copy = { ["+"] = osc52.copy("+"), ["*"] = osc52.copy("*") },
-    paste = { ["+"] = osc52.paste("+"), ["*"] = osc52.paste("*") },
+    paste = { ["+"] = paste_reg, ["*"] = paste_reg },
   }
 end
 

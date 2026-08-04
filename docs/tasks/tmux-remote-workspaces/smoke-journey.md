@@ -233,6 +233,23 @@ Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
   Organic verification available to the operator: any future ensure
   that sweeps prints `rw reconcile-worker: worker=<w> closed=N ids=…`
   in the pane before the remote prompt appears.
+- PASS: reworked `prefix e` picker — focused-pane ensure, reachability
+  column, ctrl-n/ctrl-p, both guards (remote-backed pane, non-shell
+  pane), Esc abort, `prefix q` close. Operator: "completely fixed".
+- FAIL → FIXED: remote nvim `p` hung "Waiting for OSC 52 response".
+  tmux answers an OSC 52 READ only when it already holds a paste
+  buffer; with none (nothing yanked remotely yet) it stays silent and
+  nvim blocks. Fix: paste side of the ssh clipboard provider no longer
+  queries the terminal — it returns nvim's own unnamed register, so
+  `p` pastes anything yanked in that nvim and can never hang.
+  Laptop→remote paste stays unsupported by design (OSC 52 reads stop
+  at the first tmux). Re-verify = step 2 only.
+- INFO (chip showed 520m on reconnect, 11:43): confirmed the
+  attach-gated save model, not a new defect. Mini's save files: 03:03
+  (last connection ended) then nothing until 11:44 + 11:45 — two fresh
+  saves within ~2m of reattach. 520m = the real detached gap.
+  Strengthens the launchd/systemd periodic-save TODO (operator
+  decision, matters before Bucket 6 detached agents).
 
 ## [ ] Bucket 2 — Drop resilience + idempotent ensure
 
