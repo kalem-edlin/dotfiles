@@ -92,9 +92,16 @@ while [ "$i" -lt "$reflected_count" ]; do
   cfg_identity="$(printf '%s' "$entry" | jq -r '.identity')"
   focus_pattern="$(printf '%s' "$entry" | jq -r '.focus_path_pattern')"
   worker_pattern="$(printf '%s' "$entry" | jq -r '.worker_path_pattern')"
+  worker_allowed="$(printf '%s' "$entry" | jq -r --arg worker "$worker" '
+    if (.workers == null or .workers == []) then true
+    elif (.workers | type) == "array" then (.workers | index($worker) != null)
+    else error("reflected_repositories[].workers must be an array")
+    end
+  ')" || rw_die "resolve-workspace: reflected repository 'workers' must be an array of worker aliases"
   i=$((i + 1))
 
   [ "$cfg_identity" = "$identity" ] || continue
+  [ "$worker_allowed" = "true" ] || continue
 
   # Patterns look like "~/Developer/x-trees/x-<N>"; split on the <N>
   # placeholder into literal prefix/suffix and match cwd against those
