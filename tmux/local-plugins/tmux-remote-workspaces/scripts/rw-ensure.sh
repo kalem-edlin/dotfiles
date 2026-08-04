@@ -117,6 +117,13 @@ worker_home="$(printf '%s' "$preflight_json" | jq -r '.home')"
 "$RW_PLUGIN_DIR/libexec/reconcile-worker" --worker "$worker" \
   ${existing_endpoint:+--exclude "$existing_endpoint"} </dev/null || true
 
+# Local-pane-death sweep (smoke-journey Bucket 2 finding): endpoints whose
+# LOCAL pane was killed without `prefix q` have no other cleanup path --
+# attach-loop died with the pane. Same best-effort posture as above; the
+# calling pane is alive by definition, so this ensure's own endpoint (if
+# any) is never a candidate.
+"$RW_PLUGIN_DIR/libexec/reconcile-local" </dev/null || true
+
 if [ "$reattach" = "true" ]; then
   endpoint_id="$existing_endpoint"
   endpoint_json="$(rw_read_endpoint "$endpoint_id")"

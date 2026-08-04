@@ -72,7 +72,22 @@ if rw_config_valid; then
       # shellcheck disable=SC2016
       treemux_missing="$(rw_ssh_batch "$worker_alias" "$(rw_ssh_status_timeout)" '
         missing=""
-        command -v nvim >/dev/null 2>&1 || missing="${missing} nvim"
+        if command -v nvim >/dev/null 2>&1; then
+          nvim_version="$(nvim --version 2>/dev/null | sed -n "1s/^NVIM v//p")"
+          nvim_major="${nvim_version%%.*}"
+          nvim_minor="${nvim_version#*.}"
+          nvim_minor="${nvim_minor%%.*}"
+          case "$nvim_major:$nvim_minor" in
+            *[!0-9:]* | :* | *:) missing="${missing} nvim>=0.10(version-unreadable)" ;;
+            *)
+              if [ "$nvim_major" -eq 0 ] && [ "$nvim_minor" -lt 10 ]; then
+                missing="${missing} nvim>=0.10(found:$nvim_version)"
+              fi
+              ;;
+          esac
+        else
+          missing="${missing} nvim>=0.10(missing)"
+        fi
         command -v lsof >/dev/null 2>&1 || missing="${missing} lsof"
         [ -x "$HOME/.config/tmux/plugins/treemux/scripts/toggle.sh" ] || missing="${missing} treemux"
         printf "%s\n" "${missing# }"
@@ -80,7 +95,7 @@ if rw_config_valid; then
       if [ -z "$treemux_missing" ]; then
         pass "worker '$worker_alias': remote Treemux prerequisites are present"
       else
-        note "worker '$worker_alias': remote Treemux unavailable (missing: $treemux_missing; run 'make setup-headless' there)"
+        note "worker '$worker_alias': remote Treemux unavailable (needs: $treemux_missing; run 'make setup-headless' there)"
       fi
     fi
     report=""
@@ -157,6 +172,12 @@ if reconcile_out="$("$SCRIPT_DIR/../libexec/reconcile" --dry-run 2>&1)"; then
   esac
 else
   note "reconcile --dry-run failed to run: $reconcile_out"
+fi
+if reconcile_local_out="$("$SCRIPT_DIR/../libexec/reconcile-local" --dry-run 2>&1)"; then
+  [ -n "$reconcile_local_out" ] || reconcile_local_out="rw reconcile-local: dry-run skipped (no server or no endpoints)"
+  pass "reconcile-local: $reconcile_local_out"
+else
+  note "reconcile-local --dry-run failed to run: $reconcile_local_out"
 fi
 
 echo

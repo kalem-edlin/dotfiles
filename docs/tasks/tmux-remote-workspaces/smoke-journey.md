@@ -262,7 +262,7 @@ Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
   within ≤5 min. Chip age = last save file age, so it counts up
   whenever the server is empty/absent — cosmetic only.
 
-## [ ] Bucket 2 — Drop resilience + idempotent ensure
+## [x] Bucket 2 — Drop resilience + idempotent ensure
 
 1. In the remote pane from Bucket 1, detach the INNER session
    (`tmux detach` typed in the remote shell, or kill the ssh: from
@@ -299,6 +299,20 @@ status still one row.
   recorded pane id is absent from the live local server, guarded by
   endpoint-generation vs server start time so post-crash stale pane
   ids are never swept before rw-post-restore re-stamps them.
+  IMPLEMENTED same day as `libexec/reconcile-local` (approved): closes
+  a registry endpoint only when no live pane carries its @rw-endpoint
+  AND the binding provably belongs to the current server generation
+  (created_at after server start_time, or a restore-reattach success
+  event after it) AND min-age (120s) passed. Wired into every
+  `rw ensure` (best-effort) + `rw doctor` dry-run preview. Verified
+  with synthetic fixtures: current-gen orphan swept (tombstone +
+  events, absent remote kill handled); pre-restart ambiguous endpoint
+  and under-age endpoint both protected; live endpoint spared.
+- Step 2 (Wi-Fi drop) SKIPPED by operator decision — documented in the
+  plugin README "Field-validation status" as not-yet-field-validated,
+  to be validated stochastically through daily use. Step 3 PASS (one
+  endpoint, no reconnect duplicates; the second row was the orphan
+  above, not a duplicate). Bucket closed.
 
 ## [ ] Bucket 3 — Splits inherit remote; close semantics
 
@@ -451,7 +465,7 @@ Report each drill separately before starting the next.
 | 1R | 4/6→FIXED | split rule, close, host/autosave chips PASS; dir chip made live-cwd (set-titles→pane_title); OSC 52 root cause = broken Ms override in tmux.conf, replaced with terminal-features clipboard; re-run as 1R2 |
 | 1R2 | PASS | all steps PASS; bonus: existing-repo workspace materialization observed; new defect: remote nvim yank used worker pbcopy, fixed via SSH-guarded OSC 52 provider → 1R3 |
 | 1R3 | PASS | yank, paste (no-hang fix e7145f8), picker rework, sessionx keys all PASS; 520m chip + detached-save timer resolved (already installed Aug 2, live-verified) |
-| 2 | — | |
+| 2 | PASS | detach-reattach + no-duplicate PASS; Wi-Fi drill skipped (README field-validation note); found+fixed local-pane-death orphan class (reconcile-local sweep) |
 | 3 | — | |
 | 4 | — | |
 | 5 | — | |

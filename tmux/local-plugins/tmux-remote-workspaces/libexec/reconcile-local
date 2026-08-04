@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Local-pane-death sweep -- closes endpoints whose LOCAL pane died without
+# `prefix q` (smoke-journey Bucket 2 finding, 2026-08-04: a hard pane kill
+# takes attach-loop down with it, so nothing self-cleans; libexec/reconcile
+# deliberately keeps every registry entry desired; reconcile-worker spares
+# registered endpoints. Result: the endpoint and its detached worker
+# session linger forever). This is the missing third leg: registry entries
+# provably unbacked by any live local pane.
+#
+# Usage: reconcile-local [--min-age <seconds>] [--dry-run]
+#
+# "Provably" is the load-bearing word. The plan's rule stands: a SOFT
+# pane-match failure must never gate an irreversible remote deletion.
+# rw-post-restore.sh never rewrites endpoint files -- it re-stamps live
+# pane @vars only -- so the registry's focus_pane_id is ensure-time cache,
+# stale across any server restart. The authoritative live binding is the
+# pane option @rw-endpoint. An endpoint is closed only when ALL hold:
+#
+#   - the local tmux server answered and listed its panes successfully
+#     (no server / error = zero candidates, never "everything is orphaned");
+#   - no live pane on this server carries @rw-endpoint = its id;
+#   - the endpoint's binding demonstrably belongs to THIS server
+#     generation, one of two proofs:
+#       (a) created_at is AFTER the server's start_time -- rw-ensure bound
+#           it to a pane of this very server, and pane options only vanish
+#           when the pane dies; or
+#       (b) events.jsonl records a restore-reattach success for it AFTER
+#           server start -- rw-post-restore re-bound it under this server.
+#     Endpoints predating the server with no post-restore re-bind are
+#     exactly the ambiguous-restore class the plan protects: left alone
+#     for `rw status`/doctor, never swept.
+#   - min-age (default 120s, RW_LOCAL_RECONCILE_MIN_AGE_SECONDS): rw-ensure
+#     writes the registry entry before stamping pane options, so a
+#     just-born endpoint can look unbound for a moment.
+#
+# Closes go through rw_close_endpoint_core (tombstone-first, exact-match
+# remote kill, close event), </dev/null-guarded per the ssh-drains-stdin
+# bug documented in libexec/reconcile. If the worker is unreachable at
+# close time the registry entry still goes away and the leftover worker
+# session becomes exactly what reconcile-worker sweeps on a later ensure --
+# the two sweeps are self-healing complements.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../scripts/common.sh
+source "$SCRIPT_DIR/../scripts/common.sh"
+
+rw_need_jq
+rw_config_valid || rw_die "reconcile-local: config.json ($RW_CONFIG_FILE) is invalid"
+
+dry_run="false"
+min_age="${RW_LOCAL_RECONCILE_MIN_AGE_SECONDS:-120}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --min-age) min_age="${2:?}"; shift 2 ;;
+    --dry-run) dry_run="true"; shift ;;
+    *) rw_die "reconcile-local: unknown argument: $1" 64 ;;
+  esac
+done
+case "$min_age" in *[!0-9]* | '') rw_die "reconcile-local: --min-age must be a non-negative integer" 64 ;; esac
+
+iso_to_epoch() {
+  # macOS/BSD first (the focus machine), GNU fallback; empty on failure so
+  # callers can treat an unparseable timestamp as "no proof, skip".
+  date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null ||
+    date -u -d "$1" +%s 2>/dev/null || true
+}
+
+endpoints_dir="$(rw_endpoints_dir)"
+[ -d "$endpoints_dir" ] || exit 0
+
+server_start="$(tmux display-message -p '#{start_time}' 2>/dev/null || true)"
+case "$server_start" in *[!0-9]* | '') exit 0 ;; esac # no server/garbled: zero candidates
+
+pane_listing="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)" || exit 0
+[ -n "$pane_listing" ] || exit 0
+
+# Live-bound endpoint ids: every @rw-endpoint carried by a live pane.
+live_ids="$(
+  while IFS= read -r pane_id; do
+    [ -n "$pane_id" ] || continue
+    rw_pane_get "$pane_id" @rw-endpoint
+  done <<<"$pane_listing"
+)"
+
+now_epoch="$(date +%s)"
+start_ts="$(rw_now_epoch)"
+events_file="$(rw_state_dir)/events.jsonl"
+
+orphans=()
+for f in "$endpoints_dir"/*.json; do
+  [ -f "$f" ] || continue
+  id="$(jq -r '.endpoint_id // empty' "$f" 2>/dev/null)"
+  [ -n "$id" ] || continue
+
+  grep -Fqx "$id" <<<"$live_ids" && continue # bound to a live pane -- not ours
+
+  created_at="$(jq -r '.created_at // empty' "$f" 2>/dev/null)"
+  created_epoch="$(iso_to_epoch "$created_at")"
+  case "$created_epoch" in *[!0-9]* | '') continue ;; esac # unparseable: no proof, skip
+
+  [ $((now_epoch - created_epoch)) -ge "$min_age" ] || continue
+
+  eligible="false"
+  if [ "$created_epoch" -gt "$server_start" ]; then
+    eligible="true" # proof (a): born under this server
+  elif [ -f "$events_file" ]; then
+    # proof (b): re-bound under this server by rw-post-restore
+    rebind_ts="$(grep -F '"restore-reattach"' "$events_file" 2>/dev/null |
+      jq -r --arg id "$id" 'select(.endpoint == $id and .outcome == "success") | .ts' 2>/dev/null |
+      tail -n1)"
+    if [ -n "$rebind_ts" ]; then
+      rebind_epoch="$(iso_to_epoch "$rebind_ts")"
+      case "$rebind_epoch" in
+        *[!0-9]* | '') : ;;
+        *) [ "$rebind_epoch" -gt "$server_start" ] && eligible="true" ;;
+      esac
+    fi
+  fi
+  [ "$eligible" = "true" ] || continue # ambiguous-restore class: never swept
+
+  orphans+=("$id")
+done
+
+count="${#orphans[@]}"
+[ "$count" -gt 0 ] || { [ "$dry_run" = "true" ] && echo "rw reconcile-local: dry-run would_close=0 ids=none"; exit 0; }
+
+if [ "$dry_run" = "true" ]; then
+  echo "rw reconcile-local: dry-run would_close=$count ids=${orphans[*]}"
+  exit 0
+fi
+
+for id in ${orphans[@]+"${orphans[@]}"}; do
+  rw_close_endpoint_core "$id" "reconcile:local-pane-departed" "" </dev/null
+done
+
+duration_ms="$(rw_elapsed_ms "$start_ts")"
+rw_log_event "reconcile" "" "" "$duration_ms" "success" "scope=local closed=$count ids=${orphans[*]}"
+echo "rw reconcile-local: closed=$count ids=${orphans[*]}"

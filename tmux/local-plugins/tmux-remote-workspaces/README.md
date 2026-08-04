@@ -60,12 +60,13 @@ directly after setup. It can still be invoked by full path,
 - New windows stay local by default -- unchanged.
 
 Remote Treemux is consume-never-provision like the rest of this plugin. The
-worker must already have the dotfiles, Neovim, and the Treemux TPM plugin from
-`make setup-headless`, with its tmux config loaded. Treemux's directory watcher
-also requires `lsof` (included explicitly by Linux headless setup). If any of
-those are absent, the binding reports the missing worker-side setup and does
-not open a local sidebar that could be mistaken for the remote filesystem;
-`rw doctor` reports these optional-per-endpoint prerequisites per worker.
+worker must already have the dotfiles, Neovim >= 0.10, and the Treemux TPM
+plugin from `make setup-headless`, with its tmux config loaded. Treemux's
+directory watcher also requires `lsof` (included explicitly by Linux headless
+setup). If any of those are absent, the binding reports the missing worker-side
+setup and does not open a local sidebar that could be mistaken for the remote
+filesystem; `rw doctor` reports these optional-per-endpoint prerequisites per
+worker.
 
 ## How a pane becomes remote
 
@@ -131,6 +132,7 @@ TMUX_REMOTE_WORKSPACES_CONFIG=/path/to/alt-config.json \
   ],
   "reflected_repositories": [{
     "identity": "github.com/kalem-edlin/content-engine",
+    "workers": ["mini"],
     "focus_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>",
     "worker_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>"
   }],
@@ -141,18 +143,22 @@ TMUX_REMOTE_WORKSPACES_CONFIG=/path/to/alt-config.json \
 
 Adding a reflected repository is config-only: append an entry with its
 normalized `identity` (host/owner/repo, from `git remote get-url origin`,
-never `.git`, always lowercase) and the two path patterns. `<N>` is the only
-supported placeholder (a numbered slot); `~` in either pattern is substituted
-for the relevant host's own `$HOME` at resolution time -- never an absolute
-username. Patterns are matched with plain prefix/suffix string comparison
-(see `scripts/resolve-workspace.sh`), not regex, so path metacharacters in a
-pattern are never a hazard.
+never `.git`, always lowercase), optional worker-alias allowlist, and the two
+path patterns. Omitting `workers` (or using an empty array) reflects the
+repository to every configured worker; a non-empty array limits reflection to
+those worker aliases, allowing other workers to use ad hoc placement. `<N>` is
+the only supported placeholder (a numbered slot); `~` in either pattern is
+substituted for the relevant host's own `$HOME` at resolution time -- never an
+absolute username. Patterns are matched with plain prefix/suffix string
+comparison (see `scripts/resolve-workspace.sh`), not regex, so path
+metacharacters in a pattern are never a hazard.
 
 Workspace resolution order (`--workspace auto`, the default):
 
 1. Not a git repo (no `origin` remote) -> `plain`, worker's `$HOME`.
-2. Repo matches a configured reflected pattern (cwd is the slot dir or
-   beneath it) -> `reflected`, no clone, no filesystem changes.
+2. Repo matches a configured reflected pattern for the selected worker (cwd
+   is the slot dir or beneath it) -> `reflected`, no clone, no filesystem
+   changes.
 3. Repo, not reflected, but a live-registry `adhoc` endpoint already exists
    for the same normalized identity on the same worker -> reuse its path.
 4. Otherwise -> fresh `adhoc` checkout under `workspace_root`, cloned with
@@ -225,3 +231,39 @@ and wired onto the same `@resurrect-hook-post-restore-all` chain this
 plugin's `tmux-remote-workspaces.tmux` already appends to (after
 `rw-post-restore.sh`). `rw doctor` also runs it with `--dry-run` for a
 report-only preview.
+
+Two ensure-time companions complete the sweep triangle (each covers a
+class the others deliberately spare):
+
+- `libexec/reconcile-worker` — worker-side zombies: `rw-<focus-id>-*`
+  sessions a worker's own continuum restore resurrected after their
+  laptop endpoints were closed. Registry membership is authoritative
+  (registered = spared); min-age vs the ensure create-to-registry gap,
+  worker-clock ages, attached sessions never touched, unreachable =
+  zero candidates, exact-match kills.
+- `libexec/reconcile-local` — local-pane-death orphans: registry
+  endpoints whose LOCAL pane was killed without `prefix q` (attach-loop
+  dies with the pane, so nothing self-cleans). Closes only on proof the
+  binding belongs to the CURRENT local server generation (created after
+  server start, or restore-reattached after it per events.jsonl) — the
+  ambiguous-post-restore class `reconcile` protects is never eligible.
+  Min-age guards the ensure registry-write-to-pane-stamp gap.
+
+Both run best-effort at every `rw ensure`; `rw doctor` previews both
+dry-run.
+
+## Field-validation status
+
+Proven in lane testing but NOT yet organically encountered/validated in
+the field (validate stochastically as daily use continues; see
+docs/tasks/tmux-remote-workspaces/smoke-journey.md for what HAS been
+smoke-verified):
+
+- Network-loss drop resilience (Wi-Fi off/on mid-attach): attach-loop's
+  ssh ServerAlive timeout + backoff path. Inner-detach reattach IS
+  smoke-verified (Bucket 2); a real network drop is not — operator
+  declined the synthetic drill.
+- `reconcile-local`'s events.jsonl eligibility path (proof via
+  restore-reattach after a server restart) — synthetic fixtures proved
+  the created-after-start path and both protective guards; the
+  post-restore rebind path awaits a real crash + pane-death sequence.
