@@ -104,10 +104,13 @@ clipboard paste (this closes the OSC 52 item).
   rw-* session; pre-patch you'd have been yanked onto a restored one).
   Side effect: the restore resurrected the previously-closed endpoint
   session `rw-d157af95-29f40b78` from the worker's last save file as a
-  zombie (no laptop endpoint). Killed manually; a worker-side save
-  cycle drops closed endpoints from the save file within ~5m, so this
-  only bites when the server dies inside that window. Watch-item, not
-  chased further.
+  zombie (no laptop endpoint). Killed manually. UPDATE 2026-08-04: the
+  "save cycle drops zombies within ~5m" assumption is WRONG — the next
+  save simply captured the zombie alongside the live session, so
+  zombies persist across restores until manually killed (second
+  occurrence killed 02:59). Proper fix: worker-side reconcile at ensure
+  (kill `rw-<focus-id>-*` sessions absent from the laptop registry) —
+  open TODO.
 - FAIL → FIXED: dir chip stuck on `admin` after `cd ~/Developer` in the
   remote pane. `@rw-workspace` is a static ensure-time value. Fix:
   endpoint sessions now set `set-titles on` +
@@ -201,6 +204,23 @@ the nvim change (deployed to both workers).
    ctrl-p UP.
 
 Report: yank PASS/FAIL, paste behavior, picker flow, sessionx keys.
+
+### Bucket 1R3 findings (2026-08-04, partial)
+
+- PASS: remote nvim yank → laptop clipboard. sessionx directions PASS.
+- INFO (autosave chip showed 21m on reconnect): worker continuum saves
+  are status-line driven, so they only tick while a client is ATTACHED.
+  Detached/idle worker servers hold sessions live in memory but write
+  no saves; the chip age therefore counts from the end of the last
+  connection. Verified on mini: last-save gaps exactly track attach
+  windows, and a fresh save landed ~1m after reattach (02:58). Risk is
+  narrow: a worker crash while detached restores last-attach state.
+  Matters more once detached remote agents mutate state (Bucket 6+);
+  candidate fix = launchd/systemd timer driving periodic saves — open
+  TODO, operator decision.
+- Restore-zombie recurred (see 1R findings UPDATE): killed
+  `rw-d157af95-29f40b78` exact-match 02:59; worker-side ensure-time
+  reconcile is the systemic fix.
 
 ## [ ] Bucket 2 — Drop resilience + idempotent ensure
 
