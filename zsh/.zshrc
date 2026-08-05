@@ -472,9 +472,15 @@ _fzf_comprun() {
   esac
 }
 
-# Set up fzf key bindings (Ctrl+R history, Ctrl+T files)
+# Set up fzf key bindings (Ctrl+R history, Ctrl+T files). `--zsh` needs
+# fzf >= 0.48; older distro packages (Debian 0.44) ship the same script as
+# a doc example instead.
 if command -v fzf >/dev/null 2>&1; then
-  source <(fzf --zsh)
+  if fzf --zsh >/dev/null 2>&1; then
+    source <(fzf --zsh)
+  elif [ -r /usr/share/doc/fzf/examples/key-bindings.zsh ]; then
+    source /usr/share/doc/fzf/examples/key-bindings.zsh
+  fi
 fi
 
 # Tab completion with visual menu
