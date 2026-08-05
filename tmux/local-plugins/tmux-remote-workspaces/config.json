@@ -14,7 +14,7 @@
   "reflected_repositories": [
     {
       "identity": "github.com/kalem-edlin/content-engine",
-      "workers": ["mini"],
+      "workers": ["mini", "agents-roll"],
       "focus_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>",
       "worker_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>"
     }
