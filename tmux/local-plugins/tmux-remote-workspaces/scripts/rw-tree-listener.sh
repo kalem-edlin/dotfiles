@@ -12,8 +12,8 @@
 # waiting tree nvim polls to complete the open.
 #
 # Lifetime: exits as soon as the tree endpoint is tombstoned/deregistered
-# (toggle-off, `prefix q`, reconcile). Restart limitation: after a laptop
-# tmux restore nothing respawns this loop -- toggle the tree off/on.
+# (toggle-off, `prefix q`, reconcile). attach-loop re-ensures a live
+# listener per iteration (pidfile liveness), covering laptop restores.
 #
 # Usage: rw-tree-listener.sh <tree-endpoint-id>
 

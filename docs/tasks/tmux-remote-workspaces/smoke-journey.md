@@ -355,7 +355,8 @@ should have survived (or vice versa).
   STOCK kill-window (removing the bind reverts to a hard kill that leaks
   the Bucket-2 orphan class); teardown is shared with rw-close.sh.
 
-## [ ] Bucket 4 — Remote Treemux
+## [x] Bucket 4 — Remote Treemux
+### (2026-08-05: operator retest of tree-as-endpoint v2 — ALL PASS)
 
 1. Ensure a remote pane on mini (any mode). `prefix Tab`.
 2. Expect: Treemux sidebar opens INSIDE the worker-side session, rooted
@@ -449,8 +450,8 @@ confusion?
   as rw-post-restore does (which stamps @rw-* pane options first, its
   lines 212-220, so the restore path is covered end-to-end), listener
   returned via pidfile; the pidfile is trap-removed on listener exit.
-  Remaining nit: upstream watcher (tree auto-refresh) still not spawned;
-  neo-tree R refreshes manually.
+  Remaining nit at the time: upstream watcher (tree auto-refresh) not
+  spawned; closed 2026-08-05 via use_libuv_file_watcher (see PASS entry).
 - INCIDENT 3 (2026-08-05, close-cycle + latency redesign): with the parse
   bug fixed, operator retested and hit two close bugs: (a) `q` on the
   NON-sidebar worker pane closed the sidebar; (b) `q` after the sidebar
@@ -492,6 +493,34 @@ confusion?
   lies). Worker note: mini offline is fine — ensure-time sweeps only
   contact the TARGET worker (3s timeout); only `rw doctor` and
   post-restore reconcile ping all workers and will stall ~8s on mini.
+
+- PASS (2026-08-05, operator retest, closes the bucket): full v2 journey
+  on agents-roll — tree opens in own pane, stock h/l nav, `, .` resize,
+  idle-shell open lands in shell pane, busy-shell open mints editor pane,
+  `q` on shell orphans the tree (survives), open-from-orphan splits
+  editor off the tree, Tab/q closes. Operator: "All of these performed
+  correctly and to my satisfaction."
+- FOLLOW-UP (2026-08-05, operator findings from the retest, both fixed):
+  (1) tree refresh — coordinator's "neo-tree R" advice was right but
+  useless in practice (refresh is silent; `r`=rename, `<C-r>` is OIL's
+  refresh, not neo-tree's). Real fix: treemux_init.lua wrapper now
+  injects `use_libuv_file_watcher = true` (inotify, worker-local, zero
+  ssh — replaces upstream's unspawned watch_and_update.sh) plus an
+  explicit `R = refresh` mapping. Verified live on agents-roll scratch
+  tree: touched gamma.txt behind neo-tree's back, appeared in <3s with
+  ZERO keypresses; R confirmed mapped in the tree buffer. Wrapper
+  deployed to worker (~/.config/tmux/treemux_init.lua; local copy is a
+  hardlink to the repo file). (2) `prefix e` picker slow to show
+  reachability when a host is down (operator report, mini off): measured
+  8s — `~/.ssh/mini-lan-available` runs at ssh CONFIG evaluation and
+  mDNS resolution of the dead .local name blocks ~5s (nc -G/-w bound
+  connect, NOT resolution), then +3s tailscale ConnectTimeout; and the
+  probe printed nothing until ALL workers settled. Fixed both: watchdog
+  bounds the LAN check to 1.5s (stderr-silenced so the shell's
+  "Terminated" notice can't leak into ssh output), and rw-picker probe
+  now streams each worker's line as its probe finishes — reachable
+  workers render in ~a round trip (measured: agents-roll instant, mini
+  offline row +4.3s later, was 8s for everything).
 
 ## [ ] Bucket 5 — Workspace handoff / return (ad hoc, dirty state)
 
@@ -612,7 +641,7 @@ Report each drill separately before starting the next.
 | 1R3 | PASS | yank, paste (no-hang fix e7145f8), picker rework, sessionx keys all PASS; 520m chip + detached-save timer resolved (already installed Aug 2, live-verified) |
 | 2 | PASS | detach-reattach + no-duplicate PASS; Wi-Fi drill skipped (README field-validation note); found+fixed local-pane-death orphan class (reconcile-local sweep) |
 | 3 | PASS | splits mint own endpoints; prefix q, prefix & window-close, `rw close --no-kill-pane` all clean (tombstones + remote=killed verified); UX notes: want `--endpoint` alias, CLI default reason misleads |
-| 4 | — | |
+| 4 | FAIL→REDESIGNED→PASS | dispatch v1 unusable (nav/resize/close + latency) → tree-as-endpoint v2 (operator design) → full retest PASS; follow-ups: libuv file watcher (auto-refresh), picker probe streams + mini LAN check bounded 1.5s |
 | 5 | — | |
 | 6 | — | |
 | 7 | — | |

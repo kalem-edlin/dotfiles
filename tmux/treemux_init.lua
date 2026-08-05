@@ -86,6 +86,7 @@ source, neo_tree_filter_count = source:gsub(
   'filesystem = {%s*\n%s*hijack_netrw_behavior = "disabled",',
   [[filesystem = {
           hijack_netrw_behavior = "disabled",
+          use_libuv_file_watcher = true,
           filtered_items = {
             visible = true,
             hide_dotfiles = false,
@@ -141,6 +142,7 @@ local neo_tree_git_mapping_count
 source, neo_tree_git_mapping_count = source:gsub(
   '%["q"%] = "noop",',
   [[["q"] = "noop",
+              ["R"] = "refresh",
               ["z"] = "noop",
               ["zz"] = { function() vim.cmd("normal! zz") end, desc = "center row" },
               ["zt"] = { function() vim.cmd("normal! zt") end, desc = "row to top" },

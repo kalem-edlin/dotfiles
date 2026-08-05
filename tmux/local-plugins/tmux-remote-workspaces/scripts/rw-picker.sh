@@ -47,30 +47,23 @@ list_workers() {
     done
 }
 
+# Each probe prints its own finished line (one printf, atomic well under
+# PIPE_BUF) so fzf's reload streams results in completion order: reachable
+# workers appear in ~a round trip instead of every row waiting out the
+# slowest host's timeout (a downed mini held the whole list hostage for
+# ~8s, 2026-08-05).
 probe_workers() {
-  local tmpdir i alias platform notes status
-  local aliases=() platforms=() notes_arr=()
-  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/rw-picker.XXXXXX")"
-  i=0
+  local alias platform notes
   while IFS=$'\t' read -r alias platform notes; do
-    aliases+=("$alias")
-    platforms+=("$platform")
-    notes_arr+=("$notes")
     (
       if rw_ssh_batch "$alias" "$(rw_ssh_status_timeout)" true >/dev/null 2>&1; then
-        printf 'online' >"$tmpdir/$i"
+        worker_line "$alias" "$platform" "online" "$notes"
       else
-        printf 'offline' >"$tmpdir/$i"
+        worker_line "$alias" "$platform" "offline" "$notes"
       fi
     ) &
-    i=$((i + 1))
   done < <(jq -r '.workers[] | [.alias, .platform, (.notes // "")] | @tsv' "$RW_CONFIG_FILE")
   wait
-  for ((i = 0; i < ${#aliases[@]}; i++)); do
-    status="$(cat "$tmpdir/$i" 2>/dev/null || printf '?')"
-    worker_line "${aliases[$i]}" "${platforms[$i]}" "$status" "${notes_arr[$i]}"
-  done
-  \rm -rf "$tmpdir"
 }
 
 pick() {
