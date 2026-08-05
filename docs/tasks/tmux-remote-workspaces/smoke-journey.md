@@ -408,6 +408,38 @@ confusion?
   round-trip to agents-roll included; bindings re-armed live. During
   the outage the coordinator live-reverted all nine keys to stock to
   unblock the operator, then re-armed after the verified fix.
+- REDESIGN (2026-08-05, operator-driven, supersedes the dispatch layer
+  entirely): tree-as-endpoint. Operator proposed the architecture after
+  INCIDENT 3: the Treemux tree runs in its OWN worker session shown in its
+  OWN local pane, so no endpoint's worker window ever has >1 pane -- nav/
+  resize/close revert to stock local tmux (rw-dispatch.sh + the
+  @rw-sidebar-open hint DELETED, all 9 bindings back to stock; q goes
+  straight to rw-close). New pieces: rw-treemux.sh v2 (Tab toggles a
+  role=tree endpoint linked via tree_of; deploys nvim/rw-tree-init.lua to
+  the worker), the shim (monkeypatches nvim_tree_remote.remote_nvim_open --
+  the single funnel for all neo-tree/nvim-tree opens -- with the operator's
+  3-case policy: live editor -> RPC; idle shell -> takeover, no split;
+  busy/orphan -> request a local editor pane), rw-tree-listener.sh (polls
+  the request file ~1s while tree open; mints role=tree-editor endpoints),
+  rw-tree-pane.sh (pane bootstrap -> attach-loop). Orphaning is a FEATURE:
+  closing the shell leaves the tree standing (operator requirement).
+  Verified end-to-end on agents-roll scratch sessions (never the live
+  landscape): tree opens+renders remote root; case-b takeover put Brewfile
+  in the shell pane with window_panes=1; case-a RPC'd Makefile into the
+  same editor; case-c (busy shell) minted editor endpoint via listener,
+  split 70% above shell; case-d (orphaned tree) minted editor split right
+  of tree; toggle-off/q/quit-nvim all close cleanly (registry+worker
+  sessions verified empty after). Bugs found+fixed during verification:
+  (1) plugin module __index errors on unknown keys -> rawget/rawset for
+  the patch flag; (2) UPSTREAM takeover types `--listen` as its own
+  send-keys argument which tmux 3.4 rejects -> shim types the command
+  itself as one literal `-l --` chunk; (3) listener marker landed on the
+  request's unterminated line -> own-line marker; (4) `tmux
+  display-message -pt <dead-pane>` evaluates the format anyway (exit 0!)
+  -> pane liveness must exact-match `list-panes -a` (ghost-pane takeover
+  was eating case-d opens). Known limitation: listener not respawned by
+  laptop restore -> toggle tree off/on. Watcher (auto-refresh) not
+  spawned; neo-tree R refreshes manually.
 - INCIDENT 3 (2026-08-05, close-cycle + latency redesign): with the parse
   bug fixed, operator retested and hit two close bugs: (a) `q` on the
   NON-sidebar worker pane closed the sidebar; (b) `q` after the sidebar

@@ -43,27 +43,16 @@ directly after setup. It can still be invoked by full path,
 
 ## Keybindings (tmux.reset.conf)
 
-- `prefix q`: for a pane with a live `@rw-endpoint`, `rw-dispatch.sh close`
-  uses focused-pane semantics: with a worker-side sidebar/split open it
-  kills just the ACTIVE worker pane (plain `kill-pane`, never treemux's
-  toggle.sh -- upstream never unsets its registration options, and routing
-  close through it produced an uncloseable reopen cycle, 2026-08-05);
-  a lone worker pane closes the whole endpoint through `rw close`. Plain
-  panes keep unchanged `kill-pane`.
-- `prefix h/j/k/l` (nav) and `prefix , . - =` (resize): on a remote-backed
-  pane these forward the equivalent tmux command into the worker session
-  over the multiplexed ssh channel (`rw-dispatch.sh`) -- the worker-side
-  Treemux sidebar is otherwise invisible to the local server, so nav,
-  resize, and close could never reach it (smoke-journey Bucket 4 finding).
-  The ssh round-trip (~150ms) is only paid while a sidebar is open: the
-  local pane option `@rw-sidebar-open`, maintained by `rw-treemux.sh` from
-  the worker's post-toggle pane count and self-healed by the dispatcher,
-  gates forwarding -- without it every key runs the stock local command in
-  ~30ms with zero ssh. Nav at the worker window's edge falls back to LOCAL
-  `select-pane`, so the cursor crosses out of the remote rectangle into the
-  local layout seamlessly. Any failure (worker unreachable, session gone)
-  degrades to the stock local command; close's failure path degrades to
-  `rw close`, the exact pre-dispatch behavior.
+- `prefix q`: for a pane with a live `@rw-endpoint`, closes that endpoint
+  through the lifecycle-aware `rw close` (tombstone, remote teardown, then
+  the local pane). Tree and editor endpoints are ordinary endpoints, so q
+  closes exactly the pane under the cursor. Plain panes keep `kill-pane`.
+- `prefix h/j/k/l` (nav) and `prefix , . - =` (resize): STOCK local
+  commands, even on remote-backed panes. The tree-as-endpoint design
+  guarantees every endpoint's worker window is single-pane, so there is
+  never a worker-side split to reach -- no ssh in any keystroke path. (The
+  2026-08-05 rw-dispatch forwarding layer this replaced cost ~150ms per
+  forwarded key and produced two operator-facing incidents; it is gone.)
 - `prefix \` / `prefix /`: unchanged local splits, *unless* the source pane
   is remote-backed, in which case the new pane inherits the same
   worker+workspace and becomes its own endpoint via `rw ensure` (new
@@ -72,10 +61,28 @@ directly after setup. It can still be invoked by full path,
   before killing it (`rw-close-window.sh`), behind the same confirmation
   prompt tmux ships by default.
 - `prefix Tab`: opens ordinary local Treemux for a local pane. For a
-  remote-backed pane it invokes Treemux inside that pane's worker-side endpoint
-  tmux session. Treemux therefore roots itself at the active remote pane's
-  directory, and file, Git, editor, and tmux-split actions all execute on the
-  worker. It never substitutes the outer pane's local `#{pane_current_path}`.
+  remote-backed SHELL endpoint it toggles a TREE ENDPOINT (tree-as-endpoint,
+  2026-08-05): a dedicated worker-side session running the tree Neovim
+  (deployed `nvim/rw-tree-init.lua` as its init), shown in its own LOCAL
+  pane split left of the shell (width 40). The tree roots itself at the
+  shell pane's remote directory; every filesystem/git action runs on the
+  worker. Tab on the tree pane closes it. Opening a file follows a
+  three-way policy implemented in the deployed shim, which intercepts
+  `nvim_tree_remote.remote_nvim_open` (the single funnel all neo-tree /
+  nvim-tree opens go through):
+    1. a previously-established editor nvim is alive -> RPC the file in;
+    2. the associated shell pane is idle -> take it over with
+       `nvim --listen <sock>` (the worker window never gains a split);
+    3. shell busy or absent -> the shim writes a request file the
+       focus-side `rw-tree-listener.sh` polls (~1s, only while the tree is
+       open); the listener mints an EDITOR ENDPOINT -- its own worker
+       session running `nvim --listen`, its own local pane split above the
+       shell (or right of an orphaned tree) -- and publishes its socket
+       back for the RPC open.
+  ORPHANING IS ALLOWED: closing the shell endpoint leaves the tree standing
+  as a normal remote-backed pane; its next open mints an editor endpoint
+  beside it. Known limitation: after a laptop tmux restore the listener is
+  not respawned -- toggle the tree off/on to restore busy/orphan opens.
 - New windows stay local by default -- unchanged.
 
 Remote Treemux is consume-never-provision like the rest of this plugin. The
