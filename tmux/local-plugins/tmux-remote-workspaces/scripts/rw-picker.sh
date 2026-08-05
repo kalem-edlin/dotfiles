@@ -177,7 +177,28 @@ pick_return() {
   # With no tty on stdin, that final exec hits EOF and exits immediately
   # instead, so the popup closes on its own (display-popup -E) right after
   # rw-return.sh finishes its real work.
-  "$SCRIPT_DIR/rw-return.sh" --pane "$origin_pane" </dev/null
+  rw_pick_run_visible "rw return" \
+    "$SCRIPT_DIR/rw-return.sh" --pane "$origin_pane" </dev/null
+}
+
+# Run the handed command with output live in the popup AND captured; on
+# failure, park the tail of that output in a long-lived display-message.
+# display-popup -E closes the popup the instant the command exits, so a
+# refusal (version policy, preflight, divergence gate) otherwise just
+# flashes and vanishes -- the operator watched a silent empty box do
+# nothing (2026-08-05, agent_version_blocked:claude was invisible).
+rw_pick_run_visible() {
+  local label="$1" out_file status
+  shift
+  out_file="$(mktemp "${TMPDIR:-/tmp}/rw-picker-run.XXXXXX")"
+  "$@" 2>&1 | tee "$out_file"
+  status=${PIPESTATUS[0]}
+  if [ "$status" -ne 0 ]; then
+    tmux display-message -d 10000 \
+      "$label failed: $(tail -n 3 "$out_file" | tr '\n' ' ' | cut -c1-300)"
+  fi
+  \rm -f "$out_file"
+  return "$status"
 }
 
 # --- Intent 2: plain shell prompt -> original ensure flow, unchanged ------
@@ -215,7 +236,8 @@ pick_handoff() {
   # rw-handoff.sh's own foreign-pane handling (its `--pane` != $TMUX_PANE
   # branch, which now also matches nvim/vim/vi) for exactly how the pane
   # ends up attached; this picker does not attach it.
-  "$SCRIPT_DIR/rw-handoff.sh" --worker "$alias" --pane "$origin_pane"
+  rw_pick_run_visible "rw handoff" \
+    "$SCRIPT_DIR/rw-handoff.sh" --worker "$alias" --pane "$origin_pane"
 }
 
 pick() {
