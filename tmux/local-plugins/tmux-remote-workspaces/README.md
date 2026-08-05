@@ -81,8 +81,9 @@ directly after setup. It can still be invoked by full path,
        back for the RPC open.
   ORPHANING IS ALLOWED: closing the shell endpoint leaves the tree standing
   as a normal remote-backed pane; its next open mints an editor endpoint
-  beside it. Known limitation: after a laptop tmux restore the listener is
-  not respawned -- toggle the tree off/on to restore busy/orphan opens.
+  beside it. The listener is self-healing: attach-loop re-ensures it (via
+  the listener's pidfile) on every attach/reconnect, which covers laptop
+  restores and listener crashes without any restore-path coupling.
 - New windows stay local by default -- unchanged.
 
 Remote Treemux is consume-never-provision like the rest of this plugin. The

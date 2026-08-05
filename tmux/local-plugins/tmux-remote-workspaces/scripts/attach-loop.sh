@@ -190,6 +190,22 @@ while true; do
   remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path')"
   session_name="$(rw_session_name "$endpoint_id")"
 
+  # Tree endpoints have a focus-side companion (rw-tree-listener.sh) that
+  # answers the worker shim's "need an editor pane" requests. It is a plain
+  # background process, so a laptop restore respawns this loop but not it --
+  # ensure it here, on attach and on every reconnect. Liveness is judged by
+  # the listener's own pidfile, never pgrep -f: unrelated command lines
+  # that mention the script name would false-positive and suppress the
+  # spawn (2026-08-05). The listener dedups itself, so a redundant spawn
+  # is harmless.
+  if [ "$(printf '%s' "$endpoint_json" | jq -r '.role // empty')" = "tree" ]; then
+    listener_pid="$(cat "$(rw_state_dir)/tree-listener-$endpoint_id.pid" 2>/dev/null || true)"
+    if [ -z "$listener_pid" ] || ! kill -0 "$listener_pid" 2>/dev/null ||
+      ! ps -p "$listener_pid" -o args= 2>/dev/null | grep -q "rw-tree-listener"; then
+      nohup "$SCRIPT_DIR/rw-tree-listener.sh" "$endpoint_id" >/dev/null 2>&1 &
+    fi
+  fi
+
   event="attach"
   is_first_iteration="false"
   if [ "$attempt" -eq 0 ]; then

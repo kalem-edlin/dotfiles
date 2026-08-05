@@ -437,9 +437,20 @@ confusion?
   request's unterminated line -> own-line marker; (4) `tmux
   display-message -pt <dead-pane>` evaluates the format anyway (exit 0!)
   -> pane liveness must exact-match `list-panes -a` (ghost-pane takeover
-  was eating case-d opens). Known limitation: listener not respawned by
-  laptop restore -> toggle tree off/on. Watcher (auto-refresh) not
-  spawned; neo-tree R refreshes manually.
+  was eating case-d opens).
+  FOLLOW-UP (2026-08-05, operator challenge "why isn't the listener
+  respawned?"): closed -- attach-loop now re-ensures its tree's listener
+  on every attach/reconnect, judged by the listener's own PIDFILE, never
+  `pgrep -f` (a pgrep gate false-positived on ANY process whose argv
+  mentioned the script name -- including the verifying shell itself --
+  and silently suppressed the spawn; pidfile + write-then-reread
+  handshake is immune and dedups concurrent spawns). Verified live:
+  killed the listener, respawned the tree pane into attach-loop exactly
+  as rw-post-restore does (which stamps @rw-* pane options first, its
+  lines 212-220, so the restore path is covered end-to-end), listener
+  returned via pidfile; the pidfile is trap-removed on listener exit.
+  Remaining nit: upstream watcher (tree auto-refresh) still not spawned;
+  neo-tree R refreshes manually.
 - INCIDENT 3 (2026-08-05, close-cycle + latency redesign): with the parse
   bug fixed, operator retested and hit two close bugs: (a) `q` on the
   NON-sidebar worker pane closed the sidebar; (b) `q` after the sidebar

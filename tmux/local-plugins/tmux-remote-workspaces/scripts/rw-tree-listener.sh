@@ -28,6 +28,24 @@ rw_need_jq
 
 tree_id="${1:?rw-tree-listener: tree endpoint id required}"
 
+# Single instance per tree, via pidfile handshake -- NOT pgrep -f: any
+# process whose argv merely mentions this script+id (an orchestrating
+# shell, a grep) matches pgrep and either kills a fresh listener here or
+# suppresses the spawn in attach-loop (found 2026-08-05 when the test
+# harness's own command line matched). attach-loop re-ensures the listener
+# on every attach/reconnect, so concurrent spawns are expected; the
+# write-then-reread settles races (last writer wins, the loser exits).
+pid_file="$(rw_state_dir)/tree-listener-$tree_id.pid"
+existing="$(cat "$pid_file" 2>/dev/null || true)"
+if [ -n "$existing" ] && kill -0 "$existing" 2>/dev/null &&
+  ps -p "$existing" -o args= 2>/dev/null | grep -q "rw-tree-listener"; then
+  exit 0
+fi
+printf '%s' "$$" >"$pid_file"
+sleep 0.2
+[ "$(cat "$pid_file" 2>/dev/null)" = "$$" ] || exit 0
+trap 'rm -f "$pid_file"' EXIT
+
 local_pane_for_endpoint() {
   tmux list-panes -a -F '#{pane_id} #{@rw-endpoint}' 2>/dev/null |
     awk -v id="$1" '$2 == id { print $1; exit }'
