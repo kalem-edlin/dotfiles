@@ -411,12 +411,27 @@ fi
 export FZF_COMPLETION_TRIGGER='**'
 export FZF_COMPLETION_OPTS='--border --info=inline'
 
+# selected-fg/selected-bg colors landed in fzf 0.55.0 -- the apt-installed
+# fzf on the Linux worker predates that and errors "invalid color
+# specification" on EVERY interactive shell when it's passed unconditionally
+# (2026-08-05). Gate just that one color spec on the installed version:
+# cheap (one `fzf --version` call), zsh-native compare via `sort -V` (no
+# bc/python needed, portable to the worker's coreutils too).
+FZF_SELECTED_BG_OPT=""
+if command -v fzf >/dev/null 2>&1; then
+  fzf_version="$(fzf --version 2>/dev/null | awk '{print $1}')"
+  if [[ -n "$fzf_version" ]] &&
+    [[ "$(printf '%s\n%s\n' "$fzf_version" "0.55.0" | sort -V | head -n1)" == "0.55.0" ]]; then
+    FZF_SELECTED_BG_OPT=" --color=selected-bg:#45475a"
+  fi
+  unset fzf_version
+fi
+
 # Catppuccin Mocha theme for fzf
 export FZF_DEFAULT_OPTS=" \
 --color=bg+:#313244,bg:#1e1e2e,spinner:#f5e0dc,hl:#f38ba8 \
 --color=fg:#cdd6f4,header:#f38ba8,info:#cba6f7,pointer:#f5e0dc \
---color=marker:#b4befe,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8 \
---color=selected-bg:#45475a \
+--color=marker:#b4befe,fg+:#cdd6f4,prompt:#cba6f7,hl+:#f38ba8${FZF_SELECTED_BG_OPT} \
 --height 60% \
 --border rounded \
 --layout reverse \

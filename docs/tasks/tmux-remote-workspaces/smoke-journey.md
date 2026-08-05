@@ -522,7 +522,8 @@ confusion?
   workers render in ~a round trip (measured: agents-roll instant, mini
   offline row +4.3s later, was 8s for everything).
 
-## [ ] Bucket 5 — Workspace handoff / return (ad hoc, dirty state)
+## [x] Bucket 5 — Workspace handoff / return (ad hoc, dirty state)
+### (2026-08-05: PASS on agents-roll — dirty state byte-identical both ways)
 
 Low-stakes scratch repo so mistakes cost nothing:
 
@@ -550,81 +551,162 @@ Low-stakes scratch repo so mistakes cost nothing:
 Report: both `git status` comparisons (exact), placement path chosen on
 mini, any refusal/divergence prompt text.
 
+### Bucket 5 findings (2026-08-05, worker = agents-roll, mini offline)
+
+- PASS: handoff elevated the pane in place to the ad-hoc checkout
+  (`/root/rw-workspaces/<machine-id>/github.com-kalem-edlin-dotfiles`,
+  auto-cloned with the worker's own auth); operator's dirty state
+  (staged Makefile / unstaged README / untracked file) survived handoff,
+  a remote edit, and `rw return --pane %121` BYTE-IDENTICAL both
+  directions, remote edit included. Events: return success generation=2,
+  attach loop exited `returned`, pane back to plain local zsh with all
+  @rw-* options cleared (coordinator-verified).
+- OPERATOR TRAP (coordinator instruction defect, cost one round trip):
+  bucket said "type `rw return`" — but a handed-off pane is a raw PTY
+  into the worker (remote session prefix disabled), so the command ran
+  ON THE WORKER via its own dotfiles install and failed with a
+  misleading "pane %36 has no @rw-endpoint". By design return can NEVER
+  be typed into the handed-off pane; correct form is
+  `rw return --pane <id>` from any other local pane (pane id via
+  `rw status`). Sonnet investigation confirmed zero cross-host guard in
+  rw-return.sh → queued fix.
+- DEFECT (found in coordinator verification): rw-return.sh rewrites the
+  registry entry (direction=return, generation=2) but never
+  deregisters — no tombstone, `rw status` shows a ghost endpoint after a
+  successful return. Queued fix.
+- COSMETIC: `invalid color specification: selected-bg:#45475a` on every
+  interactive worker zsh — zsh/.zshrc:419 FZF_DEFAULT_OPTS uses a color
+  key older apt-installed fzf (agents-roll) rejects. Queued fix
+  (version gate).
+- PROCESS CHANGE (operator directive, applies to all remaining buckets):
+  operator does ONLY the experiential keystrokes; coordinator does all
+  setup, verification, and cleanup. Buckets 6-9 rewritten accordingly.
+
 ## [ ] Bucket 6 — Agent handoff (provider continuity)
 
-In the same scratch repo (re-handoff is fine):
+Worker: agents-roll (mini offline, packed away). Proves the new `prefix e`
+intent-detection hotkey end-to-end — handoff THROUGH the hotkey, not
+manual `rw handoff`/`rw return`. Reminder: `prefix e` on an agent/nvim
+pane now means HANDOFF (picker → move, conversation transferred
+transactionally); on a remote-backed pane it means confirm → `rw return`.
 
-1. Start an agent in the pane — pick ONE of `pi` / `claude` / `codex`
-   (all three adapters proven; pick what you actually use). Ask it
-   something memorable ("remember the word 'pineapple'").
-2. Keep the agent RUNNING (or exit — both paths exist; running-agent
-   handoff is the interesting one). `rw handoff --worker mini`.
-3. Expect: adapter detects the provider + session, exports it, installs
-   it worker-side, and the remote pane offers/runs the resume command.
-   Resumed agent RECALLS the conversation ("what word?" → pineapple).
-4. `rw return` — expect continuity again on the way back: resume locally,
-   agent still knows the word.
-5. Edge to notice: a pane with NO agent degrades to workspace-only with
-   a clear message, never an error.
+1. COORDINATOR: pre-stage a throwaway scratch repo, hand operator the path.
+2. OPERATOR: focus a pane there, start an agent — your choice of
+   `claude`/`codex`/`pi` — give it one trivial memorable task ("remember
+   the word pineapple").
+3. OPERATOR: `prefix e` → picker → pick `agents-roll`. Watch the
+   conversation resume remotely.
+4. OPERATOR: sanity-chat the resumed agent ("what word?") to confirm
+   continuity.
+5. OPERATOR: on the now-remote pane, `prefix e` → confirm the return
+   prompt. Watch it land back local, agent resumed.
+6. COORDINATOR: after each hop verify transcripts/adapters/events/registry;
+   confirm the local agent was never stopped until the remote resume
+   verifiably started (plugin-enforced ordering — a safety invariant, not
+   a race to watch for). Spot-check the no-agent-pane case separately
+   (degrades to workspace-only handoff, clear message, never an error) —
+   doesn't need operator time.
+7. COORDINATOR: clean up scratch repo, registry rows, worker-side checkout.
 
-Report: provider used, recall verified both directions, exact wording of
-anything that felt ambiguous.
+Expect: recall survives both hops; local session never torn down before
+remote resume is confirmed up.
+
+Report: provider used, recall PASS/FAIL both directions, anything about
+the `prefix e` flow that felt ambiguous.
 
 ## [ ] Bucket 7 — Reflected slot + claims (real content-engine workflow)
 
-The production shape. Pick a content-engine slot YOU currently own with
-low-stakes uncommitted state (or none). Reflected to mini only.
+Worker: agents-roll. Production shape — real content-engine slot, real
+claim transfer, done via the `prefix e` hotkey (not manual `rw handoff`).
 
-1. In a pane cwd'd in `~/Developer/content-engine-trees/content-engine-<N>`:
-   `worktree-claim status` — confirm you're the writer.
-2. `rw handoff --worker mini`
-3. Expect: placement=reflected (NO clone — mini's matching slot dir used
-   as-is), sync transactional, claim marker travels
-   (`worktree-claim handoff-writer` under the hood) — local side now
-   shows writer=handed-off; mini side holds the claim.
-4. Do a trivial real edit remotely; `rw return`.
-5. Expect: writer role returns (`worktree-claim status` local = you),
-   state back byte-identical, slot ports/tier untouched.
-6. Known wrinkle: provider CLIs on workers write through stow symlinks
-   and can dirty mini's DOTFILES tree, tripping clean-tree sync gates —
-   if you hit a refusal naming a dirty tree, report exact message, don't
-   force.
+1. COORDINATOR: pick a content-engine slot operator currently owns with
+   low-stakes/no uncommitted state; `worktree-claim status` to confirm
+   writer, `worktree-claim verify-writer` before anything — STOP on exit
+   10/11/13, never steal a claim. The slot dir itself stays READ-ONLY for
+   coordinator throughout — no edits, no git ops there, only inspection.
+2. OPERATOR: focus a pane cwd'd in that slot. `prefix e` → picker → pick
+   `agents-roll`. Watch handoff.
+3. COORDINATOR: verify placement=reflected (NO clone — agents-roll's
+   matching slot dir used as-is), claim marker traveled
+   (`worktree-claim handoff-writer` under the hood), local side shows
+   writer=handed-off.
+4. OPERATOR: make one trivial real edit remotely.
+5. OPERATOR: on the remote-backed pane, `prefix e` → confirm → return.
+6. COORDINATOR: verify writer role returned (`worktree-claim status`
+   local = operator again), state back byte-identical, slot ports/tier
+   untouched, local Supabase singleton untouched (never branched per
+   worktree — cloud DB branching is the sanctioned path for schema work,
+   not this bucket).
+7. COORDINATOR: watch for the known stow-dirty-tree refusal (provider
+   CLIs on workers can dirty the worker's own dotfiles tree through stow
+   symlinks, tripping the clean-tree sync gate). If hit: report the exact
+   message, do not force.
 
-Report: placement mode line, claim status at each of the 4 checkpoints,
-any refusal text.
+Report: how the hotkey flow felt (any friction), any refusal text hit.
 
-## [ ] Bucket 8 — Second worker sweep (agents-roll)
+## [ ] Bucket 8 — Mini sweep (deferred — blocked on mini power-on)
 
-Quick repeat of the basics on the Linux worker:
+Old form OBSOLETE: the whole journey (Buckets 0-7) already ran on
+agents-roll, so a redundant "second worker sweep — agents-roll" bucket
+has nothing left to prove. Its old note that agents-roll was "missing
+nvim" is STALE — nvim 0.12.4 confirmed installed there (Bucket 4).
 
-1. `rw ensure --worker agents-roll` from a non-git pane → shell on the
-   VPS (root, tmux 3.4). `rw status` row correct.
-2. One split (`prefix \`), one `prefix q` close.
-3. `prefix Tab` → expect a clean "worker-side Treemux prerequisites
-   missing (nvim >= 0.10)" style report, NOT a local sidebar.
-4. Close everything; `rw status` empty.
+BLOCKED: mini is powered off, packed away, expected back in days. Do not
+start early — wait for coordinator to flag mini reachable.
 
-Report: all four outcomes.
+When mini is back:
+
+1. COORDINATOR: re-run the key flows against mini — `rw doctor`,
+   `rw ensure --worker mini`, Treemux tree, agent handoff/return,
+   `prefix e` picker reachability row for mini.
+2. OPERATOR: spot-check a couple of experiential moments only — glance at
+   the mini remote prompt after coordinator's ensure, glance at the tree
+   after `prefix Tab`.
+3. COORDINATOR: report results, close the bucket.
+
+Report (once unblocked): coordinator flags readiness; operator's
+spot-check impressions.
 
 ## [ ] Bucket 9 — LIVE PRODUCTION CANARIES (⚠️ gated — coordinator warns first)
 
 DO NOT start this bucket ad hoc. It intentionally disrupts the live
-laptop tmux server. Coordinator restates the warning, you give explicit
-go, then serialized:
+laptop tmux server. Coordinator restates the warning below, operator
+gives explicit go, THEN serialized — one drill at a time, report before
+the next starts. Coordinator never touches live tmux directly (standing
+rule); every live-server action below is OPERATOR's hands.
 
-1. Real continuum autosave with live endpoints: leave 1-2 remote panes
-   up ≥ ~6 min; verify a fresh `tmux_resurrect_*.txt` appears and
-   records the remote panes with `@workspace-resurrect-skip` semantics.
-2. Default-server-loss drill: kill the LIVE laptop tmux server, restart,
-   restore. Expect: full session landscape back; remote-backed panes
-   restored WITHOUT pasting stale ssh commands; reconciliation
-   (`@resurrect-hook-post-restore-all` chain) reattaches desired
-   endpoints / closes orphans; `rw-post-restore` re-stamps session UUIDs.
-   THIS KILLS YOUR LIVE SESSIONS — that is the test.
-3. Worker reboot recovery: reboot mini while an endpoint is attached;
-   attach-loop backs off through the reboot; on boot the endpoint
-   rebuilds (worker-server-loss path) and the pane comes back.
-4. Optional: focus-Mac sleep/wake with endpoints attached.
+0. COORDINATOR: `brew upgrade tmux` to 3.7b — the running 3.6b binary is
+   crash-prone (self-crashed once already, 2026-08-04). Doesn't touch the
+   live server process; the new binary takes effect on next server start,
+   so this rides along with drill 2.
+1. Autosave drill:
+   - OPERATOR: leave 1-2 real remote panes up ≥ ~6 min, otherwise idle.
+   - COORDINATOR: verify a fresh `tmux_resurrect_*.txt` appears, records
+     the remote panes with `@workspace-resurrect-skip` semantics.
+2. Default-server-loss drill (THIS KILLS YOUR LIVE SESSIONS — that is the
+   test):
+   - OPERATOR: give explicit go, then kill the live laptop tmux server,
+     restart, let it restore.
+   - COORDINATOR: verify full session landscape back; remote-backed
+     panes restored WITHOUT pasting stale ssh commands; reconciliation
+     (`@resurrect-hook-post-restore-all` chain) reattached desired
+     endpoints / closed orphans; `rw-post-restore` re-stamped session
+     UUIDs; the server now running is 3.7b.
+3. Worker reboot recovery — BLOCKED on mini power-on (see Bucket 8); when
+   mini is back:
+   - OPERATOR: have an endpoint attached to mini, watch it through the
+     reboot.
+   - COORDINATOR: trigger mini's reboot (ssh); verify attach-loop backed
+     off through the reboot and rebuilt the endpoint on boot
+     (worker-server-loss path), pane came back.
+4. Optional — focus-Mac sleep/wake with endpoints attached:
+   - OPERATOR: sleep/wake the laptop with an endpoint attached.
+   - COORDINATOR: verify reconnect, no orphaned state.
+
+Standing safety rules for every coordinator action in this bucket:
+exact-match tmux kills only (`'=name'`), never `kill-server` on a
+worker's default server, never touch the foreign session
+`rw-fa1ce39c-74764279` on agents-roll, never touch Tailscale.
 
 Report each drill separately before starting the next.
 
@@ -642,7 +724,7 @@ Report each drill separately before starting the next.
 | 2 | PASS | detach-reattach + no-duplicate PASS; Wi-Fi drill skipped (README field-validation note); found+fixed local-pane-death orphan class (reconcile-local sweep) |
 | 3 | PASS | splits mint own endpoints; prefix q, prefix & window-close, `rw close --no-kill-pane` all clean (tombstones + remote=killed verified); UX notes: want `--endpoint` alias, CLI default reason misleads |
 | 4 | FAIL→REDESIGNED→PASS | dispatch v1 unusable (nav/resize/close + latency) → tree-as-endpoint v2 (operator design) → full retest PASS; follow-ups: libuv file watcher (auto-refresh), picker probe streams + mini LAN check bounded 1.5s |
-| 5 | — | |
+| 5 | PASS | ad-hoc handoff/return byte-identical incl. remote edit; traps found: return must run `--pane` from another local pane (no cross-host guard), ghost registry entry after return, worker fzf color error — all queued as fixes |
 | 6 | — | |
 | 7 | — | |
 | 8 | — | |

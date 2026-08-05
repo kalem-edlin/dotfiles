@@ -22,6 +22,13 @@
 #   5. Release the writer back to the focus host via `worktree-claim
 #      return-writer` (claims are optional; skipped cleanly when absent).
 #
+# Must be run from a LOCAL pane on the focus machine -- NOT typed into the
+# handed-off pane itself (that pane's foreground is an ssh PTY into the
+# worker; anything typed there lands on the WORKER's shell, and the
+# worker's own `rw` has no @rw-endpoint for that pane to act on). Target the
+# remote-backed pane explicitly with --pane from any ordinary local pane, or
+# from a display-popup (see rw-picker.sh's confirm-then-return branch).
+#
 # Usage: rw-return.sh [--pane <pane-id>] [--keep-remote] [--check-lfs] [--force-diverged]
 
 set -uo pipefail
@@ -34,6 +41,27 @@ ADAPTERS_DIR="$SCRIPT_DIR/../libexec/adapters"
 source "$SYNC_DIR/common.sh"
 
 rw_need_jq
+
+# ---------------------------------------------------------------------------
+# Cross-host guard: this process might actually be running on the WORKER
+# side of a remote pane (an operator typed `rw return` directly at the
+# attached ssh prompt instead of running it from a local pane -- exactly the
+# trap that cost a round trip 2026-08-05: the WORKER's own `rw` ran, found
+# no @rw-endpoint on ITS pane, and answered "pane %36 has no @rw-endpoint").
+# Detect it without any new state: $TMUX is set for any tmux pane, local or
+# remote, but only an rw-managed endpoint session is named by
+# rw_session_name() (`rw-<8hex>-<8hex>`, see common.sh / rw_create_remote_session)
+# -- so a CURRENT session name matching that shape is enough on its own.
+# ---------------------------------------------------------------------------
+
+if [ -n "${TMUX:-}" ]; then
+  current_session_name="$(tmux display-message -p '#{session_name}' 2>/dev/null || true)"
+  case "$current_session_name" in
+    rw-????????-????????)
+      rw_die "rw return: this shell is the WORKER side of a remote pane (session '$current_session_name') -- run 'rw return --pane <pane-id>' from a LOCAL pane on the focus machine instead (find the pane id via 'rw status')."
+      ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Args
@@ -340,10 +368,6 @@ fi
 
 # ---------------------------------------------------------------------------
 # Release the pane's remote-endpoint state: a returned pane is local again.
-# The remote endpoint session/registry entry are intentionally NOT torn
-# down here (that is `rw close`'s job, on a separate explicit decision) --
-# `rw return` only stops being the active writer, it does not delete the
-# worker-side session, so a subsequent `rw handoff` can reuse it.
 # ---------------------------------------------------------------------------
 
 now="$(rw_now_iso)"
@@ -376,6 +400,48 @@ rw_pane_unset "$pane_id" @workspace-resurrect-skip
 duration_ms="$(rw_elapsed_ms "$return_start_ts")"
 rw_log_event "return" "$endpoint_id" "$worker" "$duration_ms" "success" \
   "generation=$sync_generation agent=${agent_provider:-none} agent_outcome=$agent_outcome keep_remote=$keep_remote"
+
+# ---------------------------------------------------------------------------
+# Deregister the endpoint (tombstone-first, via the same core rw-close.sh
+# uses) so a completed return doesn't leave a ghost entry that `rw status`
+# reports forever (verified live 2026-08-05: a successful return rewrote
+# this registry file in place but never removed it -- no tombstone, endpoint
+# permanently listed). This does NOT lose the next handoff's sync
+# generation/fingerprint continuity: that bookkeeping
+# (rw_sync_gen_read/write_endpoint in libexec/sync/common.sh) is keyed on
+# THIS endpoint_id and lives only on THIS registry file -- but pane_unset
+# above already cleared @rw-endpoint, so rw-handoff.sh's reattach check
+# (keyed on the pane's cached option) can never match this endpoint_id again
+# regardless; the next handoff of the same workspace always mints a fresh
+# endpoint_id/generation-0 anyway, tombstoned or not. Ad hoc workspace
+# *placement* (remote_path) is unaffected too: resolve-workspace.sh's
+# same-identity+worker reuse lookup falls back to the exact same
+# deterministic `$workspace_root/$slug` path (derived from identity alone)
+# when no live registry entry matches, so a future handoff still lands in
+# the same worker-side checkout.
+#
+# Only auto-close when nothing is deliberately being left running remotely:
+# no agent was ever involved, or the remote agent was actually stopped
+# above. `--keep-remote` (and any state where the remote stop could not be
+# verified: resume_dispatch_failed/resume_unverified/resume_gated/
+# export_failed/install_failed/adapter_missing) leaves remote_stopped
+# "false" on purpose -- closing here would kill a remote session/agent that
+# return just deliberately chose NOT to touch. In those cases the endpoint
+# stays registered (as before this fix) for `rw status`/`rw close` to
+# handle once the operator has reconciled it manually.
+# ---------------------------------------------------------------------------
+
+if [ "$keep_remote" != "true" ] && { [ -z "$agent_provider" ] || [ "$remote_stopped" = "true" ]; }; then
+  # rw_close_endpoint_core re-reads this same (just-written) registry file
+  # for worker/generation, writes the tombstone, removes the entry, and
+  # best-effort kills the remote session over ssh -- an unreachable worker
+  # or an already-gone session is expected/harmless there (remote_outcome
+  # "unreachable_or_absent"), so this is never a double-kill hazard even
+  # when the remote side is already down.
+  rw_close_endpoint_core "$endpoint_id" "return"
+else
+  rw_warn "rw return: endpoint $endpoint_id stays registered -- the remote side on '$worker' was deliberately left running (agent=${agent_provider:-none}, outcome=$agent_outcome, keep_remote=$keep_remote). Run 'rw close' once you've reconciled it."
+fi
 
 printf 'rw: returned %s from %s to %s (generation %s)\n' "$endpoint_id" "$worker" "$focus_path" "$sync_generation"
 if [ "$local_is_git" = "true" ] && [ -d "$focus_path" ]; then

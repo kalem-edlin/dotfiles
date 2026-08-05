@@ -534,9 +534,18 @@ else
   # could not be verified, the pane may still hold the RUNNING source
   # agent, and respawning would destroy the only live copy (smoke lane
   # w5r: "source untouched" message was false for exactly this reason).
+  #
+  # nvim/vim/vi are included alongside the plain shells: no adapter above
+  # ever detects an editor as an "agent" (agent_mode stays "none" for it),
+  # so Step 4 never touches it -- a handoff of a busy editor pane is always
+  # workspace-only, and the workspace transfer (disk state only) already
+  # completed earlier in THIS SAME invocation. rw-picker.sh's handoff
+  # header warns the operator that unsaved buffers do not transfer before
+  # they ever confirm, so it's safe to move the pane the same way as an
+  # idle shell here.
   target_pane_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
   case "$target_pane_cmd" in
-    zsh | bash | sh | fish | -zsh | -bash)
+    zsh | bash | sh | fish | -zsh | -bash | nvim | vim | vi)
       tmux respawn-pane -k -t "$pane_id" "$SCRIPT_DIR/attach-loop.sh '$endpoint_id' --fresh" 2>/dev/null ||
         rw_warn "rw handoff: could not start the attach loop in pane $pane_id -- attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
       ;;
