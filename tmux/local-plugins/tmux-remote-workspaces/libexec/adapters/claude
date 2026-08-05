@@ -25,7 +25,7 @@ Usage:
   claude versions --worker <alias>
   claude export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
   claude install --snapshot <dir> --dest-path <path> [--worker <alias>]
-  claude resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+  claude resume-cmd --dest-path <path> --session-id <uuid> [--fork] [--mode-flags <flags>]
 EOF
 }
 
@@ -89,8 +89,16 @@ cmd_detect() {
     exit 1
   }
 
+  # Access mode of the LIVE process (allowlist-extracted from its argv, so
+  # a one-shot --resume/--continue in the original launch never replays).
+  local argline mode_flags=""
+  # shellcheck disable=SC2046 # intentional word-splitting, as above.
+  argline="$(ca_pane_process_argline "$pane" $(ca_patterns_claude))" || argline=""
+  [ -n "$argline" ] && mode_flags="$(ca_mode_flags_claude "$argline")"
+
   jq -nc --arg provider "$PROVIDER" --arg session_id "$session_id" --arg project_path "$project_path" \
-    '{provider: $provider, session_id: $session_id, project_path: $project_path}'
+    --arg mode_flags "$mode_flags" \
+    '{provider: $provider, session_id: $session_id, project_path: $project_path, mode_flags: $mode_flags}'
 }
 
 # ---------------------------------------------------------------------------
@@ -283,10 +291,10 @@ cmd_install() {
 }
 
 # ---------------------------------------------------------------------------
-# resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+# resume-cmd --dest-path <path> --session-id <uuid> [--fork] [--mode-flags <flags>]
 # ---------------------------------------------------------------------------
 cmd_resume_cmd() {
-  local dest_path="" session_id="" fork=0
+  local dest_path="" session_id="" fork=0 mode_flags=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --dest-path)
@@ -301,18 +309,43 @@ cmd_resume_cmd() {
         fork=1
         shift
         ;;
+      --mode-flags)
+        mode_flags="${2-}"
+        shift 2
+        ;;
       *) ca_die "resume-cmd: unknown argument: $1" 1 ;;
     esac
   done
   ca_require "$dest_path" "--dest-path"
   ca_require "$session_id" "--session-id"
 
+  local launch="claude"
+  if [ -n "$mode_flags" ]; then
+    ca_validate_mode_flags "$mode_flags" ||
+      ca_die "resume-cmd: --mode-flags contains unsafe tokens: $mode_flags" 1
+    launch="claude $mode_flags"
+  fi
+
+  # Claude refuses --dangerously-skip-permissions under root/sudo; its own
+  # devcontainer escape hatch is IS_SANDBOX=1 (verified live against a real
+  # root worker 2026-08-05: bare flag refused, IS_SANDBOX=1 completed a real
+  # -p round trip). The guard is uid-conditional AT RUN TIME so the same
+  # printed command is correct on a root worker and on a non-root focus
+  # machine -- resume-cmd cannot know the destination uid.
+  local guard=""
+  case " $mode_flags " in
+    *" --dangerously-skip-permissions "* | *" bypassPermissions "*)
+      guard='{ [ "$(id -u)" -ne 0 ] || export IS_SANDBOX=1; } && '
+      ;;
+  esac
+
   # Claude resolves the session by cwd-derived project slug, so the resume
-  # command must be run from dest-path.
+  # command must be run from dest-path. $guard/$launch are spliced unquoted
+  # on purpose: mode flags are individually validated tokens, not one word.
   if [ "$fork" -eq 1 ]; then
-    printf 'cd %q && claude --resume %q --fork-session\n' "$dest_path" "$session_id"
+    printf 'cd %q && %s%s --resume %q --fork-session\n' "$dest_path" "$guard" "$launch" "$session_id"
   else
-    printf 'cd %q && claude --resume %q\n' "$dest_path" "$session_id"
+    printf 'cd %q && %s%s --resume %q\n' "$dest_path" "$guard" "$launch" "$session_id"
   fi
 }
 

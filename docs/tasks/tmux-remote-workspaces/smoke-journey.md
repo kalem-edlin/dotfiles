@@ -582,7 +582,7 @@ mini, any refusal/divergence prompt text.
   operator does ONLY the experiential keystrokes; coordinator does all
   setup, verification, and cleanup. Buckets 6-9 rewritten accordingly.
 
-## [ ] Bucket 6 — Agent handoff (provider continuity)
+## [x] Bucket 6 — Agent handoff (provider continuity)
 
 Worker: agents-roll (mini offline, packed away). Proves the new `prefix e`
 intent-detection hotkey end-to-end — handoff THROUGH the hotkey, not
@@ -613,6 +613,47 @@ remote resume is confirmed up.
 
 Report: provider used, recall PASS/FAIL both directions, anything about
 the `prefix e` flow that felt ambiguous.
+
+### Bucket 6 findings (2026-08-05, worker = agents-roll, provider = claude)
+
+- FAIL→FIXED→PASS. First attempt: `prefix e` handoff silently no-op'd.
+  Root cause 1: worker claude 2.1.220 < local 2.1.222 → version policy
+  exit 3 blocked at step 1, local untouched by design (generic version-skew
+  gate, NOT provider babysitting). Fixed: worker `claude update` → 2.1.222.
+  Root cause 2 (UX defect): `display-popup -E` closes on exit so the
+  refusal printed into the void → operator saw empty box. Fixed a424645:
+  picker tees handoff/return output live into the popup and parks failures
+  in a 10s `display-message`.
+- Retest: full lap PASS — handoff via `prefix e`, remote recall PASS,
+  return via `prefix e` confirm, local recall PASS.
+- OPERATOR FINDING (post-close): access mode dropped both directions —
+  local `claude --dangerously-skip-permissions` resumed remotely as plain
+  `claude` (same class for codex). FIXED (this commit): adapter `detect`
+  now captures the live process's access mode from its argv against a
+  per-provider ALLOWLIST (claude: `--dangerously-skip-permissions`,
+  `--permission-mode <v>`; codex: `--dangerously-bypass-approvals-and-sandbox`,
+  `--sandbox <v>`, `--ask-for-approval <v>`; pi: none — no run modes), so
+  one-shot launch args (`--resume`, `--continue`, codex `--full-auto` which
+  `codex resume` doesn't accept) can never replay. Flags persist on the
+  endpoint (`agent.mode_flags`) and splice into `resume-cmd` on BOTH
+  handoff and return.
+- Found live during verification: claude REFUSES `--dangerously-skip-permissions`
+  as root, and agents-roll runs as root — verbatim replay could never
+  start there. resume-cmd now emits a uid-conditional
+  `{ [ "$(id -u)" -ne 0 ] || export IS_SANDBOX=1; }` guard (claude's own
+  devcontainer escape hatch; verified live with a real `-p` round trip as
+  root) so the same command is correct on root workers and non-root local.
+- Coordinator-verified end-to-end with a REAL bypass-mode claude lap
+  (scratch repo, session `rwtest-b6mode`): detect captured the flag →
+  handoff → remote ps showed `claude --dangerously-skip-permissions
+  --resume <id>` + powerline "bypass permissions on" + recall PASS →
+  return → local ps/powerline same + recall PASS; registry emptied,
+  tombstone written, worker session+checkout+backup cleaned. Plus 21/21
+  adapter smoke-test asserts (extraction, normalization, injection
+  refusal, splice shapes). No operator retest needed.
+- Note for operator: first launch in a NEW checkout still shows claude's
+  one-time folder-trust prompt (worker side, once per path) — deliberate
+  (adapters never seed `~/.claude.json` trust).
 
 ## [ ] Bucket 7 — Reflected slot + claims (real content-engine workflow)
 
@@ -725,7 +766,7 @@ Report each drill separately before starting the next.
 | 3 | PASS | splits mint own endpoints; prefix q, prefix & window-close, `rw close --no-kill-pane` all clean (tombstones + remote=killed verified); UX notes: want `--endpoint` alias, CLI default reason misleads |
 | 4 | FAIL→REDESIGNED→PASS | dispatch v1 unusable (nav/resize/close + latency) → tree-as-endpoint v2 (operator design) → full retest PASS; follow-ups: libuv file watcher (auto-refresh), picker probe streams + mini LAN check bounded 1.5s |
 | 5 | PASS | ad-hoc handoff/return byte-identical incl. remote edit; traps found: return must run `--pane` from another local pane (no cross-host guard), ghost registry entry after return, worker fzf color error — all queued as fixes |
-| 6 | — | |
+| 6 | FAIL→FIXED→PASS | version-skew block (worker claude updated) + invisible-refusal UX (a424645); operator lap PASS both directions; access-mode drop found → allowlist mode-flag capture/replay shipped + coordinator-verified live (incl. root IS_SANDBOX guard) |
 | 7 | — | |
 | 8 | — | |
 | 9 | — | |

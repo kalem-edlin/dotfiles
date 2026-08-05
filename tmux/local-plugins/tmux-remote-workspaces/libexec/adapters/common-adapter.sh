@@ -152,6 +152,125 @@ ca_patterns_codex() { printf '%s\n' '(^|/)codex([[:space:]]|$)' 'codex\.js' 'cod
 ca_patterns_pi() { printf '%s\n' '(^|/)pi([[:space:]]|$)' 'pi-coding-agent'; }
 
 # ---------------------------------------------------------------------------
+# Access-mode flag capture. A handoff must relaunch the agent in the same
+# permission/approval mode it was running in locally (e.g. a local
+# `claude --dangerously-skip-permissions` must not resume remotely as a
+# permission-prompting `claude`, and vice versa on return). The original
+# argv is NOT copied wholesale -- it may contain one-shot launch arguments
+# (--resume, --continue, prompts) that would be wrong to replay -- so only
+# an explicit per-provider allowlist of mode flags is extracted.
+# ---------------------------------------------------------------------------
+
+# ca_pane_process_argline <pane_id> <pattern>...
+# Prints the full command line (`ps -o args=`) of the first (shallowest)
+# pane descendant matching one of the patterns -- the same walk order as
+# ca_pane_has_process, so it lands on the same process detect matched.
+ca_pane_process_argline() {
+  local pane_id="$1"
+  shift
+  local root_pid pids pid line pat
+  root_pid="$(ca_pane_pid "$pane_id")"
+  [ -n "$root_pid" ] || return 1
+  pids="$(ca_descendant_pids "$root_pid")"
+  for pid in $pids; do
+    line="$(ps -o comm=,args= -p "$pid" 2>/dev/null)"
+    [ -n "$line" ] || continue
+    for pat in "$@"; do
+      if printf '%s\n' "$line" | grep -Eiq "$pat"; then
+        ps -o args= -p "$pid" 2>/dev/null
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# ca_scan_mode_flags <argline> <spec>...
+# Specs:  bare:<flag>            flag with no value
+#         val:<flag>             flag taking a value (`--flag v`/`--flag=v`)
+#         alias:<short>:<long>   short spelling of a val: flag, emitted long
+# Tokens are matched exactly against the allowlist; everything else in the
+# argline is ignored. Values are kept only when they match a safe charset,
+# because the caller splices the result unquoted into a shell command line.
+ca_scan_mode_flags() {
+  local argline="$1"
+  shift
+  local out="" pending="" tok spec flag rest val
+  for tok in $argline; do
+    if [ -n "$pending" ]; then
+      printf '%s' "$tok" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' &&
+        out="$out $pending $tok"
+      pending=""
+      continue
+    fi
+    for spec in "$@"; do
+      case "$spec" in
+        bare:*)
+          flag="${spec#bare:}"
+          [ "$tok" = "$flag" ] && {
+            out="$out $flag"
+            break
+          }
+          ;;
+        val:*)
+          flag="${spec#val:}"
+          if [ "$tok" = "$flag" ]; then
+            pending="$flag"
+            break
+          fi
+          case "$tok" in
+            "$flag"=*)
+              val="${tok#*=}"
+              printf '%s' "$val" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' &&
+                out="$out $flag $val"
+              break
+              ;;
+          esac
+          ;;
+        alias:*)
+          rest="${spec#alias:}"
+          flag="${rest%%:*}"
+          if [ "$tok" = "$flag" ]; then
+            pending="${rest#*:}"
+            break
+          fi
+          ;;
+      esac
+    done
+  done
+  printf '%s\n' "${out# }"
+}
+
+# Per-provider allowlists. Codex's --full-auto is deliberately absent:
+# `codex resume`/`codex fork` do not accept it (verified against codex
+# 0.55 --help), so it cannot be replayed on a resume; its effect is
+# expressible via --sandbox/--ask-for-approval, which are allowlisted.
+# Pi has no run-mode flags -- its adapter captures nothing.
+ca_mode_flags_claude() {
+  ca_scan_mode_flags "$1" \
+    bare:--dangerously-skip-permissions \
+    val:--permission-mode
+}
+ca_mode_flags_codex() {
+  ca_scan_mode_flags "$1" \
+    bare:--dangerously-bypass-approvals-and-sandbox \
+    val:--sandbox alias:-s:--sandbox \
+    val:--ask-for-approval alias:-a:--ask-for-approval
+}
+
+# Guard for resume-cmd's --mode-flags input (a public CLI surface, not just
+# our own detect output): every token must be a plain flag or safe value.
+ca_validate_mode_flags() {
+  local tok
+  for tok in $1; do
+    printf '%s' "$tok" |
+      grep -Eq '^(-{1,2}[A-Za-z0-9][A-Za-z0-9._-]*|[A-Za-z0-9][A-Za-z0-9._-]*)$' ||
+      return 1
+  done
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Version comparison. `sort -V` is available on both modern macOS (Apple's
 # BSD sort ships -V) and GNU coreutils on Linux workers.
 # ---------------------------------------------------------------------------

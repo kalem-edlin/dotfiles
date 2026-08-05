@@ -106,6 +106,7 @@ worker_home="$(printf '%s' "$preflight_json" | jq -r '.home')"
 agent_provider=""
 agent_session_id=""
 agent_project_path=""
+agent_mode_flags=""
 agent_mode="none" # none | full
 
 for candidate in pi claude codex; do
@@ -115,11 +116,13 @@ for candidate in pi claude codex; do
   agent_provider="$(printf '%s' "$detect_out" | jq -r '.provider // empty' 2>/dev/null)"
   agent_session_id="$(printf '%s' "$detect_out" | jq -r '.session_id // empty' 2>/dev/null)"
   agent_project_path="$(printf '%s' "$detect_out" | jq -r '.project_path // empty' 2>/dev/null)"
+  agent_mode_flags="$(printf '%s' "$detect_out" | jq -r '.mode_flags // empty' 2>/dev/null)"
   if [ -n "$agent_provider" ] && [ -n "$agent_session_id" ]; then
     agent_mode="full"
     break
   fi
   agent_provider=""
+  agent_mode_flags=""
 done
 
 if [ "$agent_mode" = "none" ]; then
@@ -367,7 +370,11 @@ if [ "$agent_mode" = "full" ]; then
     agent_outcome="install_failed"
   else
     resume_status=0
-    agent_resume_cmd="$("$adapter" resume-cmd --dest-path "$remote_path" --session-id "$agent_session_id" 2>"$export_err")" || resume_status=$?
+    resume_cmd_args=(resume-cmd --dest-path "$remote_path" --session-id "$agent_session_id")
+    # Same access mode as the live local process (adapter detect captured
+    # it) -- a --dangerously-* session must not resume permission-prompting.
+    [ -n "$agent_mode_flags" ] && resume_cmd_args+=(--mode-flags "$agent_mode_flags")
+    agent_resume_cmd="$("$adapter" "${resume_cmd_args[@]}" 2>"$export_err")" || resume_status=$?
     if [ "$resume_status" -ne 0 ]; then
       # NOTE: exit 4 (no resumable transcript) belongs to export/install, not
       # resume-cmd (see libexec/adapters/README.md's contract) -- no adapter
@@ -480,6 +487,7 @@ registry_json="$(jq -nc \
   --argjson sync_generation "$sync_generation" \
   --arg agent_provider "$agent_provider" \
   --arg agent_session_id "$agent_session_id" \
+  --arg agent_mode_flags "$agent_mode_flags" \
   --arg agent_resume_cmd "$agent_resume_cmd" \
   --arg agent_outcome "$agent_outcome" \
   --argjson divergence_risk "$divergence_risk" \
@@ -495,6 +503,7 @@ registry_json="$(jq -nc \
     launch_intent: {worker: $launch_worker, workspace_arg: $launch_workspace_arg},
     agent: (if $agent_provider == "" then {provider: null, session_id: null, resume_intent: null, state: null}
       else {provider: $agent_provider, session_id: $agent_session_id, resume_intent: $agent_resume_cmd,
+        mode_flags: (if $agent_mode_flags == "" then null else $agent_mode_flags end),
         outcome: $agent_outcome, divergence_risk: $divergence_risk, had_claim: $had_claim,
         state: (if $agent_state == "null" then null else $agent_state end)} end),
     created_at: $created_at, updated_at: $updated_at, generation: $generation

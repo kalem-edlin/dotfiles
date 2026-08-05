@@ -94,6 +94,7 @@ focus_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.focus_path')"
 workspace_mode="$(printf '%s' "$endpoint_json" | jq -r '.workspace.mode')"
 agent_provider="$(printf '%s' "$endpoint_json" | jq -r '.agent.provider // empty')"
 agent_session_id="$(printf '%s' "$endpoint_json" | jq -r '.agent.session_id // empty')"
+agent_mode_flags="$(printf '%s' "$endpoint_json" | jq -r '.agent.mode_flags // empty')"
 had_claim="$(printf '%s' "$endpoint_json" | jq -r '.agent.had_claim // false')"
 prior_divergence_risk="$(printf '%s' "$endpoint_json" | jq -r '.agent.divergence_risk // false')"
 
@@ -320,6 +321,10 @@ if [ -n "$agent_provider" ] && [ -n "$agent_session_id" ]; then
       agent_outcome="install_failed"
     else
       resume_cmd_args=(resume-cmd --dest-path "$focus_path" --session-id "$agent_session_id")
+      # Same access mode the session was handed off in (recorded on the
+      # endpoint at handoff time from the then-live local process's argv) --
+      # a --dangerously-* session must not return permission-prompting.
+      [ -n "$agent_mode_flags" ] && resume_cmd_args+=(--mode-flags "$agent_mode_flags")
       fork_used="false"
       if [ "$prior_divergence_risk" = "true" ]; then
         resume_cmd_args+=(--fork)

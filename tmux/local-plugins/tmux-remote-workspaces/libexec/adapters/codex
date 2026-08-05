@@ -48,7 +48,7 @@ Usage:
   codex versions --worker <alias>
   codex export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
   codex install --snapshot <dir> --dest-path <path> [--worker <alias>]
-  codex resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+  codex resume-cmd --dest-path <path> --session-id <uuid> [--fork] [--mode-flags <flags>]
 EOF
 }
 
@@ -99,8 +99,16 @@ cmd_detect() {
     exit 1
   }
 
+  # Access mode of the LIVE process (allowlist-extracted from its argv, so
+  # a one-shot resume/fork subcommand in the original launch never replays).
+  local argline mode_flags=""
+  # shellcheck disable=SC2046 # intentional word-splitting, as above.
+  argline="$(ca_pane_process_argline "$pane" $(ca_patterns_codex))" || argline=""
+  [ -n "$argline" ] && mode_flags="$(ca_mode_flags_codex "$argline")"
+
   jq -nc --arg provider "$PROVIDER" --arg session_id "$session_id" --arg project_path "$project_path" \
-    '{provider: $provider, session_id: $session_id, project_path: $project_path}'
+    --arg mode_flags "$mode_flags" \
+    '{provider: $provider, session_id: $session_id, project_path: $project_path, mode_flags: $mode_flags}'
 }
 
 # ---------------------------------------------------------------------------
@@ -312,10 +320,10 @@ cmd_install() {
 }
 
 # ---------------------------------------------------------------------------
-# resume-cmd --dest-path <path> --session-id <uuid> [--fork]
+# resume-cmd --dest-path <path> --session-id <uuid> [--fork] [--mode-flags <flags>]
 # ---------------------------------------------------------------------------
 cmd_resume_cmd() {
-  local dest_path="" session_id="" fork=0
+  local dest_path="" session_id="" fork=0 mode_flags=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --dest-path)
@@ -330,16 +338,31 @@ cmd_resume_cmd() {
         fork=1
         shift
         ;;
+      --mode-flags)
+        mode_flags="${2-}"
+        shift 2
+        ;;
       *) ca_die "resume-cmd: unknown argument: $1" 1 ;;
     esac
   done
   ca_require "$dest_path" "--dest-path"
   ca_require "$session_id" "--session-id"
 
+  # Flags land AFTER the subcommand: `codex resume`/`codex fork` accept the
+  # allowlisted sandbox/approval options directly (verified via --help), and
+  # this keeps them adjacent to the run they modify. Spliced unquoted on
+  # purpose: individually validated tokens, not one word.
+  local flags=""
+  if [ -n "$mode_flags" ]; then
+    ca_validate_mode_flags "$mode_flags" ||
+      ca_die "resume-cmd: --mode-flags contains unsafe tokens: $mode_flags" 1
+    flags=" $mode_flags"
+  fi
+
   if [ "$fork" -eq 1 ]; then
-    printf 'codex fork %q -C %q\n' "$session_id" "$dest_path"
+    printf 'codex fork %q%s -C %q\n' "$session_id" "$flags" "$dest_path"
   else
-    printf 'codex resume %q -C %q\n' "$session_id" "$dest_path"
+    printf 'codex resume %q%s -C %q\n' "$session_id" "$flags" "$dest_path"
   fi
 }
 

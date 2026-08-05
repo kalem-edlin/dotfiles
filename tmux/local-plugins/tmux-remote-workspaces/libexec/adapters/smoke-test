@@ -230,6 +230,91 @@ smoke_codex() {
   rm -rf "$sandbox"
 }
 
+# ---------------------------------------------------------------------------
+# mode-flags -- access-mode capture (allowlist extraction from a live-style
+# argline) and its replay through resume-cmd, both directions' shared path.
+# ---------------------------------------------------------------------------
+smoke_mode_flags() {
+  # shellcheck source=./common-adapter.sh
+  source "$ADAPTERS_DIR/common-adapter.sh"
+
+  local got
+  got="$(ca_mode_flags_claude "claude --dangerously-skip-permissions --resume 22222222-2222-2222-2222-222222222222")"
+  if [ "$got" = "--dangerously-skip-permissions" ]; then
+    ok "claude extract: dangerous flag kept, --resume + id dropped"
+  else
+    bad "claude extract: got '$got'"
+  fi
+
+  got="$(ca_mode_flags_claude "claude --permission-mode acceptEdits --continue")"
+  if [ "$got" = "--permission-mode acceptEdits" ]; then
+    ok "claude extract: --permission-mode value kept, --continue dropped"
+  else
+    bad "claude extract: got '$got'"
+  fi
+
+  got="$(ca_mode_flags_claude "claude")"
+  if [ -z "$got" ]; then
+    ok "claude extract: plain launch captures nothing"
+  else
+    bad "claude extract: plain launch leaked '$got'"
+  fi
+
+  got="$(ca_mode_flags_codex "node /x/codex.js --dangerously-bypass-approvals-and-sandbox resume 33333333-3333-3333-3333-333333333333")"
+  if [ "$got" = "--dangerously-bypass-approvals-and-sandbox" ]; then
+    ok "codex extract: dangerous flag kept, resume subcommand dropped"
+  else
+    bad "codex extract: got '$got'"
+  fi
+
+  got="$(ca_mode_flags_codex "codex -s workspace-write -a never --full-auto")"
+  if [ "$got" = "--sandbox workspace-write --ask-for-approval never" ]; then
+    ok "codex extract: -s/-a normalized to long form, --full-auto (not resumable) dropped"
+  else
+    bad "codex extract: got '$got'"
+  fi
+
+  # shellcheck disable=SC2016 # literal $() on purpose -- must NOT expand.
+  got="$(ca_mode_flags_codex 'codex --sandbox $(rm -rf /)')"
+  if [ "$got" = "" ]; then
+    ok "codex extract: unsafe flag value refused"
+  else
+    bad "codex extract: unsafe value leaked '$got'"
+  fi
+
+  local cmd
+  cmd="$("$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
+    --mode-flags "--dangerously-skip-permissions" 2>/dev/null)"
+  if [ "$cmd" = 'cd /tmp/rw-smoke-mode && { [ "$(id -u)" -ne 0 ] || export IS_SANDBOX=1; } && claude --dangerously-skip-permissions --resume abc' ]; then
+    ok "claude resume-cmd: bypass flag spliced with uid-conditional IS_SANDBOX guard"
+  else
+    bad "claude resume-cmd: got '$cmd'"
+  fi
+
+  cmd="$("$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
+    --mode-flags "--permission-mode acceptEdits" 2>/dev/null)"
+  if [ "$cmd" = "cd /tmp/rw-smoke-mode && claude --permission-mode acceptEdits --resume abc" ]; then
+    ok "claude resume-cmd: non-bypass mode gets no IS_SANDBOX guard"
+  else
+    bad "claude resume-cmd: got '$cmd'"
+  fi
+
+  cmd="$("$ADAPTERS_DIR/codex" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
+    --mode-flags "--sandbox workspace-write" --fork 2>/dev/null)"
+  if [ "$cmd" = "codex fork abc --sandbox workspace-write -C /tmp/rw-smoke-mode" ]; then
+    ok "codex resume-cmd: mode flags spliced on the fork subcommand"
+  else
+    bad "codex resume-cmd: got '$cmd'"
+  fi
+
+  if "$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/x --session-id abc \
+    --mode-flags '--foo; rm -rf /' >/dev/null 2>&1; then
+    bad "resume-cmd: accepted unsafe --mode-flags"
+  else
+    ok "resume-cmd: refuses unsafe --mode-flags tokens"
+  fi
+}
+
 echo "== pi =="
 smoke_pi
 echo
@@ -238,6 +323,9 @@ smoke_claude
 echo
 echo "== codex =="
 smoke_codex
+echo
+echo "== mode-flags =="
+smoke_mode_flags
 echo
 echo "== manual step (not exercised by this script) =="
 echo "note: none of the above completes a real interactive resume -- authentication,"

@@ -31,8 +31,18 @@ Each adapter is an executable implementing five subcommands:
 
 ### `detect --pane <pane-id>`
 
-Stdout JSON `{provider, session_id, project_path}`, exit 0. Exit 1 if that
-provider isn't currently running in the pane.
+Stdout JSON `{provider, session_id, project_path, mode_flags}`, exit 0.
+Exit 1 if that provider isn't currently running in the pane.
+
+`mode_flags` is the live process's access mode (a space-joined string,
+possibly empty), extracted from its actual argv against a per-provider
+**allowlist** -- claude: `--dangerously-skip-permissions`,
+`--permission-mode <v>`; codex: `--dangerously-bypass-approvals-and-sandbox`,
+`--sandbox <v>`, `--ask-for-approval <v>` (short `-s`/`-a` normalized to
+long form); pi: none (no run modes). The original command line is never
+copied wholesale: one-shot launch arguments (`--resume`, `--continue`,
+prompts, codex's non-resumable `--full-auto`) can never leak into a replay
+because only allowlisted tokens survive extraction.
 
 Two-step detection, mirroring (not reinventing) the prior art in
 `tmux-workspace-resurrect/scripts/common.sh`'s `workspace_infer_agent()`:
@@ -90,12 +100,21 @@ transcripts by destination-encoded project path.
 **Codex `install` is implemented** (de-gated per a live sandboxed smoke
 test -- see "Codex gate" below for what was and was not verified).
 
-### `resume-cmd --dest-path <path> --session-id <id> [--fork]`
+### `resume-cmd --dest-path <path> --session-id <id> [--fork] [--mode-flags <flags>]`
 
 Prints the exact resume command to stdout (never executes it). `--fork`
 uses provider-native forking for a divergent-lineage return handoff
 (`claude --resume ... --fork-session`, `codex fork ...`, `pi --fork ...`)
 rather than bespoke lineage bookkeeping, per the plan.
+
+`--mode-flags` splices `detect`'s captured access mode back into the
+printed command (claude: before `--resume`; codex: on the
+`resume`/`fork` subcommand, which accepts them directly) so a handed-off
+session relaunches in the same permission mode on the other side --
+bidirectionally: `rw handoff` passes detect's live capture, `rw return`
+passes the value recorded on the endpoint at handoff time. Tokens are
+re-validated against a safe charset before splicing (this is a public CLI
+surface).
 
 Codex's `resume-cmd` is **not** gated -- it always prints the intended
 command, both for documentation and so `install` can be unblocked later
