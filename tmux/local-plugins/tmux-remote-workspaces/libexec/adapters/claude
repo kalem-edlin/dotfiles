@@ -326,26 +326,21 @@ cmd_resume_cmd() {
     launch="claude $mode_flags"
   fi
 
-  # Claude refuses --dangerously-skip-permissions under root/sudo; its own
-  # devcontainer escape hatch is IS_SANDBOX=1 (verified live against a real
-  # root worker 2026-08-05: bare flag refused, IS_SANDBOX=1 completed a real
-  # -p round trip). The guard is uid-conditional AT RUN TIME so the same
-  # printed command is correct on a root worker and on a non-root focus
-  # machine -- resume-cmd cannot know the destination uid.
-  local guard=""
-  case " $mode_flags " in
-    *" --dangerously-skip-permissions "* | *" bypassPermissions "*)
-      guard='{ [ "$(id -u)" -ne 0 ] || export IS_SANDBOX=1; } && '
-      ;;
-  esac
+  # Deliberately NO root workaround here (no IS_SANDBOX, no sandbox-mode
+  # rewriting): claude refuses --dangerously-skip-permissions under
+  # root/sudo, and the sanctioned fix is running workers as a non-root
+  # user (docs/headless-workers.md requires it). On a root destination the
+  # replayed command fails with claude's own explicit error, rw-handoff's
+  # never-stop-local-before-remote-resume invariant leaves the local
+  # session untouched, and the refusal surfaces in the picker popup.
 
   # Claude resolves the session by cwd-derived project slug, so the resume
-  # command must be run from dest-path. $guard/$launch are spliced unquoted
-  # on purpose: mode flags are individually validated tokens, not one word.
+  # command must be run from dest-path. $launch is spliced unquoted on
+  # purpose: mode flags are individually validated tokens, not one word.
   if [ "$fork" -eq 1 ]; then
-    printf 'cd %q && %s%s --resume %q --fork-session\n' "$dest_path" "$guard" "$launch" "$session_id"
+    printf 'cd %q && %s --resume %q --fork-session\n' "$dest_path" "$launch" "$session_id"
   else
-    printf 'cd %q && %s%s --resume %q\n' "$dest_path" "$guard" "$launch" "$session_id"
+    printf 'cd %q && %s --resume %q\n' "$dest_path" "$launch" "$session_id"
   fi
 }
 

@@ -283,10 +283,12 @@ smoke_mode_flags() {
   fi
 
   local cmd
+  # Verbatim replay, NO root workaround (no IS_SANDBOX) -- workers must
+  # run non-root per docs/headless-workers.md; operator decision 2026-08-05.
   cmd="$("$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
     --mode-flags "--dangerously-skip-permissions" 2>/dev/null)"
-  if [ "$cmd" = 'cd /tmp/rw-smoke-mode && { [ "$(id -u)" -ne 0 ] || export IS_SANDBOX=1; } && claude --dangerously-skip-permissions --resume abc' ]; then
-    ok "claude resume-cmd: bypass flag spliced with uid-conditional IS_SANDBOX guard"
+  if [ "$cmd" = "cd /tmp/rw-smoke-mode && claude --dangerously-skip-permissions --resume abc" ]; then
+    ok "claude resume-cmd: bypass flag replayed verbatim, no injected workarounds"
   else
     bad "claude resume-cmd: got '$cmd'"
   fi
@@ -294,7 +296,7 @@ smoke_mode_flags() {
   cmd="$("$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
     --mode-flags "--permission-mode acceptEdits" 2>/dev/null)"
   if [ "$cmd" = "cd /tmp/rw-smoke-mode && claude --permission-mode acceptEdits --resume abc" ]; then
-    ok "claude resume-cmd: non-bypass mode gets no IS_SANDBOX guard"
+    ok "claude resume-cmd: --permission-mode replayed verbatim"
   else
     bad "claude resume-cmd: got '$cmd'"
   fi

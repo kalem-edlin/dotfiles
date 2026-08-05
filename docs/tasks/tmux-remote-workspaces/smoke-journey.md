@@ -638,11 +638,13 @@ the `prefix e` flow that felt ambiguous.
   endpoint (`agent.mode_flags`) and splice into `resume-cmd` on BOTH
   handoff and return.
 - Found live during verification: claude REFUSES `--dangerously-skip-permissions`
-  as root, and agents-roll runs as root — verbatim replay could never
-  start there. resume-cmd now emits a uid-conditional
-  `{ [ "$(id -u)" -ne 0 ] || export IS_SANDBOX=1; }` guard (claude's own
-  devcontainer escape hatch; verified live with a real `-p` round trip as
-  root) so the same command is correct on root workers and non-root local.
+  as root, and agents-roll ran as root — verbatim replay could never start
+  there. First fix (IS_SANDBOX=1 uid-guard, claude's devcontainer escape
+  hatch) was REJECTED by operator — no trust in claude-shipped sandbox
+  systems. Final fix: replay stays VERBATIM (no injected workarounds) and
+  agents-roll was migrated to a non-root `admin` user (mirrors the mini;
+  docs/headless-workers.md already mandated non-root). Root worker +
+  bypass now fails loudly with claude's own error, local untouched.
 - Coordinator-verified end-to-end with a REAL bypass-mode claude lap
   (scratch repo, session `rwtest-b6mode`): detect captured the flag →
   handoff → remote ps showed `claude --dangerously-skip-permissions
