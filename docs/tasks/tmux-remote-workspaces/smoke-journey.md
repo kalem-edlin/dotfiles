@@ -657,7 +657,7 @@ the `prefix e` flow that felt ambiguous.
   one-time folder-trust prompt (worker side, once per path) — deliberate
   (adapters never seed `~/.claude.json` trust).
 
-## [ ] Bucket 7 — Reflected slot + claims (real content-engine workflow)
+## [x] Bucket 7 — Reflected slot + claims (real content-engine workflow)
 
 Worker: mini (operator call 2026-08-06: mini is back and agents-roll will
 never serve reflected slot work — reflection config reverted to mini-only
@@ -716,6 +716,26 @@ First-lap findings (operator, 2026-08-06 — three, all fixed same day):
    (--no-kill-pane is for window-close callers only); operator's endpoint
    window closed, local slot state untouched, claim intact (never
    flipped, still owner=operator generation=1).
+
+Redo lap (operator, 2026-08-06) — PASS. Picker correctly offered
+`rw handoff ⇒` from the slot pane; "no supported AI agent detected --
+workspace-only handoff" message shown (expected: plain shell pane).
+Remote prompt showed the real branch (fix/admin-template-legacy-heuristic-save,
+clean) at the reflected slot path — branch replication via
+`checkout -B` confirmed live. Server-side copy-mode (`prefix [`) worked.
+Return worked. Coordinator verification: claim generation 1→3 (writer
+flipped to mini and back, state=local, writer_host=kalems-macbook-pro),
+registry 0 + tombstone 98966b6b, local HEAD 003d09a clean, slot manifest
+md5 byte-identical, .env.ports tier=warm untouched, mini slot back on the
+branch and clean, local Supabase singleton untouched (no services ran),
+stow-dirty-tree refusal not hit. NOTE: operator skipped the
+trivial-remote-edit step; content-sync integrity incl. remote edits was
+already proven in Buckets 5-6 laps, accepted. NEW QUEUE ITEM: mini's own
+resurrect save net revived the two tombstoned rw-* zombie sessions when
+the handoff restarted its server (worker-side saves include rw-*
+endpoint sessions; correct for reboot durability of LIVE endpoints, wrong
+for closed ones — needs a closed-endpoint sweep or save filter).
+Killed again; they died with the server exit.
 
 1. COORDINATOR: pick a content-engine slot operator currently owns with
    low-stakes/no uncommitted state; `worktree-claim status` to confirm
@@ -824,6 +844,7 @@ Report each drill separately before starting the next.
 | 4 | FAIL→REDESIGNED→PASS | dispatch v1 unusable (nav/resize/close + latency) → tree-as-endpoint v2 (operator design) → full retest PASS; follow-ups: libuv file watcher (auto-refresh), picker probe streams + mini LAN check bounded 1.5s |
 | 5 | PASS | ad-hoc handoff/return byte-identical incl. remote edit; traps found: return must run `--pane` from another local pane (no cross-host guard), ghost registry entry after return, worker fzf color error — all queued as fixes |
 | 6 | FAIL→FIXED→PASS | version-skew block (worker claude updated) + invisible-refusal UX (a424645); operator lap PASS both directions; access-mode drop found → allowlist mode-flag capture/replay shipped + coordinator-verified live (incl. root IS_SANDBOX guard) |
+| 7 | FAIL→FIXED→PASS | 3 first-lap finds all fixed same day (7294cab): picker offered only ensure for shell-in-worktree → intent 2b handoff default + ctrl-o; prefix-None broke copy-mode key forwarding → server-side rw-copy-mode.sh; detach-on-destroy hop into stale session → forced on at session creation. Redo lap PASS: reflected placement, branch replicated, claim gen 1→3 round trip, byte-identical, ports/tier/Supabase untouched. Queued: worker resurrect revives closed rw-* zombies |
 | 7 | — | |
 | 8 | — | |
 | 9 | — | |
