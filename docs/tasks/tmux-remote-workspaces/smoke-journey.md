@@ -659,8 +659,32 @@ the `prefix e` flow that felt ambiguous.
 
 ## [ ] Bucket 7 — Reflected slot + claims (real content-engine workflow)
 
-Worker: agents-roll. Production shape — real content-engine slot, real
-claim transfer, done via the `prefix e` hotkey (not manual `rw handoff`).
+Worker: mini (operator call 2026-08-06: mini is back and agents-roll will
+never serve reflected slot work — reflection config reverted to mini-only
+in c198c1e; agents-roll's briefly-provisioned collection removed).
+Production shape — real content-engine slot, real claim transfer, done via
+the `prefix e` hotkey (not manual `rw handoff`).
+
+Coordinator prep (2026-08-06): slot 15 chosen — the only slot with a
+modern claim manifest (slots 1-14 carry legacy unmigrated markers that
+worktree-claim detects but never enforces, so they would not exercise the
+claim transfer at all); clean tree, low-stakes branch. Mini side: anchor
+clone + `worktree-slot ensure 15 --tier light` created
+~/Developer/content-engine-trees/content-engine-15 (unclaimed, detached).
+Mini HostName pinned (`scutil --set HostName Alfies-Mac-mini.local`) —
+was unset, a claim host-identity flip risk. Local baseline: HEAD 003d09a,
+branch fix/admin-template-legacy-heuristic-save, 0 dirty, tier=warm,
+ports NEXT=4400 DASHBOARD=4410 ENGINE=8900 EXPO=9481.
+
+Ad-hoc finding (operator, 2026-08-05): `prefix [` in a remote-backed pane
+scrolled the OUTER pane's pre-attach scrollback (rw ensure output) instead
+of the worker pane's history — the remote client sits on the alternate
+screen. FIXED: plugin now forwards copy-mode entry (`[` and PPage) to the
+inner tmux (`send-keys C-a [`) when @rw-workspace is set; local panes keep
+stock copy-mode. Entry is the only forward needed — inside inner copy-mode
+all keys already flow through the ssh tty, and yank returns via OSC 52.
+`prefix ]` deliberately not forwarded (local paste INTO remote is the
+useful direction). Applied to live server + verified via list-keys.
 
 1. COORDINATOR: pick a content-engine slot operator currently owns with
    low-stakes/no uncommitted state; `worktree-claim status` to confirm
@@ -668,8 +692,8 @@ claim transfer, done via the `prefix e` hotkey (not manual `rw handoff`).
    10/11/13, never steal a claim. The slot dir itself stays READ-ONLY for
    coordinator throughout — no edits, no git ops there, only inspection.
 2. OPERATOR: focus a pane cwd'd in that slot. `prefix e` → picker → pick
-   `agents-roll`. Watch handoff.
-3. COORDINATOR: verify placement=reflected (NO clone — agents-roll's
+   `mini`. Watch handoff.
+3. COORDINATOR: verify placement=reflected (NO clone — mini's
    matching slot dir used as-is), claim marker traveled
    (`worktree-claim handoff-writer` under the hood), local side shows
    writer=handed-off.

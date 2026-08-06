@@ -124,3 +124,19 @@ append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
 # widening the keymap changes beyond what initial-plan.md's BEHAVIOR list
 # requires (prefix+q and the \ / split bindings, both wired from
 # tmux.reset.conf directly).
+
+# --- Copy-mode forwarding for remote-backed panes ---------------------------
+# A remote-backed pane is an ssh-attached worker tmux client on the outer
+# pane's alternate screen, so local copy-mode ([ / PPage) scrolls the outer
+# pane's pre-attach scrollback (rw ensure output and older), not the worker
+# pane's real history. Forward copy-mode ENTRY to the inner tmux instead:
+# once inner copy-mode is active, every subsequent keystroke (vi motions,
+# search, y) already flows through the ssh tty verbatim, so entry is the
+# only command that needs forwarding. Yank inside inner copy-mode reaches
+# the local clipboard via OSC 52 passthrough (allow-passthrough on).
+# Workers run this same dotfiles tmux config, so the inner prefix is C-a by
+# construction. Local panes (no @rw-workspace) keep stock behavior.
+# prefix ] deliberately NOT forwarded: local paste-buffer types the LOCAL
+# buffer into the remote program, which is the useful direction.
+tmux bind-key '[' if-shell -F '#{@rw-workspace}' 'send-keys C-a [' 'copy-mode'
+tmux bind-key PPage if-shell -F '#{@rw-workspace}' 'send-keys C-a PPage' 'copy-mode -u'
