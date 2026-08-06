@@ -424,18 +424,25 @@ if [ "$agent_mode" = "full" ] && [ "$agent_outcome" = "resumed" ]; then
     divergence_risk="true"
     rw_warn "rw handoff: --keep-local -- the local $agent_provider session keeps running; transcript divergence risk recorded."
   else
+    # Kill the DETECTED provider's own processes under the pane, matched by
+    # the same per-provider pattern the adapters use -- never a blind
+    # deepest-first-child walk. claude (observed 2.1.223) keeps helper
+    # children and retitles its process to the bare version string, so the
+    # old walk descended PAST the agent, killed a helper, and left the
+    # agent running with two live copies of the session (2026-08-06,
+    # Bucket 8 lap). The pane's own shell never matches a provider pattern,
+    # so it is never signaled.
     pane_pid="$(tmux list-panes -t "$pane_id" -F '#{pane_pid}' 2>/dev/null | head -1)"
-    if [ -n "$pane_pid" ] && command -v pgrep >/dev/null 2>&1; then
-      deepest="$pane_pid"
-      while true; do
-        child="$(pgrep -P "$deepest" 2>/dev/null | head -1)"
-        [ -n "$child" ] || break
-        deepest="$child"
-      done
-      if [ "$deepest" != "$pane_pid" ]; then
-        kill -TERM "$deepest" 2>/dev/null || true
+    if [ -n "$pane_pid" ]; then
+      agent_pids="$(ps axo pid=,ppid=,command= 2>/dev/null |
+        rw_ps_tree_match_pids "$(rw_provider_pattern "$agent_provider")" "$pane_pid")"
+      if [ -n "$agent_pids" ]; then
+        # shellcheck disable=SC2086  # pid list is intentionally word-split
+        kill -TERM $agent_pids 2>/dev/null || true
         sleep 0.5
-        kill -0 "$deepest" 2>/dev/null && kill -KILL "$deepest" 2>/dev/null
+        for agent_pid in $agent_pids; do
+          kill -0 "$agent_pid" 2>/dev/null && kill -KILL "$agent_pid" 2>/dev/null
+        done
       fi
     fi
   fi

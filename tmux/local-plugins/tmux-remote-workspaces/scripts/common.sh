@@ -449,6 +449,38 @@ rw_ps_tree_matches() {
   ' | grep -Eiq "$pattern"
 }
 
+# rw_ps_tree_match_pids <pattern> <root-pid>... ; stdin: `ps axo pid=,ppid=,command=`
+#
+# Same scoping as rw_ps_tree_matches, but prints the PIDs of the matching
+# processes (one per line) instead of a boolean -- for callers that must
+# signal exactly the provider's own processes and nothing else
+# (rw-handoff.sh Step 4). The pattern is tested against the command line
+# alone (never the pid column), so anchored patterns like '(^|/)claude'
+# keep working.
+rw_ps_tree_match_pids() {
+  local pattern="$1" pid cmdline
+  shift
+  awk -v roots="$*" '
+    BEGIN { n = split(roots, r, " "); for (i = 1; i <= n; i++) rootset[r[i]] = 1 }
+    {
+      pid = $1; ppid = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", line)
+      cmd[pid] = line; parent[pid] = ppid
+    }
+    END {
+      for (p in cmd) {
+        q = p
+        while (q && !(q in rootset) && (q in parent) && parent[q] != q) q = parent[q]
+        if (q in rootset) printf "%s\t%s\n", p, cmd[p]
+      }
+    }
+  ' | while IFS=$'\t' read -r pid cmdline; do
+    printf '%s\n' "$cmdline" | grep -Eiq "$pattern" && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 # rw_wait_remote_provider_started <worker> <session_name> <provider> [tries]
 # Polls a few short retries for the provider process to show up in the
 # remote endpoint session: first via tmux's own #{pane_current_command}

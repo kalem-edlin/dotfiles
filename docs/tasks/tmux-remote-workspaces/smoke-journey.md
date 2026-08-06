@@ -762,7 +762,45 @@ Killed again; they died with the server exit.
 
 Report: how the hotkey flow felt (any friction), any refusal text hit.
 
-## [ ] Bucket 8 — Mini sweep (deferred — blocked on mini power-on)
+## [x] Bucket 8 — Mini sweep (deferred — blocked on mini power-on)
+
+DONE 2026-08-06 (coordinator sweep, mini back online):
+- `rw doctor` local: all checks passed. Mini `make headless-doctor`:
+  67/67 PASS.
+- Version skew found: local claude auto-updated to 2.1.223 (mini 2.1.220,
+  agents-roll 2.1.222 — gate would block agent handoffs). Both workers
+  updated to 2.1.223.
+- Agent handoff/return lap vs mini (scratch repo, real
+  `claude --dangerously-skip-permissions`): handoff resumed remotely with
+  VERBATIM flags (`claude --dangerously-skip-permissions --resume <id>`,
+  powerline "bypass permissions on"); return resumed locally the same;
+  sentinel CHERIMOYA recalled locally post-return (transcript intact
+  through both hops). Remote-side recall was blocked by a transient
+  claude API retry loop on mini — rw machinery fully verified regardless.
+  Registry 0, tombstones written, worker checkout/backups/transcript
+  cleaned.
+- NEW DEFECT found + FIXED same lap: rw-handoff Step 4 stopped the local
+  agent via a deepest-first-child pgrep walk; claude 2.1.223 keeps helper
+  children and retitles its process to the bare version string, so the
+  walk killed a helper and left the agent running (two live copies).
+  Replaced with provider-pattern-matched kill
+  (rw_ps_tree_match_pids in common.sh) — same patterns the adapters use.
+  Also observed (designed, not a bug): a zero-message agent has no
+  transcript, so handoff downgrades to workspace-only and leaves the
+  local agent running with a warning.
+- Zombie revival loop CONFIRMED: mini's continuum auto-restore revived
+  the two tombstoned rw-* sessions on every server start (twice today).
+  `libexec/reconcile` run ad hoc swept them (closed=2) — the sweeper
+  works against mini; the worker-side save filter fix stays queued.
+- Coordinator process note: during the manual Step-4 recovery a pid
+  misread killed the scratch pane's shell; rebuilding validated the
+  manual attach path (pane options + attach-loop respawn) end to end.
+- Remaining operator spot-check (optional, non-blocking): glance at the
+  Treemux tree (`prefix Tab`) next time a mini-backed pane is open —
+  tree machinery itself passed Bucket 4 and mini's stack is
+  doctor-verified.
+
+Original (obsolete) text follows:
 
 Old form OBSOLETE: the whole journey (Buckets 0-7) already ran on
 agents-roll, so a redundant "second worker sweep — agents-roll" bucket
@@ -845,6 +883,7 @@ Report each drill separately before starting the next.
 | 5 | PASS | ad-hoc handoff/return byte-identical incl. remote edit; traps found: return must run `--pane` from another local pane (no cross-host guard), ghost registry entry after return, worker fzf color error — all queued as fixes |
 | 6 | FAIL→FIXED→PASS | version-skew block (worker claude updated) + invisible-refusal UX (a424645); operator lap PASS both directions; access-mode drop found → allowlist mode-flag capture/replay shipped + coordinator-verified live (incl. root IS_SANDBOX guard) |
 | 7 | FAIL→FIXED→PASS | 3 first-lap finds all fixed same day (7294cab): picker offered only ensure for shell-in-worktree → intent 2b handoff default + ctrl-o; prefix-None broke copy-mode key forwarding → server-side rw-copy-mode.sh; detach-on-destroy hop into stale session → forced on at session creation. Redo lap PASS: reflected placement, branch replicated, claim gen 1→3 round trip, byte-identical, ports/tier/Supabase untouched. Queued: worker resurrect revives closed rw-* zombies |
+| 8 | PASS (1 fix) | doctors clean (local + mini 67/67); claude 2.1.223 skew fixed both workers; agent bypass-mode lap vs mini PASS both directions (verbatim flags, CHERIMOYA recall post-return); Step-4 stop walk killed claude helper not agent → pattern-matched kill shipped; reconcile swept revived zombies (closed=2); tree glance left as optional operator spot-check |
 | 7 | — | |
 | 8 | — | |
 | 9 | — | |
