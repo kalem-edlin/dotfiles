@@ -686,6 +686,37 @@ all keys already flow through the ssh tty, and yank returns via OSC 52.
 `prefix ]` deliberately not forwarded (local paste INTO remote is the
 useful direction). Applied to live server + verified via list-keys.
 
+First-lap findings (operator, 2026-08-06 — three, all fixed same day):
+
+1. `send-keys C-a [` forwarding was WRONG: endpoint sessions are created
+   with `prefix None` (headless display layer, rw_create_remote_session),
+   so the forwarded prefix typed a literal `[` into the remote shell.
+   Rewritten: rw-copy-mode.sh enters copy-mode SERVER-SIDE
+   (`ssh <worker> tmux copy-mode -t <session>`); after entry, raw keys
+   (vi motions, search, y, q) flow through the ssh tty into inner
+   copy-mode. Mechanism live-verified (pane_in_mode 1→cancel→0).
+2. `prefix e` from a plain-shell pane cwd'd in slot 15 offered only
+   ENSURE ("2/2" in the popup is fzf's match counter, not pages) — picker
+   design only offered handoff for busy agent/editor panes. The ensure
+   endpoint attached the reflected slot AS-IS: detached HEAD (slot
+   provisioning state — worktree-slot creates slots detached by design),
+   no sync, no claim travel. That also answers the operator's branch
+   question: a REAL handoff replicates the local branch remotely
+   (libexec/sync/handoff `checkout -B <branch>`). Fixed: picker intent 2b
+   — plain shell cwd'd INSIDE a git worktree now defaults enter=HANDOFF,
+   ctrl-o=old ensure-new-window.
+3. Closing the accidental ensure endpoint surfaced a real defect: the
+   worker's `detach-on-destroy off` made the pane's inner tmux client hop
+   into a STALE endpoint session (rw-d157af95-f9b422bb, tombstoned while
+   mini was packed away) instead of exiting. Fixed: endpoint sessions now
+   set `detach-on-destroy on` at creation. Both stale tombstoned sessions
+   (6681ff33, f9b422bb) killed exact-match; mini server exited (zero
+   sessions, normal). Note: coordinator misused `rw close --no-kill-pane`
+   expecting a landing shell — intentional close kills the pane BY DESIGN
+   (--no-kill-pane is for window-close callers only); operator's endpoint
+   window closed, local slot state untouched, claim intact (never
+   flipped, still owner=operator generation=1).
+
 1. COORDINATOR: pick a content-engine slot operator currently owns with
    low-stakes/no uncommitted state; `worktree-claim status` to confirm
    writer, `worktree-claim verify-writer` before anything — STOP on exit

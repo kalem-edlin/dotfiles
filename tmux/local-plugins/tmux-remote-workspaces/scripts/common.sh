@@ -339,6 +339,7 @@ rw_create_remote_session() {
     tmux new-session -d -s '$session_name' -c '$remote_path' &&
     tmux set-option -t '$session_name' prefix None &&
     tmux set-option -t '$session_name' prefix2 None &&
+    tmux set-option -t '$session_name' detach-on-destroy on &&
     tmux set-option -t '$session_name' mouse off &&
     tmux set-option -t '$session_name' escape-time 10 &&
     tmux set-option -t '$session_name' status off &&

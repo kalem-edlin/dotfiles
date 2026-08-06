@@ -10,11 +10,14 @@
 #      anything typed there lands on the WORKER's own shell (that trap cost
 #      a round trip 2026-08-05 -- `rw return` typed at the remote prompt ran
 #      the WORKER's own rw, which answered "pane %36 has no @rw-endpoint").
-#   2. Origin pane sits at a plain shell prompt -> the ORIGINAL flow,
-#      unchanged: fzf worker list, then `rw ensure --worker <alias>` typed
-#      into the pane via send-keys (with a leading C-u to clear any
-#      half-typed input) -- exactly the manual flow, just without the
-#      typing. The pane's own cwd drives `auto` workspace resolution.
+#   2. Origin pane sits at a plain shell prompt:
+#      2a. cwd NOT in a git worktree -> the ORIGINAL ensure flow,
+#          unchanged: fzf worker list, then `rw ensure --worker <alias>`
+#          typed into the pane via send-keys (with a leading C-u to clear
+#          any half-typed input). The pane's cwd drives `auto` resolution.
+#      2b. cwd INSIDE a git worktree -> workspace HANDOFF by default
+#          (enter), with ctrl-o as the escape hatch back to the 2a ensure
+#          behavior. See pick_shell_workspace.
 #   3. Origin pane is busy running a HANDOFF-ELIGIBLE program (an AI coding
 #      agent -- claude/codex/pi, the same process patterns rw-handoff.sh's
 #      own adapters use -- or nvim/vim/vi) -> fzf worker list whose header
@@ -78,20 +81,35 @@ probe_workers() {
   wait
 }
 
-# rw_pick_worker_menu <prompt> <header>
+# rw_pick_worker_menu <prompt> <header> [expect-keys]
 # Shared fzf-over-the-worker-list chooser for both the ensure and handoff
 # branches. Prints the chosen (or typed, unmatched) alias on stdout; prints
 # nothing and returns 1 on abort (esc/ctrl-c) or an empty pick.
+# With expect-keys (comma-separated, fzf --expect syntax) the accept key
+# rides along: output becomes "<key>\t<alias>", where <key> is empty for a
+# plain enter. Callers without expect-keys see the original alias-only
+# output -- parsing is unchanged for them.
 rw_pick_worker_menu() {
-  local prompt="$1" header="$2" out status sel alias
+  local prompt="$1" header="$2" expect="${3:-}" out status sel alias key=""
+  local -a expect_args=()
+  [ -n "$expect" ] && expect_args=(--expect "$expect")
   out="$(list_workers | fzf \
     --layout=reverse --info=inline \
     --prompt="$prompt" \
     --header="$header" \
     --delimiter=$'\t' \
     --print-query \
+    "${expect_args[@]}" \
     --bind "start:reload:$0 probe")"
   status=$?
+
+  # With --expect, fzf inserts the accept-key line between the query line
+  # and the selection line (empty line for plain enter); strip it into
+  # $key so the alias parsing below stays shared.
+  if [ -n "$expect" ]; then
+    key="$(printf '%s\n' "$out" | sed -n 2p)"
+    out="$(printf '%s\n' "$out" | sed 2d)"
+  fi
 
   case "$status" in
     0) sel="$(printf '%s\n' "$out" | tail -n1)" ;; # picked a listed worker
@@ -102,7 +120,11 @@ rw_pick_worker_menu() {
   alias="${sel%%$'\t'*}"
   alias="${alias//[[:space:]]/}"
   [ -n "$alias" ] || return 1
-  printf '%s\n' "$alias"
+  if [ -n "$expect" ]; then
+    printf '%s\t%s\n' "$key" "$alias"
+  else
+    printf '%s\n' "$alias"
+  fi
 }
 
 # rw_pick_handoff_kind <pane_id> <pane_current_command>
@@ -213,6 +235,37 @@ pick_ensure() {
   tmux send-keys -t "$origin_pane" C-u "rw ensure --worker $alias" Enter
 }
 
+# --- Intent 2b: shell prompt INSIDE a git worktree -> handoff by default --
+# A shell pane sitting in a worktree is almost always "send this workspace
+# to a worker" (sync + claim travel + this pane becomes the remote pane),
+# not "open an unrelated new window there" -- the 2026-08-06 Bucket 7 lap
+# hit exactly that: prefix e from a slot pane offered only ensure, which
+# attached the reflected slot AS-IS (detached HEAD, no sync, no claim
+# move). Default enter is now a workspace handoff; ctrl-o keeps the old
+# new-window ensure for when that is genuinely wanted.
+pick_shell_workspace() {
+  local origin_pane="$1" origin_cwd="$2" out key alias header
+  header="enter: HANDOFF this workspace (${origin_cwd##*/}) -- sync it and move this pane to the chosen worker
+ctrl-o: instead open a NEW remote window here (rw ensure -- no sync, remote dir used as-is)"
+
+  out="$(rw_pick_worker_menu 'rw handoff ⇒ ' "$header" 'ctrl-o')" || exit 0
+  key="${out%%$'\t'*}"
+  alias="${out#*$'\t'}"
+  [ -n "$alias" ] || exit 0
+
+  if [ "$key" = "ctrl-o" ]; then
+    tmux send-keys -t "$origin_pane" C-u "rw ensure --worker $alias" Enter
+    return
+  fi
+
+  # Workspace-only handoff of the shell pane's worktree: rw-handoff.sh
+  # detects no agent in a plain shell pane and runs its normal
+  # workspace-only path (same flow the manual `rw handoff` CLI takes),
+  # then respawns $origin_pane into the attach loop itself.
+  rw_pick_run_visible "rw handoff" \
+    "$SCRIPT_DIR/rw-handoff.sh" --worker "$alias" --pane "$origin_pane"
+}
+
 # --- Intent 3: busy handoff-eligible pane -> fzf list, then handoff -------
 pick_handoff() {
   local origin_pane="$1" origin_cmd="$2" kind="$3" header alias
@@ -261,7 +314,14 @@ pick() {
 
   case "$origin_cmd" in
     zsh | bash | sh | fish | dash | ksh)
-      pick_ensure "$origin_pane"
+      local origin_cwd
+      origin_cwd="$(tmux display-message -pt "$origin_pane" -F '#{pane_current_path}' 2>/dev/null || true)"
+      if [ -n "$origin_cwd" ] &&
+        git -C "$origin_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        pick_shell_workspace "$origin_pane" "$origin_cwd"
+      else
+        pick_ensure "$origin_pane"
+      fi
       return
       ;;
   esac

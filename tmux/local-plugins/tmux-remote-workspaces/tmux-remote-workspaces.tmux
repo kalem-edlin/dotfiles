@@ -129,14 +129,19 @@ append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
 # A remote-backed pane is an ssh-attached worker tmux client on the outer
 # pane's alternate screen, so local copy-mode ([ / PPage) scrolls the outer
 # pane's pre-attach scrollback (rw ensure output and older), not the worker
-# pane's real history. Forward copy-mode ENTRY to the inner tmux instead:
-# once inner copy-mode is active, every subsequent keystroke (vi motions,
-# search, y) already flows through the ssh tty verbatim, so entry is the
-# only command that needs forwarding. Yank inside inner copy-mode reaches
-# the local clipboard via OSC 52 passthrough (allow-passthrough on).
-# Workers run this same dotfiles tmux config, so the inner prefix is C-a by
-# construction. Local panes (no @rw-workspace) keep stock behavior.
-# prefix ] deliberately NOT forwarded: local paste-buffer types the LOCAL
-# buffer into the remote program, which is the useful direction.
-tmux bind-key '[' if-shell -F '#{@rw-workspace}' 'send-keys C-a [' 'copy-mode'
-tmux bind-key PPage if-shell -F '#{@rw-workspace}' 'send-keys C-a PPage' 'copy-mode -u'
+# pane's real history. Endpoint sessions run with `prefix None` (the inner
+# tmux is a headless display layer), so a forwarded prefix sequence would
+# just be typed into the remote program -- instead rw-copy-mode.sh enters
+# copy-mode server-side over ssh (`tmux copy-mode -t <session>`). Once the
+# inner pane is in copy-mode, every subsequent keystroke (vi motions,
+# search, y, q) already flows through the ssh tty into that mode, so entry
+# is the only round trip. Yank returns to the local clipboard via OSC 52
+# passthrough (allow-passthrough on). Local panes (no @rw-workspace) keep
+# stock behavior. prefix ] deliberately NOT forwarded: local paste-buffer
+# types the LOCAL buffer into the remote program, the useful direction.
+tmux bind-key '[' if-shell -F '#{@rw-workspace}' \
+  "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}'\"" \
+  'copy-mode'
+tmux bind-key PPage if-shell -F '#{@rw-workspace}' \
+  "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}' --page-up\"" \
+  'copy-mode -u'
