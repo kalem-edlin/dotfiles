@@ -884,6 +884,4 @@ Report each drill separately before starting the next.
 | 6 | FAIL→FIXED→PASS | version-skew block (worker claude updated) + invisible-refusal UX (a424645); operator lap PASS both directions; access-mode drop found → allowlist mode-flag capture/replay shipped + coordinator-verified live (incl. root IS_SANDBOX guard) |
 | 7 | FAIL→FIXED→PASS | 3 first-lap finds all fixed same day (7294cab): picker offered only ensure for shell-in-worktree → intent 2b handoff default + ctrl-o; prefix-None broke copy-mode key forwarding → server-side rw-copy-mode.sh; detach-on-destroy hop into stale session → forced on at session creation. Redo lap PASS: reflected placement, branch replicated, claim gen 1→3 round trip, byte-identical, ports/tier/Supabase untouched. Queued: worker resurrect revives closed rw-* zombies |
 | 8 | PASS (1 fix) | doctors clean (local + mini 67/67); claude 2.1.223 skew fixed both workers; agent bypass-mode lap vs mini PASS both directions (verbatim flags, CHERIMOYA recall post-return); Step-4 stop walk killed claude helper not agent → pattern-matched kill shipped; reconcile swept revived zombies (closed=2); tree glance left as optional operator spot-check |
-| 7 | — | |
-| 8 | — | |
 | 9 | — | |

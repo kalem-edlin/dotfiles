@@ -256,8 +256,9 @@ had_claim="false"
 if [ "$local_is_git" = "true" ] && [ -f "$local_worktree_root/$(rw_sync_claim_marker_name)" ] && [ -n "$claim_bin" ]; then
   had_claim="true"
   claim_out_file="$(mktemp "${TMPDIR:-/tmp}/rw-handoff-claim.XXXXXX")"
-  if ! "$claim_bin" handoff-writer --host "$worker" --path "$local_worktree_root" >"$claim_out_file" 2>&1; then
-    claim_status=$?
+  claim_status=0
+  "$claim_bin" handoff-writer --host "$worker" --path "$local_worktree_root" >"$claim_out_file" 2>&1 || claim_status=$?
+  if [ "$claim_status" -ne 0 ]; then
     rw_warn "rw handoff: refusing -- worktree-claim handoff-writer failed (exit $claim_status): $(cat "$claim_out_file")"
     rm -f "$claim_out_file"
     rw_log_event "handoff" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" "claim_mismatch:$claim_status"

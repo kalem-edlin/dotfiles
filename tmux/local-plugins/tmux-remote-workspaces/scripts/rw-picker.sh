@@ -216,8 +216,13 @@ rw_pick_run_visible() {
   "$@" 2>&1 | tee "$out_file"
   status=${PIPESTATUS[0]}
   if [ "$status" -ne 0 ]; then
+    # Last 300 BYTES, not first-300-of-last-3-lines: the terminal refusal
+    # line prints LAST, and an earlier benign warning (e.g. "no supported
+    # AI agent -- workspace-only handoff") used to eat the whole budget and
+    # hide the real error (2026-08-06: a claim refusal displayed as
+    # nothing but the workspace-only warning).
     tmux display-message -d 10000 \
-      "$label failed: $(tail -n 3 "$out_file" | tr '\n' ' ' | cut -c1-300)"
+      "$label failed: …$(tail -c 300 "$out_file" | tr '\n' ' ')"
   fi
   \rm -f "$out_file"
   return "$status"
