@@ -293,16 +293,70 @@ dry-run.
 
 ## Field-validation status
 
-Proven in lane testing but NOT yet organically encountered/validated in
-the field (validate stochastically as daily use continues; see
-docs/tasks/tmux-remote-workspaces/smoke-journey.md for what HAS been
-smoke-verified):
+The operator smoke journey CLOSED 2026-08-08 with every bucket passing
+(full blow-by-blow record: git history of
+`docs/tasks/tmux-remote-workspaces/smoke-journey.md`, deleted after
+close). Smoke-VERIFIED end to end on the live laptop server: ensure /
+splits / close semantics, drop-reattach, remote Treemux (tree-as-endpoint
+v2), ad-hoc + reflected-slot handoff/return with claim generation round
+trips, agent handoff with verbatim access-mode replay (claude + codex),
+OSC 52 clipboard from remote (shell + nvim yank), server-side copy-mode
+entry, laptop server-loss restore, worker-reboot endpoint rebuild from
+manifest, picker failure dialogs.
+
+NOT yet organically validated (watch stochastically in daily use):
 
 - Network-loss drop resilience (Wi-Fi off/on mid-attach): attach-loop's
-  ssh ServerAlive timeout + backoff path. Inner-detach reattach IS
-  smoke-verified (Bucket 2); a real network drop is not — operator
-  declined the synthetic drill.
+  ssh ServerAlive timeout + backoff path. Inner-detach reattach and a
+  full worker reboot ARE smoke-verified; a pure network drop is not.
+- Laptop sleep/wake with endpoints attached — deferred; it exercises the
+  same attach-loop backoff the reboot drill proved.
 - `reconcile-local`'s events.jsonl eligibility path (proof via
   restore-reattach after a server restart) — synthetic fixtures proved
   the created-after-start path and both protective guards; the
   post-restore rebind path awaits a real crash + pane-death sequence.
+
+## Operational notes (learned in the field)
+
+- After a laptop tmux server loss, restore via `tmux-restore` (on PATH;
+  tmux/scripts/tmux_restore.sh) from outside tmux — it refuses when
+  there is no snapshot and leaves no bootstrap session behind.
+- Server loss mints NEW session uuids; only endpoint-hosting sessions
+  get re-stamped. Any worktree claim held by a pre-loss session uuid
+  then refuses handoffs with exit 10 until GC'd (verify the owner uuid
+  is dead, then `worktree-claim claim --force-takeover` + `release`).
+- Endpoints do NOT survive a laptop server loss: restored attach-loop
+  panes come back as plain shells, so reconcile closes the endpoints
+  cleanly (no zombies). Re-open with `prefix e`. Reattach-on-restore is
+  a backlog design item, not a bug.
+- Don't hand off a worktree while another local agent/editor is actively
+  writing in it — the sync verify will (correctly) refuse; the picker
+  dialog names this case. Pause the writer, retry.
+- Worker-side continuum restore revives CLOSED rw-* sessions from stale
+  saves (live-endpoint durability is the point; closed ones are noise).
+  Laptop-side `libexec/reconcile` protects pre-restart registry entries
+  by design; a lingering one is closed with `rw_close_endpoint_core`.
+
+## Post-journey backlog (queued, non-blocking)
+
+1. Endpoint reattach-on-restore design (attach-loop panes aren't
+   resurrect-whitelisted; server loss closes endpoints instead).
+2. Post-restore claim sweep: auto-release claims owned by session uuids
+   no longer alive on this machine.
+3. Worker-side resurrect save filter for CLOSED rw-* sessions (zombie
+   revival loop).
+4. Sync fingerprint hardening: hash content (write-tree), not diff text
+   (host-config-sensitive via core.abbrev auto / diff.algorithm); derive
+   the source fingerprint from the captured artifacts to shrink the
+   mid-sync race.
+5. `rw close --endpoint <id>` alias (today `--pane` only).
+6. CLI close without `--reason` logs the misleading default
+   `reason=prefix+q`.
+7. Stock resurrect's `ps` save-strategy captures the tree-listener's ssh
+   child as a stray (harmless, unreplayable) snapshot line.
+8. Tombstones record `endpoint_id: null`.
+9. Tree-endpoint rebuild recreates a shell session; tree endpoints are
+   not guarded against handoff eligibility.
+10. Laptop HostName pin (`sudo scutil --set HostName ...`) — unset
+    HostName flips host identity across reboots and storms claim
+    host-mismatch (exit 11).
