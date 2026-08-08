@@ -91,6 +91,11 @@ probe_workers() {
 # output -- parsing is unchanged for them.
 rw_pick_worker_menu() {
   local prompt="$1" header="$2" expect="${3:-}" out status sel alias key=""
+  # The ${arr[@]+...} guard at the expansion below is load-bearing: the
+  # popup resolves `env bash` to macOS /usr/bin/bash 3.2 (tmux server PATH
+  # puts /usr/bin first), and on 3.2 an EMPTY-array "${arr[@]}" is FATAL
+  # under set -u -- it killed every no-expect menu (ensure and busy-agent
+  # handoff) the instant the popup opened, 2026-08-08.
   local -a expect_args=()
   [ -n "$expect" ] && expect_args=(--expect "$expect")
   out="$(list_workers | fzf \
@@ -99,7 +104,7 @@ rw_pick_worker_menu() {
     --header="$header" \
     --delimiter=$'\t' \
     --print-query \
-    "${expect_args[@]}" \
+    ${expect_args[@]+"${expect_args[@]}"} \
     --bind "start:reload:$0 probe")"
   status=$?
 
