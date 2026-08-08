@@ -831,6 +831,19 @@ gives explicit go, THEN serialized — one drill at a time, report before
 the next starts. Coordinator never touches live tmux directly (standing
 rule); every live-server action below is OPERATOR's hands.
 
+Ad-hoc pre-drill finding (2026-08-08): operator's `prefix e` from a new
+local window flashed the picker and died instantly. Root cause: 7294cab's
+`expect_args=()` — empty-array `"${arr[@]}"` is fatal under `set -u` on
+bash 3.2, and the popup's `env bash` resolves to /usr/bin/bash 3.2 (tmux
+PATH puts /usr/bin first). Every no-expect menu (2a ensure, intent-3
+handoff) was broken since 7294cab; all Aug-6 laps went down the worktree
+path (expect non-empty) so it never surfaced. Fixed 6bc4524 with the
+`${arr[@]+...}` idiom; unit-proven under /bin/bash 3.2 with stubbed fzf
+(no-expect, expect+enter, expect+ctrl-o all pass; HEAD~ reproduces the
+unbound-variable crash). agents-roll pulled; mini UNREACHABLE at the
+time (ssh timeout — fix is laptop-side, retry not blocked, but drills 1/3
+need mini back).
+
 0. COORDINATOR: `brew upgrade tmux` to 3.7b — the running 3.6b binary is
    crash-prone (self-crashed once already, 2026-08-04). Doesn't touch the
    live server process; the new binary takes effect on next server start,
