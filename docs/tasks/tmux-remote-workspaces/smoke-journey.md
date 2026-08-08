@@ -877,6 +877,31 @@ need mini back).
      (`@resurrect-hook-post-restore-all` chain) reattached desired
      endpoints / closed orphans; `rw-post-restore` re-stamped session
      UUIDs; the server now running is 3.7b.
+   - [x] PASS-WITH-FIXES 2026-08-08. Server now 3.7b (3.6b retired); all
+     15 sessions restored; no stale ssh paste (wrapper commands not in
+     resurrect's process whitelist); `@session-uuid` stamped everywhere.
+     MAJOR regression found+fixed: workspace-resurrect replay delivered
+     every queued resume command as literal `^[[200~cmd^[[201~` + "zsh:
+     substitution failed" -- restore.sh hand-built ESC markers but
+     paste-buffer WITHOUT `-S` let vis(3) sanitize ESC into literal `^[`
+     text; zsh's buffer-capture hook then re-saved the mangled text into
+     the sidecar (self-reinforcing). Fixed c8ff05b: poll pane
+     `bracket_paste_flag` then paste with `-S` (single-line unmarked
+     fallback). Cleanup: one-shot script cleared + re-queued clean
+     commands in all 18 affected panes (verified), forced sidecar re-save
+     (0 markers). Also NEW `tmux-restore` CLI (c8ff05b, symlinked
+     ~/.local/bin) = outside-tmux restore-and-attach, no junk bootstrap
+     session, refuses when no snapshot. QUEUED findings: (a) mini
+     endpoints were NOT reattached on restore -- attach-loop wrapper
+     panes aren't resurrect-whitelisted, restored as plain zsh, so
+     post-restore found no candidate panes and reconcile closed both
+     endpoints as orphans (clean close, remote sessions killed, no
+     zombies -- but reattach-on-restore needs a design decision);
+     (b) all sessions got NEW uuids (re-stamp path only fires for
+     endpoint-hosting sessions) -- any worktree claim held by a pre-kill
+     session uuid is now stale and will exit-10 until GC'd
+     (force-takeover+release after dead-owner check). Local claude
+     auto-updated to 2.1.226 mid-drill; both workers bumped to match.
 3. Worker reboot recovery — BLOCKED on mini power-on (see Bucket 8); when
    mini is back:
    - OPERATOR: have an endpoint attached to mini, watch it through the
