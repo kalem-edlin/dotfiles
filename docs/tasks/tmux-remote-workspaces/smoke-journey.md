@@ -852,6 +852,22 @@ need mini back).
    - OPERATOR: leave 1-2 real remote panes up ≥ ~6 min, otherwise idle.
    - COORDINATOR: verify a fresh `tmux_resurrect_*.txt` appears, records
      the remote panes with `@workspace-resurrect-skip` semantics.
+   - [x] PASS 2026-08-08. Operator opened mini ensure (endpoint b8600da0,
+     mode=plain, dotfiles:2 pane %156) + treemux tree (0e1c539f, %157) —
+     field-proving the 6bc4524 picker fix on the way. Autosaves landing
+     on 5-min cadence; newest `tmux_resurrect_20260808T031758.txt`,
+     `last` → newest. Worker pane recorded as its stable wrapper
+     (`bash attach-loop.sh b8600da0 --fresh`), tree pane as
+     `rw-tree-listener.sh 0e1c539f`; both panes carry
+     `@workspace-resurrect-skip=1` (gates the workspace-resurrect
+     sidecar replay; stock resurrect protection = wrapper command +
+     ssh/bash absent from `@resurrect-default-processes` + rw-client
+     guard patch). One cosmetic finding QUEUED: resurrect's `ps`
+     save-strategy also captured the tree-listener's ssh child as a
+     stray untabbed line in the snapshot — not a valid record type, not
+     replayable (ssh not in default-processes), but snapshot noise /
+     plaintext hygiene; fix later (per-pane save-command strategy or
+     child-suppression), non-blocking.
 2. Default-server-loss drill (THIS KILLS YOUR LIVE SESSIONS — that is the
    test):
    - OPERATOR: give explicit go, then kill the live laptop tmux server,
