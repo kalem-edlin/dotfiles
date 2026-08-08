@@ -823,7 +823,7 @@ When mini is back:
 Report (once unblocked): coordinator flags readiness; operator's
 spot-check impressions.
 
-## [ ] Bucket 9 — LIVE PRODUCTION CANARIES (⚠️ gated — coordinator warns first)
+## [x] Bucket 9 — LIVE PRODUCTION CANARIES (⚠️ gated — coordinator warns first)
 
 DO NOT start this bucket ad hoc. It intentionally disrupts the live
 laptop tmux server. Coordinator restates the warning below, operator
@@ -909,9 +909,47 @@ need mini back).
    - COORDINATOR: trigger mini's reboot (ssh); verify attach-loop backed
      off through the reboot and rebuilt the endpoint on boot
      (worker-server-loss path), pane came back.
+   - [x] PASS 2026-08-08. Endpoint ff8d1617 (workspace handoff of
+     ~/Developer/dotfiles, pane %40) rode out `sudo shutdown -r now`: 4
+     logged reconnect drops with backoff, then at 16:09:50 `rebuild`
+     success ("worker resurrection did not recover the session; rebuilt
+     from manifest") — pane restored to the workspace prompt on the
+     right branch. Pre-drill: 3 more prefix-e refusals root-caused same
+     day (stale claim post-restore GC'd; source-changed-during-sync now
+     its own honest error 63505d0; picker failures now a dismissible
+     cause+action DIALOG 619f10e, no more status-bar flash). Post-drill:
+     mini's restore revived the old tree session again; reconcile
+     correctly protected the pre-restart registry entry (by-design
+     guard), closed explicitly via rw_close_endpoint_core (tombstone,
+     reason=stale-tree-post-restore-gc). Return via prefix e PASS;
+     landing shell printed a literal `^[[I` (focus-event report left
+     enabled across teardown) — fixed in attach-loop exit_pane_released
+     (reset ?1004/?2004 before exec shell).
 4. Optional — focus-Mac sleep/wake with endpoints attached:
    - OPERATOR: sleep/wake the laptop with an endpoint attached.
    - COORDINATOR: verify reconnect, no orphaned state.
+   - [~] DEFERRED to organic daily use (same rationale as the Bucket-2
+     Wi-Fi drill): the reconnect path is the attach-loop backoff drill 3
+     just proved; sleep/wake happens constantly in real use.
+
+---
+
+## JOURNEY CLOSED 2026-08-08
+
+All buckets [x]. Post-journey backlog (queued, non-blocking), roughly by
+value: (1) endpoint reattach-on-restore design — attach-loop panes are
+not resurrect-whitelisted, so server loss closes endpoints instead of
+reattaching; (2) post-restore claim sweep — auto-release claims owned by
+session uuids no longer alive on this machine (two manual GCs in two
+days); (3) worker-side resurrect save filter for CLOSED rw-* sessions
+(zombie revival loop); (4) sync fingerprint hardening — hash content
+(write-tree), not diff text (host-config-sensitive: core.abbrev auto,
+diff.algorithm), and compute source fp from captured artifacts to shrink
+the mid-sync race; (5) `rw close --endpoint <id>` alias; (6) CLI close
+default reason mislabel; (7) resurrect ps save-strategy captures the
+tree-listener's ssh child as a stray snapshot line; (8) tombstone
+endpoint_id null field; (9) tree-endpoint rebuild/eligibility items;
+(10) laptop HostName pin (scutil).
 
 Standing safety rules for every coordinator action in this bucket:
 exact-match tmux kills only (`'=name'`), never `kill-server` on a
@@ -938,4 +976,4 @@ Report each drill separately before starting the next.
 | 6 | FAIL→FIXED→PASS | version-skew block (worker claude updated) + invisible-refusal UX (a424645); operator lap PASS both directions; access-mode drop found → allowlist mode-flag capture/replay shipped + coordinator-verified live (incl. root IS_SANDBOX guard) |
 | 7 | FAIL→FIXED→PASS | 3 first-lap finds all fixed same day (7294cab): picker offered only ensure for shell-in-worktree → intent 2b handoff default + ctrl-o; prefix-None broke copy-mode key forwarding → server-side rw-copy-mode.sh; detach-on-destroy hop into stale session → forced on at session creation. Redo lap PASS: reflected placement, branch replicated, claim gen 1→3 round trip, byte-identical, ports/tier/Supabase untouched. Queued: worker resurrect revives closed rw-* zombies |
 | 8 | PASS (1 fix) | doctors clean (local + mini 67/67); claude 2.1.223 skew fixed both workers; agent bypass-mode lap vs mini PASS both directions (verbatim flags, CHERIMOYA recall post-return); Step-4 stop walk killed claude helper not agent → pattern-matched kill shipped; reconcile swept revived zombies (closed=2); tree glance left as optional operator spot-check |
-| 9 | — | |
+| 9 | PASS (all drills) | drill 1 autosave PASS; drill 2 server-loss PASS-WITH-FIXES (replay paste mangle root-caused c8ff05b, tmux-restore CLI added, 3.6b→3.7b swap landed); drill 3 mini reboot PASS (backoff → rebuild-from-manifest); drill 4 deferred to daily use; picker failure dialog shipped 619f10e; journey CLOSED |

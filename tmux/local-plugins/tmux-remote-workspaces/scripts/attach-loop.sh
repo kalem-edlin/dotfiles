@@ -109,6 +109,11 @@ pane_released() {
 }
 
 exit_pane_released() {
+  # The inner tmux enabled focus-event reporting (and possibly bracketed
+  # paste) on this tty; the ssh teardown does not switch them off, so the
+  # landing shell gets literal reports typed at it ("^[[I" on focus,
+  # observed 2026-08-08). Reset both before handing the tty over.
+  printf '\033[?1004l\033[?2004l'
   echo "rw: endpoint $endpoint_id was returned; this pane is local again."
   # This loop is normally the pane's ROOT process (rw-handoff/rw-ensure
   # exec it, or respawn-pane runs it directly), so a plain exit would KILL
