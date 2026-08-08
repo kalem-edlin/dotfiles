@@ -209,11 +209,12 @@ pick_return() {
 }
 
 # Run the handed command with output live in the popup AND captured; on
-# failure, park the tail of that output in a long-lived display-message.
-# display-popup -E closes the popup the instant the command exits, so a
-# refusal (version policy, preflight, divergence gate) otherwise just
-# flashes and vanishes -- the operator watched a silent empty box do
-# nothing (2026-08-05, agent_version_blocked:claude was invisible).
+# failure, hold the popup open as a dismissible DIALOG explaining the
+# failure in one cause line + one action line. Never a status-bar
+# display-message: refusals flashed there were unreadable/mistakable
+# (2026-08-05 invisible version block; 2026-08-06 truncated claim refusal;
+# 2026-08-08 operator: "a dialog I can dismiss, not useless text in the
+# command bar").
 rw_pick_run_visible() {
   local label="$1" out_file status
   shift
@@ -221,16 +222,49 @@ rw_pick_run_visible() {
   "$@" 2>&1 | tee "$out_file"
   status=${PIPESTATUS[0]}
   if [ "$status" -ne 0 ]; then
-    # Last 300 BYTES, not first-300-of-last-3-lines: the terminal refusal
-    # line prints LAST, and an earlier benign warning (e.g. "no supported
-    # AI agent -- workspace-only handoff") used to eat the whole budget and
-    # hide the real error (2026-08-06: a claim refusal displayed as
-    # nothing but the workspace-only warning).
-    tmux display-message -d 10000 \
-      "$label failed: …$(tail -c 300 "$out_file" | tr '\n' ' ')"
+    rw_pick_failure_dialog "$label" "$out_file"
   fi
   \rm -f "$out_file"
   return "$status"
+}
+
+# Map every KNOWN refusal/protection to a two-line human explanation;
+# unknown failures fall back to the output tail. Keep entries SHORT: one
+# cause line, one action line -- no essays.
+rw_pick_failure_dialog() {
+  local label="$1" out_file="$2" cause="" action=""
+  if grep -q 'SOURCE workspace changed while the handoff was in flight\|source_changed_during_sync' "$out_file"; then
+    cause="another writer (a running agent or editor) edited this workspace mid-handoff"
+    action="pause/finish that writer, then retry"
+  elif grep -q 'exit 10' "$out_file"; then
+    cause="another session owns this worktree's claim"
+    action="run 'worktree-claim status' -- if the owner session is dead, have the coordinator GC it"
+  elif grep -q 'exit 11' "$out_file"; then
+    cause="claim is held by a different machine (host mismatch)"
+    action="return/hand back from that host, or resolve the claim explicitly"
+  elif grep -q 'exit 13' "$out_file"; then
+    cause="claim is in a conflicted state"
+    action="inspect with 'worktree-claim status' before anything else"
+  elif grep -qi 'ssh_unreachable\|unreachable\|Connection timed out\|Could not resolve' "$out_file"; then
+    cause="worker is unreachable over ssh"
+    action="check the worker is awake/on the network, then retry"
+  elif grep -qi 'version' "$out_file" && grep -qi 'block' "$out_file"; then
+    cause="agent CLI version differs between here and the worker"
+    action="update the older side, then retry"
+  elif grep -qi 'diverged' "$out_file"; then
+    cause="the worker's copy of this workspace has diverged from local"
+    action="inspect it, or re-run with --force-diverged (backup is taken)"
+  elif grep -q 'destination content does not match' "$out_file"; then
+    cause="post-sync verification failed; the worker copy is unverified"
+    action="inspect the destination path from the log before retrying"
+  else
+    cause="unrecognized failure -- last output:"
+    action="$(tail -n 2 "$out_file" | tr '\n' ' ')"
+  fi
+  printf '\n\033[1m%s failed\033[0m\n  cause:  %s\n  action: %s\n\n  [press any key to dismiss]\n' \
+    "$label" "$cause" "$action"
+  # Popup tty, not stdin: some callers run us with stdin </dev/null.
+  read -r -s -n 1 2>/dev/null </dev/tty || true
 }
 
 # --- Intent 2: plain shell prompt -> original ensure flow, unchanged ------
