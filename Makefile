@@ -12,13 +12,15 @@ DOTFILES := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 # Ensure Homebrew is in PATH (for stow and other tools)
 BREW_PREFIX := $(shell if [ -f /opt/homebrew/bin/brew ]; then echo /opt/homebrew; elif [ -f /usr/local/bin/brew ]; then echo /usr/local; fi)
+ifneq ($(BREW_PREFIX),)
 export PATH := $(BREW_PREFIX)/bin:$(PATH)
+endif
 
 # Packages that go to ~/.config/ (full local install)
 CONFIG_PACKAGES := aerospace ghostty nvim sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~) (full local install)
-STOW_PACKAGES := claude codex git kindavim pi ssh vim worktrees zsh
+STOW_PACKAGES := claude codex eza git kindavim pi ssh vim worktrees zsh
 
 # Headless variants: CLI-only subsets of the above (no aerospace, ghostty,
 # sketchybar, kindavim — GUI/local-specific). Kept as explicit lists rather
@@ -26,7 +28,7 @@ STOW_PACKAGES := claude codex git kindavim pi ssh vim worktrees zsh
 # between local and headless package sets stays visible here, not hidden in
 # logic. See docs/headless-vs-local.md for the shared-contract design.
 HEADLESS_CONFIG_PACKAGES := nvim tmux
-HEADLESS_STOW_PACKAGES := claude codex git pi ssh vim worktrees zsh
+HEADLESS_STOW_PACKAGES := claude codex eza git pi ssh vim worktrees zsh
 
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User

@@ -46,6 +46,18 @@ case "$status_right" in
   *) fail "Continuum timer is missing from status-right" ;;
 esac
 
+save_path="$(tmux show-option -gqv @resurrect-save-script-path 2>/dev/null || true)"
+case "$save_path" in
+  *tmux/scripts/resurrect_save.sh) pass "Continuum uses the verified save wrapper" ;;
+  *) fail "Continuum does not use the verified save wrapper" ;;
+esac
+
+manual_binding="$(tmux list-keys -T prefix C-s 2>/dev/null || true)"
+case "$manual_binding" in
+  *manual_resurrect_save.sh*'#{@rw-worker}'*) pass "manual save binding is remote-aware" ;;
+  *) fail "manual save binding is not remote-aware" ;;
+esac
+
 save_hook="$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null || true)"
 restore_hook="$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null || true)"
 case "$save_hook" in
@@ -94,7 +106,7 @@ esac
 # tmux-workspace-resurrect.tmux.
 detached_hook="$(tmux show-hooks -g 2>/dev/null | grep '^client-detached')"
 case "$detached_hook" in
-  *tmux-resurrect/scripts/save.sh*) pass "client-detached save hook is present" ;;
+  *scripts/resurrect_save.sh*) pass "verified client-detached save hook is present" ;;
   *) fail "client-detached save hook is missing" ;;
 esac
 

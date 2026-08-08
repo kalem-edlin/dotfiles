@@ -57,4 +57,4 @@ tmux bind-key C-g run-shell "bash '$PLUGIN_DIR/scripts/doctor.sh'"
 # Failures here are guarded to stay silent — this must never surface an
 # error to a detaching user.
 tmux set-hook -g client-detached \
-  "run-shell -b \"bash '$PLUGIN_DIR/../../plugins/tmux-resurrect/scripts/save.sh' quiet >/dev/null 2>&1 || true\""
+  "run-shell -b \"bash '$PLUGIN_DIR/../../scripts/resurrect_save.sh' quiet >/dev/null 2>&1 || true\""

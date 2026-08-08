@@ -8,6 +8,23 @@ local upstream_init = vim.fn.expand("~/.config/tmux/plugins/treemux/configs/tree
 local lines = vim.fn.readfile(upstream_init)
 local source = table.concat(lines, "\n")
 
+-- Treemux uses its own minimal Neovim config, so it does not inherit the
+-- remote clipboard provider from ~/.config/nvim/init.lua. On an rw worker,
+-- force writes to the + register through OSC 52 so they traverse the nested
+-- tmux/SSH chain and land on the focus machine's clipboard.
+vim.opt.clipboard = "unnamedplus"
+if (vim.env.SSH_TTY or vim.env.SSH_CONNECTION) and vim.fn.has("nvim-0.10") == 1 then
+  local osc52 = require("vim.ui.clipboard.osc52")
+  local function paste_reg()
+    return { vim.split(vim.fn.getreg('"'), "\n"), vim.fn.getregtype('"') }
+  end
+  vim.g.clipboard = {
+    name = "OSC 52",
+    copy = { ["+"] = osc52.copy("+"), ["*"] = osc52.copy("*") },
+    paste = { ["+"] = paste_reg, ["*"] = paste_reg },
+  }
+end
+
 local catppuccin_spec = [[
   {
     "catppuccin/nvim",
@@ -148,6 +165,42 @@ source, neo_tree_git_mapping_count = source:gsub(
               ["zt"] = { function() vim.cmd("normal! zt") end, desc = "row to top" },
               ["zb"] = { function() vim.cmd("normal! zb") end, desc = "row to bottom" },
               ["g"] = { "show_help", nowait = false, config = { title = "Git", prefix_key = "g" } },
+              ["gy"] = {
+                function(state)
+                  local node = state.tree and state.tree:get_node()
+                  local path = node and node:get_id()
+                  if not path then
+                    return
+                  end
+                  vim.fn.setreg("+", path)
+                  vim.notify("Copied absolute path: " .. path)
+                end,
+                desc = "copy absolute path",
+              },
+              ["Y"] = {
+                function(state)
+                  local node = state.tree and state.tree:get_node()
+                  local path = node and node:get_id()
+                  local root = state.path
+                  if not path or not root then
+                    return
+                  end
+
+                  path = vim.fs.normalize(path)
+                  root = vim.fs.normalize(root)
+                  local relative_path = "."
+                  if path ~= root then
+                    local root_prefix = root:sub(-1) == "/" and root or (root .. "/")
+                    relative_path = path:sub(1, #root_prefix) == root_prefix
+                        and path:sub(#root_prefix + 1)
+                      or path
+                  end
+
+                  vim.fn.setreg("+", relative_path)
+                  vim.notify("Copied root-relative path: " .. relative_path)
+                end,
+                desc = "copy root-relative path",
+              },
               ["ga"] = { "git_add_file", desc = "stage" },
               ["gu"] = { "git_unstage_file", desc = "unstage" },
               ["gt"] = { "git_toggle_file_stage", desc = "toggle stage" },

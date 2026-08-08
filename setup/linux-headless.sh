@@ -23,13 +23,10 @@ SETUP_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 # ~/.local/bin holds `claude` (installed by misc-headless.sh below), `rw`
 # (linked by install_headless_dotfiles below via lib.sh's link_rw), and the
 # worktree-slot/worktree-claim entrypoints the `worktrees` package stows
-# later in this same script. Put it on PATH now so every later step in THIS
-# process — verify_commands in particular — can resolve them without
-# depending on a login shell having sourced zsh/.zshenv first.
-case ":$PATH:" in
-  *":$HOME/.local/bin:"*) ;;
-  *) export PATH="$HOME/.local/bin:$PATH" ;;
-esac
+# later in this same script. Put it FIRST on PATH now so every later step in
+# THIS process — including the upstream Neovim fallback and verify_commands
+# — resolves managed user-local commands ahead of old distro packages.
+export PATH="$HOME/.local/bin:$PATH"
 
 if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   SUDO=()
@@ -541,8 +538,8 @@ install_headless_dotfiles() {
 
   ensure_ssh_dirs
 
-  backup_conflicts claude codex git pi ssh vim worktrees zsh
-  stow_packages claude codex git pi ssh vim worktrees zsh
+  backup_conflicts claude codex eza git pi ssh vim worktrees zsh
+  stow_packages claude codex eza git pi ssh vim worktrees zsh
 
   # codex ships no config.toml in the stowed package (codex writes project
   # trust entries straight into that file, so symlinking it would dirty the
@@ -654,6 +651,7 @@ install_tmux_resurrect_save_timer() {
 verify_commands() {
   local command_name
   local missing=0
+  local nvim_version nvim_major nvim_minor
   local required_commands=(
     zsh git git-lfs stow tmux nvim jq curl rsync tar
     node npm pi codex claude ob
@@ -669,6 +667,18 @@ verify_commands() {
       missing=1
     fi
   done
+
+  if command -v nvim >/dev/null 2>&1; then
+    nvim_version="$(nvim --version 2>/dev/null | sed -n '1s/^NVIM v\([0-9][0-9.]*\).*$/\1/p')"
+    nvim_major="${nvim_version%%.*}"
+    nvim_minor="${nvim_version#*.}"
+    nvim_minor="${nvim_minor%%.*}"
+    if [[ ! "$nvim_major" =~ ^[0-9]+$ ]] || [[ ! "$nvim_minor" =~ ^[0-9]+$ ]] || \
+       (( nvim_major == 0 && nvim_minor < 10 )); then
+      echo "ERROR: Neovim >= 0.10 is required after setup; found ${nvim_version:-unreadable} at $(command -v nvim)." >&2
+      missing=1
+    fi
+  fi
 
   # Stripe is intentionally NOT in required_commands above — it is not part
   # of the required worker contract (headless-doctor treats it as

@@ -441,6 +441,12 @@ issue a reset/redraw on the local pane as part of recovery.
 Reflection must be configuration-driven and support multiple repositories. It
 must not contain content-engine-specific assumptions.
 
+A reflected repository may be scoped to an explicit allowlist of worker
+aliases. Omitting that allowlist reflects it to every configured worker. This
+lets a durable slot collection exist on a prepared worker such as `mini` while
+another worker such as `agents-roll` uses namespaced ad hoc placement for the
+same repository.
+
 A host/repository configuration maps a relative focus path to a relative worker
 path. For example:
 
@@ -1087,7 +1093,8 @@ Extraction fact: content-engine's `worktree-claim.ts` was a self-contained
 356 lines, roughly 90% generic, with its only content-engine coupling a
 single `env:pull` invocation — so claim-mechanics extraction was low-risk,
 and it shipped as one PR: https://github.com/kalem-edlin/content-engine/pull/431
-(`chore/retire-worktree-claim`, in review as of 2026-08-02). It deletes
+(`chore/retire-worktree-claim`, merged into `main` as `c8c4911fc` on
+2026-08-03). It deletes
 `worktree-claim.ts` and its three `package.json` scripts outright, drops the
 redundant `.worktree-claim` gitignore entry, and points `AGENTS.md` and
 `env-rendering.md` at the global dotfiles rules instead of restating them.
@@ -1855,12 +1862,12 @@ as part of verification — that mutates live claim state for a workspace that
 may have in-flight work.
 
 **Definition of done.** The dotfiles-side capability gaps (1 and 2 above) are
-DONE as of 2026-08-02. The code retirement is DONE, shipped as PR #431 (in
-review). The remaining, non-gating part of (b) is done when: PR #431 merges;
-all 14 currently-claimed markers are migrated by their actual owners; slots
-10 and 12 are repaired to their correct ports (see "Content-engine
-follow-up: a separate PR" below for the authoritative checklist); and the
-read-only verification commands above are rerun clean against all 15 slots.
+DONE as of 2026-08-02. The code retirement is DONE and PR #431 merged on
+2026-08-03. The remaining, non-gating part of (b) is done when all currently
+legacy claimed markers are migrated by their actual owners and the read-only
+verification commands above are rerun clean against all 15 slots. The slot
+10/12 port repair is already complete (see "Content-engine follow-up: a
+separate PR" below for the authoritative checklist).
 This item does not gate any dotfiles-side smoke wave (see the gating
 relationship above) and can proceed in parallel with (a).
 
@@ -2463,10 +2470,10 @@ the smoke-testing waves above, and do not gate them. This subsection is the
 single place that states what the content-engine PR changed, what's left as
 live-state operator work, and what already works today independent of either.
 
-**Code retirement: DONE, shipped as one PR, in review as of 2026-08-02.**
+**Code retirement: DONE, merged into `main` on 2026-08-03.**
 https://github.com/kalem-edlin/content-engine/pull/431
-(`chore/retire-worktree-claim`, off `origin/main` at `b29491933`, authored in
-an ephemeral worktree outside the claim system; not yet merged). It:
+(`chore/retire-worktree-claim`, merge commit `c8c4911fc`, authored in an
+ephemeral worktree outside the claim system). It:
 
 - Deletes `scripts/worktree-claim.ts` (356 lines, confirmed; roughly 90%
   generic claim/release/status/tmux-ownership/slot-claiming/machine-writer
@@ -2489,8 +2496,8 @@ an ephemeral worktree outside the claim system; not yet merged). It:
   of `platform/gcp/protocols/env-rendering.md`, keeping that file's
   content-engine-specific URL-derivation/Bonjour/`LOCAL_HOST` behavior.
 
-**Reversed 2026-08-03: `scripts/sync-env-worktrees.ts` is DELETED** (PR
-#433, `chore/ports-from-env-ports-file`, commit `e886bfa3d`), superseding
+**Reversed 2026-08-03: `scripts/sync-env-worktrees.ts` is DELETED** (merged PR
+#433, merge commit `8daeba133`; implementation commit `e886bfa3d`), superseding
 the earlier "kept" decision above this note replaced. Two reasons: its
 `_PORT` renumbering used stride 1 (slot 11 would get `NEXT_PORT=3010` —
 `DASHBOARD_PORT`'s base), a third allocator actively fighting `env:pull`'s
@@ -2508,19 +2515,18 @@ before this PR and required no code change: it is opted into
 `github.com/kalem-edlin/content-engine`, `slot_capacity: 20`, services
 `NEXT`/`DASHBOARD`/`ENGINE`/`EXPO`, `block_size: 100`, default tier `warm`).
 
-**Still open — live-state operator work, out of PR #431's scope, not a PR:**
+**Live-state operator work, out of PR #431's scope, not a PR:**
 
-- Port repair on slots 10 and 12: one-time restoration of the correct
-  `(N - 1) * block_size` ports on slots 10/11 and 12/13, currently corrupted
-  by the old linear `slot - 1` formula (both pairs currently share identical
-  dev-server ports). Confirmed with `worktree-slot ensure <N> --dry-run`:
-  `ensure 11 --dry-run` also hit a *live* listener on port 9081 (an Expo dev
-  server whose cwd is `content-engine-10`), so the repair needs that process
-  stopped or moved, not just config values fixed.
-- Per-slot `.worktree-claim` marker migration for **all 14 currently-claimed
-  slots** (1-14; only slot 15 is unclaimed — slot 3 was claimed partway
+- ~~Port repair on slots 10 and 12~~ DONE 2026-08-03. The stale slot-10 Expo
+  listener on slot 11's assigned port 9081 was stopped, and
+  `worktree-slot ensure` rendered validated `.worktree-slot.json` and
+  `.env.ports` files for all 15 numbered slots. Slots 10-13 now hold their
+  correct non-overlapping port blocks (3900/4000/4100/4200 for `NEXT`).
+- Per-slot `.worktree-claim` marker migration remains for **13 slots** (1-12
+  and 14). Slot 13 now has a current JSON claim and slot 15 is unclaimed.
+  Slot 3 was claimed partway
   through the 2026-08-02 investigation session, which is why an earlier pass
-  that session counted it among the unclaimed). Legacy markers are key=value
+  that session counted it among the unclaimed. Legacy markers are key=value
   or colon-delimited (`worktree-claim`'s `wt_marker_is_legacy` treats both
   identically — any `.worktree-claim` content that is not valid JSON).
   Example, from `content-engine-1/.worktree-claim` (itself one of the 14
@@ -2544,13 +2550,12 @@ before this PR and required no code change: it is opted into
   localhost redirect enumeration (3010-3014) was port-globbed in the same
   commit.
 
-**What already works today, independent of PR #431 merging.** The
-dotfiles-side `worktree-slot` and `worktree-claim` executables are capable of
-operating against content-engine's opted-in configuration right now,
-including against slots that still carry a legacy marker — but capable is
-not the same as exercised: as of the 2026-08-02 investigation there are zero
-`.worktree-slot.json` manifests across any of the 15 slots, so no slot has
-ever actually had the new allocator run against it. `worktree-slot ensure`,
+**What works now that PRs #431 and #433 are merged.** The
+dotfiles-side `worktree-slot` and `worktree-claim` executables operate against
+content-engine's opted-in configuration right now, including against slots
+that still carry a legacy marker. As of 2026-08-03, all 15 numbered slots have
+allocator-rendered `.worktree-slot.json` manifests and `.env.ports` files.
+`worktree-slot ensure`,
 `worktree-claim claim/release/status/verify-writer`, and the deterministic
 port allocator would all run today if invoked. `.worktree-claim` is already
 globally ignored by dotfiles'
@@ -2564,18 +2569,17 @@ claim marker (unmigrated — see content-engine extraction PR)" in
 NOT block writes. New claims and handoffs written by `worktree-claim` on any
 slot, migrated or not, always use the current JSON schema.
 
-**What remains true until PR #431 merges:** content-engine's own
-`worktree:claim`/`worktree:release`/`worktree:status` scripts stay live on
-`main` and duplicate the dotfiles-owned implementation. Enforcement over any
-unmigrated slot stays advisory-only regardless of merge state — a warning,
-never a block — until each slot's marker is actually migrated, per the
-INTERIM BEHAVIOR decision recorded in the adversarial-audit findings above.
-Of the two disagreeing port derivations, both are now gone from the code:
+Now that PR #431 is merged, content-engine's duplicate
+`worktree:claim`/`worktree:release`/`worktree:status` scripts are gone from
+`main`. Enforcement over any unmigrated slot remains advisory-only — a
+warning, never a block — until each slot's marker is actually migrated, per
+the INTERIM BEHAVIOR decision recorded in the adversarial-audit findings
+above. Of the two disagreeing port derivations, both are now gone from the code:
 the GCP renderer's `(slot - 1) * 100` was deleted with `worktreePorts.ts`
 and `sync-env-worktrees.ts`'s plain `slot - 1` was deleted with that script
-(both in PR #433). The live corruption they left behind persists: slots
-10/11 and 12/13 keep colliding until the port-repair item above runs,
-whether or not PRs #431/#433 have merged.
+(both merged in PR #433). The live corruption they left behind was repaired
+on 2026-08-03; all 15 numbered slots now have allocator-rendered manifests and
+non-overlapping `.env.ports` files.
 
 See also "Content-engine inconsistency to replace" and "Relationship to
 content-engine" earlier in this document for the design rationale behind
@@ -2787,9 +2791,12 @@ sidebar close; reflected-mode preflight demands origin reachability it
 does not need; a Ctrl-Z-suspended source agent survives the post-resume
 stop; ambiguous-restore panes keep a stale queued command in their buffer;
 `rw status` malformed-entry stderr noise; `rw doctor` bare-tmux seam.
-Worker provisioning: agents-roll Neovim 0.9.5 is too old for the Treemux
-plugin stack (needs >=0.10) — belongs in linux-headless.sh plus a doctor
-check.
+Worker provisioning gap closed and verified: Linux headless provisioning now
+installs the official upstream stable Neovim build when the distro package
+is older than 0.10, and both its internal verification and headless doctor
+enforce that minimum. The corrected phase installed Neovim 0.12.4 on
+`agents-roll`; a headless `vim.uv` probe and the full `rw doctor` remote
+Treemux preflight both pass.
 
 ### Remaining smoke-test surface (as of 2026-08-03, end of campaign day)
 
@@ -2827,10 +2834,12 @@ canaries against the live focus-machine tmux server — real timer firing
 without isolation, default-server-loss inventory, worker reboot recovery,
 and the optional focus-Mac sleep/wake drill.
 
-Operator items outstanding (unchanged): content-engine slot 10/12 port
-repair (slot 10's Expo still squats 9081); per-slot claim-marker migration
-(14 slots, each by its owner); PRs #431/#433 blocked on the red
-provision-supabase check; agents-roll Neovim >= 0.10 provisioning.
+Operator items outstanding: per-slot claim-marker migration (13 slots, each
+by its owner) and the final terminal-emulator OSC 52 confirmation. The stacked
+content-engine PR sequence is complete: #431 merged as `c8c4911fc`, followed
+by #433 as `8daeba133`. The `agents-roll` Neovim provisioning fix is
+implemented and verified; remote Treemux prerequisites now pass there.
+Content-engine slot 10/12 port repair is complete.
 
 ## Research references
 

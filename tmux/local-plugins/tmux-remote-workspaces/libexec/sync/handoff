@@ -497,6 +497,20 @@ EOS
   dest_fp_after="$(printf '%s' "$dest_fp_after" | tr -d '\r\n')"
   if [ "$dest_fp_after" != "$source_fingerprint" ]; then
     duration_ms="$(rw_elapsed_ms "$start_ts")"
+    # Distinguish the two very different causes before wording the failure:
+    # if the SOURCE tree no longer fingerprints the way it did at capture,
+    # a concurrent writer (live agent, editor, autosave) mutated it
+    # mid-handoff -- the transfer is torn, not corrupted (2026-08-08: a
+    # resident claude agent editing the dotfiles worktree during handoff
+    # produced exactly this, and the old message read as data corruption).
+    local source_fp_now
+    source_fp_now="$(rw_sync_fingerprint_via exec_source_script "$source_path" 2>/dev/null || echo EMPTY)"
+    source_fp_now="$(printf '%s' "$source_fp_now" | tr -d '\r\n')"
+    if [ "$source_fp_now" != "$source_fingerprint" ]; then
+      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "source_changed_during_sync"
+      rw_warn "handoff sync: the SOURCE workspace changed while the handoff was in flight (another writer -- a running agent, editor, or autosave -- is mutating '$source_path'). Nothing is corrupted; the destination holds the mid-flight snapshot. Stop or pause the other writer and re-run the handoff."
+      return 4
+    fi
     rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "post_apply_verify_mismatch"
     rw_warn "handoff sync: destination content does not match the captured source snapshot after apply (fingerprint mismatch). Destination was modified but is not verified correct -- inspect '$dest_path'; a pre-overwrite backup is at '${backup_dir:-<none, dest was empty>}'."
     return 4

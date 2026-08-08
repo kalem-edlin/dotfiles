@@ -3,6 +3,11 @@
 # Zero-cost idiom; must run before any PATH mutation below to take effect.
 typeset -U path PATH
 
+# Eza follows the platform config directory on macOS (under ~/Library), while
+# this cross-platform Stow package lives at ~/.config/eza. Point every shell at
+# the managed location so interactive aliases and direct invocations agree.
+export EZA_CONFIG_DIR="$HOME/.config/eza"
+
 # Sourced for every zsh invocation — interactive, noninteractive, login, and
 # non-login (unlike .zshrc, which noninteractive shells such as SSH hooks,
 # scp, and remote tmux commands never source). This is the only place that

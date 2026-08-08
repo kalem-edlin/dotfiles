@@ -55,9 +55,11 @@ DEFAULT_RSEP=""
 
 # Remote mode: workers save on 5-minute durability timers (launchd/systemd,
 # setup-headless), so freshness thresholds derive from that, not from the
-# local @continuum-save-interval. The remote `last` mtime is cached and
-# refreshed by a detached background ssh so a status refresh NEVER blocks on
-# the network; between refreshes the chip shows the cached value.
+# local @continuum-save-interval. The verified save wrapper records a success
+# timestamp even when an unchanged landscape reuses the previous Resurrect
+# snapshot. That timestamp is cached and refreshed by a detached background
+# ssh so a status refresh NEVER blocks on the network; between refreshes the
+# chip shows the cached value.
 REMOTE_INTERVAL_MIN=5
 REMOTE_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tmux-rw-autosave"
 REMOTE_CACHE_TTL=30
@@ -153,10 +155,18 @@ if [ -n "$worker" ]; then
     if mkdir "$lock" 2>/dev/null; then
       (
         ts="$(ssh -o BatchMode=yes -o ConnectTimeout=3 "$worker" \
-          'f="$HOME/.local/share/tmux/resurrect/last"; stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null' 2>/dev/null)"
+          'd="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"; f="$d/.last-successful-save"; if [ -f "$f" ]; then sed -n "1p" "$f"; else f="$d/last"; stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null; fi' 2>/dev/null)"
         case "$ts" in
           '' | *[!0-9]*) : ;;
-          *) printf '%s\n' "$ts" > "$cache.tmp" && mv -f "$cache.tmp" "$cache" ;;
+          *)
+            # Never let an older in-flight background fetch overwrite a
+            # newer timestamp published by a just-completed manual save.
+            cached=""
+            [ -f "$cache" ] && cached="$(sed -n '1p' "$cache" 2>/dev/null)"
+            if ! is_uint "$cached" || [ "$ts" -ge "$cached" ]; then
+              printf '%s\n' "$ts" >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
+            fi
+            ;;
         esac
         rmdir "$lock" 2>/dev/null
       ) >/dev/null 2>&1 &

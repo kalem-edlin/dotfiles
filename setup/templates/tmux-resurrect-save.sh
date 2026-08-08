@@ -14,18 +14,19 @@
 # docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
 # durability".
 #
-# It invokes tmux-resurrect's own save.sh entrypoint with the "quiet" flag —
-# the exact same script and argument continuum's timer uses internally
-# (continuum_save.sh -> fetch_and_run_tmux_resurrect_save_script -> runs
-# "$resurrect_save_script_path" "quiet"). That entrypoint dumps sessions,
-# windows, and panes, then calls the plugin's own `execute_hook
+# It invokes tmux/scripts/resurrect_save.sh with the "quiet" flag — the same
+# serialized, verified wrapper configured as Continuum's
+# `@resurrect-save-script-path`. That wrapper invokes tmux-resurrect's own
+# save.sh, which dumps sessions, windows, and panes, then calls the plugin's
+# own `execute_hook
 # "post-save-all"`, which chains into tmux-workspace-resurrect's
 # scripts/save.sh (the sidecar that captures shell buffers, agent sessions,
-# Neovim state, etc). One invocation here therefore drives the entire save
-# chain — nothing else needs to be triggered separately.
+# Neovim state, etc). It validates both artifacts before publishing a
+# success timestamp. One invocation here therefore drives and verifies the
+# entire save chain — nothing else needs to be triggered separately.
 #
-# Verified (2026-07-31, on an attached-client laptop tmux server, as a
-# stand-in for a fully detached worker): running this entrypoint directly
+# Verified (2026-08-08 on both the attached-client laptop and the detached
+# `mini` worker tmux server): running this entrypoint directly
 # with $TMUX unset — i.e. not "inside" any tmux client or pane, exactly the
 # process context a launchd/systemd timer runs under — still produces a
 # fresh resurrect snapshot AND an updated workspace sidecar. tmux's `tmux`
@@ -56,6 +57,7 @@ set -u
 TMUX_BIN="${TMUX_RESURRECT_SAVE_TMUX_BIN:-tmux}"
 PLUGIN_DIR="${TMUX_RESURRECT_SAVE_PLUGIN_DIR:-$HOME/.config/tmux/plugins/tmux-resurrect}"
 SAVE_SCRIPT="$PLUGIN_DIR/scripts/save.sh"
+VERIFIED_SAVE_SCRIPT="${TMUX_RESURRECT_VERIFIED_SAVE_SCRIPT:-$HOME/.config/tmux/scripts/resurrect_save.sh}"
 
 if [ "${1:-}" = "--check" ]; then
   RESOLVED_TMUX="$(command -v "$TMUX_BIN" 2>/dev/null || true)"
@@ -79,6 +81,16 @@ if [ "${1:-}" = "--check" ]; then
     status=1
   else
     echo "tmux-resurrect-save --check: save script OK: $SAVE_SCRIPT"
+  fi
+
+  if [ ! -f "$VERIFIED_SAVE_SCRIPT" ]; then
+    echo "tmux-resurrect-save --check: FAIL - verified save wrapper not found: $VERIFIED_SAVE_SCRIPT"
+    status=1
+  elif [ ! -x "$VERIFIED_SAVE_SCRIPT" ]; then
+    echo "tmux-resurrect-save --check: FAIL - verified save wrapper not executable: $VERIFIED_SAVE_SCRIPT"
+    status=1
+  else
+    echo "tmux-resurrect-save --check: verified save wrapper OK: $VERIFIED_SAVE_SCRIPT"
   fi
 
   if [ "$status" -eq 0 ]; then
@@ -117,4 +129,4 @@ TMUX_BIN_ABS="$(command -v "$TMUX_BIN")"
 PATH="$(dirname "$TMUX_BIN_ABS"):$PATH"
 export PATH
 
-exec bash "$SAVE_SCRIPT" quiet
+exec bash "$VERIFIED_SAVE_SCRIPT" quiet

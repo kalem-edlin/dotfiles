@@ -31,9 +31,9 @@ correctly omits, or a worker-only concern that local correctly omits.
 | CLI packages | `Brewfile`'s `brew` lines | Nearly identical to local. `Brewfile.headless` matches `Brewfile`'s CLI package list except it omits `cameroncooke/axe/axe`, `git-gui`, and `felixkratz/formulae/sketchybar` (the sketchybar formula, tied to the GUI bar) — everything else CLI-wise is the same. Linux headless installs its own required/optional package split per distro (see `setup/linux-headless.sh`), not a mirror of `Brewfile.headless` |
 | GUI casks | `Brewfile` installs 19 casks: `aerospace`, `android-platform-tools`, `arc`, `chromium`, `cursor`, `orbstack`, `figma`, three fonts, `ghostty`, `kindavim`, `ngrok`, `obsidian`, `raycast`, `sf-symbols`, `spotify`, `superwhisper`, `tailscale-app`, `visual-studio-code` | `Brewfile.headless` installs exactly one cask: `tailscale-app`. The file's header comment explains why: "macOS Tailscale's auth/system-extension flow works best through the app (not the bare `tailscale` CLI/daemon), so it is installed even on headless workers." No other GUI app, font, or VS Code/Cursor extension is installed |
 | Direct `~/.config` links | `CONFIG_PACKAGES := aerospace ghostty nvim sketchybar tmux` (Makefile) | `HEADLESS_CONFIG_PACKAGES := nvim tmux` (Makefile) — GUI-only packages (`aerospace`, `ghostty`, `sketchybar`) dropped |
-| Stow packages | `STOW_PACKAGES := claude codex git kindavim pi ssh vim worktrees zsh` (Makefile) | `HEADLESS_STOW_PACKAGES := claude codex git pi ssh vim worktrees zsh` (Makefile) — the only difference is `kindavim`, a macOS GUI keyboard-remapper preference plist, correctly excluded |
+| Stow packages | `STOW_PACKAGES := claude codex eza git kindavim pi ssh vim worktrees zsh` (Makefile) | `HEADLESS_STOW_PACKAGES := claude codex eza git pi ssh vim worktrees zsh` (Makefile) — the only difference is `kindavim`, a macOS GUI keyboard-remapper preference plist, correctly excluded |
 | macOS system preferences | `make macos` (`setup/macos.sh`) runs as part of the `setup` chain | Not run. No headless chain calls `macos` |
-| tmux durability mechanism | Relies on tmux-continuum's status-line `#()` autosave interpolation, because a local machine always has a tmux client attached and rendering the status line | Headless macOS: a launchd job (`com.kalem.tmux-resurrect-save`) with an absolute Homebrew tmux path baked in as `TMUX_RESURRECT_SAVE_TMUX_BIN` (launchd's own PATH lacks Homebrew's bin dir). Headless Linux: a systemd `--user` timer (`tmux-resurrect-save.timer`, `OnUnitActiveSec=5min`) plus `loginctl enable-linger` so the user's systemd instance keeps running with no login session |
+| tmux durability mechanism | tmux-continuum's status-line `#()` autosave interpolation calls the shared verified wrapper; `prefix C-s` calls it immediately and updates the powerline only after both Resurrect and workspace sidecar validation | Headless macOS: a launchd job (`com.kalem.tmux-resurrect-save`) with an absolute Homebrew tmux path baked in as `TMUX_RESURRECT_SAVE_TMUX_BIN` (launchd's own PATH lacks Homebrew's bin dir). Headless Linux: a systemd `--user` timer (`tmux-resurrect-save.timer`, `OnUnitActiveSec=5min`) plus `loginctl enable-linger` so the user's systemd instance keeps running with no login session. Both timers use the same verified wrapper; an rw-focused `prefix C-s` also invokes it immediately on that worker. |
 | Provider auth | Interactive, done once on the local machine | Independent per worker — never copied from the focus machine or any other host. Each of `claude`, `codex`, and `pi` must be authenticated on the worker itself (manual step, see `docs/headless-workers.md`) |
 | Tailscale | Included in `Brewfile` (`tailscale-app` cask); `tailscale up` is a manual step | Default-on on both platforms. macOS: `tailscale-app` cask via `Brewfile.headless`. Linux: installed via `setup/linux-headless.sh`'s `install_tailscale` (the official install script) unless `INSTALL_TAILSCALE=0` is set. `tailscale up`/authentication stays a manual step on every platform |
 | Postflight validation | None — `make setup` has no equivalent gate | `make headless-doctor` (`setup/headless-doctor.sh`), profile-aware (`local`, `headless-macos`, `headless-linux`, auto-detected from `uname -s`), read-only, and gates the success banner: `setup-linux-headless` is literally `setup-linux-headless-run headless-doctor` in the Makefile, and `setup/macos-headless.sh` runs `headless-doctor` as its last step before printing "Headless setup complete!" |
@@ -169,6 +169,17 @@ has no client, so the status line never redraws, and the interpolation never
 fires — hence the separate launchd/systemd timers described above, which
 invoke the save script directly and don't depend on any client being
 attached.
+
+All four triggers now converge on `tmux/scripts/resurrect_save.sh`: local
+Continuum, a clean client detach, the headless timer, and the manual
+`prefix C-s` binding. The wrapper serializes overlapping attempts, validates
+the authoritative Resurrect snapshot and the freshly replaced
+workspace-resurrect sidecar, and only then records the completion timestamp.
+For an rw-backed focused pane the manual dispatcher first verifies the outer
+laptop save and then invokes the same wrapper over SSH on that pane's worker.
+It writes the confirmed worker timestamp directly into the powerline cache,
+so a success renders `0m` immediately. The fixed headless timer cadence does
+not move; local Continuum measures its next interval from the manual save.
 
 There's a related trap, discovered on 2026-08-01: tmux-continuum refuses to
 even arm that interpolation in the first place whenever any other tmux

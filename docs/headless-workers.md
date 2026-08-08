@@ -57,8 +57,11 @@ this contract — not just that the installer exited zero.
 - **Commands:** `bash`, `zsh`, `ssh`, `git`, `git-lfs`, `stow`, `tmux`, `jq`,
   `rsync`, `tar`, `tailscale` (unless provisioned with
   `INSTALL_TAILSCALE=0`), and a usable UUID source; `node`, `npm`, `pi`,
-  `codex`, and `claude` for agent handoff; `nvim` and `ob` as part of the
-  intended headless toolset.
+  `codex`, and `claude` for agent handoff; Neovim `nvim >= 0.10` (required
+  by the managed config and remote Treemux) and `ob` as part of the intended
+  headless toolset. On Linux, provisioning installs the official upstream
+  stable tarball under `~/.local/opt` and links it into `~/.local/bin` when
+  the distribution package is older than that minimum.
 - **Dotfiles:** `~/.config/tmux` and `~/.config/nvim` linked to this
   repository; the `claude`, `codex`, `git`, `pi`, `ssh`, `vim`, `worktrees`,
   and `zsh` packages stowed; `~/.local/bin/rw`, `worktree-slot`, and
@@ -232,6 +235,7 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    every command must resolve, and the output must be paths only, with no
    shell-init noise. `tailscale` too, unless the worker was provisioned with
    `INSTALL_TAILSCALE=0`.
+   `ssh $W 'nvim --version | sed -n 1p'` must report Neovim 0.10 or newer.
 5. Git LFS: `ssh $W 'git lfs env >/dev/null && echo LFS_OK'` prints
    `LFS_OK`.
 6. Durability timer: the per-platform checks above (`launchctl print` /
@@ -239,16 +243,17 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    `loginctl show-user -p Linger`).
 7. Detached save-chain proof — the strongest evidence the timer actually
    works with nobody attached, not just that it's loaded:
-   - Record the newest file mtime in `~/.local/share/tmux/resurrect/` and
+   - Record `~/.local/share/tmux/resurrect/.last-successful-save` and
      the last line of
      `~/.local/state/tmux-workspace-resurrect/workspace-resurrect.log`.
    - `ssh $W 'tmux new-session -d -s smoke-headless'`.
    - Trigger the timer directly instead of waiting: macOS
      `ssh $W 'launchctl kickstart "gui/$(id -u)/com.kalem.tmux-resurrect-save"'`;
      Linux `ssh $W 'systemctl --user start tmux-resurrect-save.service'`.
-   - Within about 30 seconds, the resurrect snapshot mtime must advance and
-     the workspace sidecar log must gain a new `saved N pane records` line —
-     proof the whole chain runs with no attached client.
+   - Within about 30 seconds, `.last-successful-save` must advance and the
+     workspace sidecar log must gain a new `saved N pane records` line — proof
+     the whole validated chain runs with no attached client, including when an
+     unchanged landscape legitimately reuses its prior snapshot.
    - Clean up: `ssh $W 'tmux kill-session -t =smoke-headless'`.
 8. Rerun idempotency: record the SSH key fingerprint
    (`ssh $W 'ssh-keygen -lf ~/.ssh/id_ed25519.pub'`) and any existing `.bak`

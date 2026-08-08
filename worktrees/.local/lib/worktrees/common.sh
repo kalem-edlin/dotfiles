@@ -192,10 +192,19 @@ wt_write_json_atomic() {
   local file="$1" json="$2" dir tmp
   dir="$(dirname "$file")"
   wt_ensure_private_dir "$dir"
-  tmp="$(mktemp "$dir/.$(basename "$file").XXXXXX")"
-  printf '%s' "$json" >"$tmp"
-  chmod 0600 "$tmp"
-  mv "$tmp" "$file"
+  tmp="$(mktemp "$dir/.$(basename "$file").XXXXXX")" || wt_die "could not create a temporary file for $file." 20
+  printf '%s' "$json" >"$tmp" || {
+    rm -f "$tmp"
+    wt_die "could not write temporary JSON for $file." 20
+  }
+  chmod 0600 "$tmp" || {
+    rm -f "$tmp"
+    wt_die "could not secure temporary JSON for $file." 20
+  }
+  mv "$tmp" "$file" || {
+    rm -f "$tmp"
+    wt_die "could not atomically replace $file." 20
+  }
 }
 
 # Writes a marker file into a *worktree* (not private state). 0644, visible,
@@ -203,10 +212,19 @@ wt_write_json_atomic() {
 wt_write_marker_atomic() {
   local file="$1" json="$2" dir tmp
   dir="$(dirname "$file")"
-  tmp="$(mktemp "$dir/.$(basename "$file").XXXXXX")"
-  printf '%s' "$json" >"$tmp"
-  chmod 0644 "$tmp"
-  mv "$tmp" "$file"
+  tmp="$(mktemp "$dir/.$(basename "$file").XXXXXX")" || wt_die "could not create a temporary file for $file." 20
+  printf '%s' "$json" >"$tmp" || {
+    rm -f "$tmp"
+    wt_die "could not write temporary marker for $file." 20
+  }
+  chmod 0644 "$tmp" || {
+    rm -f "$tmp"
+    wt_die "could not set permissions on temporary marker for $file." 20
+  }
+  mv "$tmp" "$file" || {
+    rm -f "$tmp"
+    wt_die "could not atomically replace $file." 20
+  }
 }
 
 # Portable stable hash of a string -> lowercase hex (first 16 chars used for

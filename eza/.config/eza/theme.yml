@@ -1,0 +1,52 @@
+# Curated bridge to the Material file glyphs used by Treemux. Eza's built-in
+# icon database remains the fallback for folders and every file not listed.
+filenames:
+  # Common exact filenames from nvim-material-icon
+  ".env": { icon: { glyph: "󰙪", style: { foreground: "#fbc02d" } } }
+  ".env.example": { icon: { glyph: "󰙪", style: { foreground: "#fbc02d" } } }
+  ".gitattributes": { icon: { glyph: "󰊢", style: { foreground: "#e64a19" } } }
+  ".gitignore": { icon: { glyph: "󰊢", style: { foreground: "#e64a19" } } }
+  ".npmrc": { icon: { glyph: "", style: { foreground: "#cc3837" } } }
+  "Brewfile": { icon: { glyph: "", style: { foreground: "#6d8086" } } }
+  "Dockerfile": { icon: { glyph: "", style: { foreground: "#0088c9" } } }
+  "Makefile": { icon: { glyph: "", style: { foreground: "#ef5351" } } }
+  "README.md": { icon: { glyph: "", style: { foreground: "#42a5f5" } } }
+  "package.json": { icon: { glyph: "", style: { foreground: "#4caf51" } } }
+  "package-lock.json": { icon: { glyph: "", style: { foreground: "#f54436" } } }
+  "pnpm-lock.yaml": { icon: { glyph: "󰈙", style: { foreground: "#ff5252" } } }
+  "pyproject.toml": { icon: { glyph: "", style: { foreground: "#ef5351" } } }
+  "requirements.txt": { icon: { glyph: "󰈙", style: { foreground: "#42a5f5" } } }
+  "tsconfig.json": { icon: { glyph: "", style: { foreground: "#0188d1" } } }
+  "yarn.lock": { icon: { glyph: "", style: { foreground: "#0188d1" } } }
+
+extensions:
+  "astro": { icon: { glyph: "", style: { foreground: "#ff6d00" } } }
+  "bash": { icon: { glyph: "", style: { foreground: "#ff7043" } } }
+  "c": { icon: { glyph: "", style: { foreground: "#0188d1" } } }
+  "cpp": { icon: { glyph: "", style: { foreground: "#0188d1" } } }
+  "css": { icon: { glyph: "", style: { foreground: "#42a5f5" } } }
+  "go": { icon: { glyph: "󰟓", style: { foreground: "#02acc1" } } }
+  "graphql": { icon: { glyph: "󰡷", style: { foreground: "#ec417a" } } }
+  "html": { icon: { glyph: "", style: { foreground: "#e44e27" } } }
+  "java": { icon: { glyph: "", style: { foreground: "#f54436" } } }
+  "js": { icon: { glyph: "󰌞", style: { foreground: "#ffca29" } } }
+  "json": { icon: { glyph: "", style: { foreground: "#faa825" } } }
+  "jsonc": { icon: { glyph: "", style: { foreground: "#faa825" } } }
+  "jsx": { icon: { glyph: "", style: { foreground: "#ffca29" } } }
+  "lua": { icon: { glyph: "", style: { foreground: "#42a5f5" } } }
+  "md": { icon: { glyph: "", style: { foreground: "#42a5f5" } } }
+  "mdx": { icon: { glyph: "", style: { foreground: "#ffca29" } } }
+  "py": { icon: { glyph: "", style: { foreground: "#3a87cb" } } }
+  "rb": { icon: { glyph: "󰴭", style: { foreground: "#f54436" } } }
+  "rs": { icon: { glyph: "", style: { foreground: "#ff7043" } } }
+  "scss": { icon: { glyph: "", style: { foreground: "#ec417a" } } }
+  "sh": { icon: { glyph: "󰆍", style: { foreground: "#ff7043" } } }
+  "sql": { icon: { glyph: "", style: { foreground: "#ffca29" } } }
+  "svelte": { icon: { glyph: "", style: { foreground: "#ff5821" } } }
+  "toml": { icon: { glyph: "", style: { foreground: "#ef5351" } } }
+  "ts": { icon: { glyph: "󰛦", style: { foreground: "#0188d1" } } }
+  "tsx": { icon: { glyph: "", style: { foreground: "#04bcd4" } } }
+  "vue": { icon: { glyph: "", style: { foreground: "#40b883" } } }
+  "yaml": { icon: { glyph: "󰈙", style: { foreground: "#ff5252" } } }
+  "yml": { icon: { glyph: "󰈙", style: { foreground: "#ff5252" } } }
+  "zsh": { icon: { glyph: "󰆍", style: { foreground: "#ff7043" } } }

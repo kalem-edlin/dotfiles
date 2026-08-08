@@ -165,11 +165,15 @@ Run diagnostics:
 
 Or press `prefix + Ctrl-g`.
 
-Create a manual Resurrect and companion save:
+Create and verify a manual Resurrect and companion save:
 
 ```sh
-~/.config/tmux/plugins/tmux-resurrect/scripts/save.sh
+~/.config/tmux/scripts/resurrect_save.sh
 ```
+
+Normally use `prefix + Ctrl-s`. The post-TPM binding calls this verified
+wrapper and resets the powerline age to `0m` only after the Resurrect snapshot
+and workspace sidecar both pass validation.
 
 Validate restore mappings without pasting input or rebuilding Treemux:
 

@@ -211,6 +211,18 @@ per configured worker (this is where that report lives per Resolved decision
 and clipboard/`allow-passthrough` checks on both the local and (where
 reachable) worker tmux layers. It never writes into another pane or TUI.
 
+## Manual durability save
+
+`prefix + Ctrl-s` always saves and verifies the focus machine's outer tmux
+landscape. When the focused pane is rw-backed, the same binding then runs the
+same verified save wrapper on that pane's worker. A successful worker response
+updates the remote freshness cache immediately, so the powerline reads `0m`;
+a failed or unreachable worker retains its previous timestamp and produces an
+explicit partial-failure message. The worker launchd/systemd timer keeps its
+normal five-minute cadence. The dispatcher streams the focus machine's
+verifier over SSH, so a manual save does not depend on the worker's separate
+dotfiles clone having pulled the same revision first.
+
 ## Testing without a reachable worker
 
 - `scripts/preflight.sh --worker <alias>` fails fast, with no ssh attempt,

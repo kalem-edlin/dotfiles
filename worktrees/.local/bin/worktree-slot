@@ -393,10 +393,19 @@ else
 "
     done < <(jq -r '(.env_vars // {}) | to_entries[] | [.key, .value] | @tsv' <<<"$REPO_JSON")
 
-    tmp_env="$(mktemp "$SLOT_PATH/.worktree-slot-ports.XXXXXX")"
-    printf '%s' "$env_lines" >"$tmp_env"
-    chmod 0644 "$tmp_env"
-    mv "$tmp_env" "$ENV_PATH"
+    tmp_env="$(mktemp "$SLOT_PATH/.worktree-slot-ports.XXXXXX")" || wt_die "could not create a temporary ports file for $ENV_PATH." 20
+    printf '%s' "$env_lines" >"$tmp_env" || {
+      rm -f "$tmp_env"
+      wt_die "could not write temporary ports file for $ENV_PATH." 20
+    }
+    chmod 0644 "$tmp_env" || {
+      rm -f "$tmp_env"
+      wt_die "could not set permissions on temporary ports file for $ENV_PATH." 20
+    }
+    mv "$tmp_env" "$ENV_PATH" || {
+      rm -f "$tmp_env"
+      wt_die "could not atomically replace $ENV_PATH." 20
+    }
   fi
 fi
 

@@ -112,7 +112,7 @@ fi
 # the caller's bare PATH), which never sources zsh/.zshenv. fnm-managed
 # tools (node/npm/pi/codex/ob) and ~/.local/bin-installed tools (claude) are
 # genuinely on disk after a successful install, but this process's PATH has
-# no way to see them unless it activates fnm and adds ~/.local/bin itself —
+# no way to see them unless it activates fnm and puts ~/.local/bin first —
 # exactly what setup/lib.sh's activate_fnm does for setup/linux-headless.sh
 # after setup/node.sh runs as a separate child process (see lib.sh's
 # activate_fnm doc comment). Doing the same here keeps section 2 below an
@@ -121,10 +121,7 @@ fi
 # PATH/env, never touches disk. If fnm/the tools genuinely aren't installed,
 # activate_fnm silently no-ops and the checks below still fail honestly.
 if [ -n "$TARGET_HOME" ]; then
-  case ":$PATH:" in
-    *":$TARGET_HOME/.local/bin:"*) ;;
-    *) PATH="$TARGET_HOME/.local/bin:$PATH" ;;
-  esac
+  PATH="$TARGET_HOME/.local/bin:$PATH"
   export PATH
 
   if [ -f "$DOTFILES_DIR/setup/lib.sh" ]; then
@@ -362,6 +359,28 @@ for cmd in $REQUIRED_CMDS; do
   fi
 done
 
+# The managed config uses vim.uv and remote Treemux executes Neovim on the
+# worker. Ubuntu 24.04's nvim package is present but too old (0.9.5), so this
+# must validate the version independently of cmd:nvim above.
+if has_cmd nvim; then
+  NVIM_VERSION="$(nvim --version 2>/dev/null | sed -n '1s/^NVIM v\([0-9][0-9.]*\).*$/\1/p')"
+  NVIM_MAJOR="${NVIM_VERSION%%.*}"
+  NVIM_MINOR="${NVIM_VERSION#*.}"
+  NVIM_MINOR="${NVIM_MINOR%%.*}"
+  case "$NVIM_MAJOR:$NVIM_MINOR" in
+    *[!0-9:]* | :* | *:)
+      c_fail "version:nvim" "could not parse version from nvim --version" "$SETUP_REMEDIATION"
+      ;;
+    *)
+      if [ "$NVIM_MAJOR" -eq 0 ] && [ "$NVIM_MINOR" -lt 10 ]; then
+        c_fail "version:nvim" "found $NVIM_VERSION at $(command -v nvim), require >= 0.10" "$SETUP_REMEDIATION"
+      else
+        c_pass "version:nvim" "$NVIM_VERSION (>= 0.10)"
+      fi
+      ;;
+  esac
+fi
+
 if has_cmd uuidgen || [ -e /proc/sys/kernel/random/uuid ]; then
   c_pass "cmd:uuid-source" "uuidgen or /proc/sys/kernel/random/uuid available"
 else
@@ -536,6 +555,20 @@ if [ -f "$RESURRECT_SAVE" ] && [ -x "$RESURRECT_SAVE" ]; then
   c_pass "tmux:resurrect-save" "$RESURRECT_SAVE present and executable"
 else
   c_fail "tmux:resurrect-save" "$RESURRECT_SAVE missing or not executable" "$SETUP_REMEDIATION"
+fi
+
+VERIFIED_RESURRECT_SAVE="$TMUX_CFG_DIR/scripts/resurrect_save.sh"
+if [ -f "$VERIFIED_RESURRECT_SAVE" ] && [ -x "$VERIFIED_RESURRECT_SAVE" ]; then
+  c_pass "tmux:verified-resurrect-save" "$VERIFIED_RESURRECT_SAVE present and executable"
+else
+  c_fail "tmux:verified-resurrect-save" "$VERIFIED_RESURRECT_SAVE missing or not executable" "$SETUP_REMEDIATION"
+fi
+
+MANUAL_RESURRECT_SAVE="$TMUX_CFG_DIR/scripts/manual_resurrect_save.sh"
+if [ -f "$MANUAL_RESURRECT_SAVE" ] && [ -x "$MANUAL_RESURRECT_SAVE" ]; then
+  c_pass "tmux:manual-resurrect-save" "$MANUAL_RESURRECT_SAVE present and executable"
+else
+  c_fail "tmux:manual-resurrect-save" "$MANUAL_RESURRECT_SAVE missing or not executable" "$SETUP_REMEDIATION"
 fi
 
 # tmux >= 3.7 sanitizes the literal-tab field delimiter tmux-resurrect's

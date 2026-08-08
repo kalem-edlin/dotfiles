@@ -2,14 +2,106 @@
 
 set -euo pipefail
 
+NVIM_MIN_MAJOR=0
+NVIM_MIN_MINOR=10
+
 if [[ -f /opt/homebrew/bin/brew ]]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"
 elif [[ -f /usr/local/bin/brew ]]; then
     eval "$(/usr/local/bin/brew shellenv)"
 fi
 
-if ! command -v nvim &> /dev/null; then
-    echo "Error: nvim not found. Install Neovim first."
+# Ubuntu 24.04 supplies Neovim 0.9.5. That satisfies a command-existence
+# check, but not this repository's config (vim.uv) or the Treemux stack,
+# which both need Neovim >= 0.10.
+export PATH="$HOME/.local/bin:$PATH"
+
+nvim_version() {
+    "$1" --version 2>/dev/null | sed -n '1s/^NVIM v\([0-9][0-9.]*\).*$/\1/p'
+}
+
+nvim_version_supported() {
+    local nvim_bin="$1"
+    local version major minor
+
+    version="$(nvim_version "$nvim_bin")"
+    [[ "$version" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+
+    (( major > NVIM_MIN_MAJOR || (major == NVIM_MIN_MAJOR && minor >= NVIM_MIN_MINOR) ))
+}
+
+cleanup_nvim_download() {
+    if [[ -n "${NVIM_DOWNLOAD_TEMP:-}" && -d "$NVIM_DOWNLOAD_TEMP" ]]; then
+        rm -rf "$NVIM_DOWNLOAD_TEMP"
+    fi
+}
+
+install_supported_linux_nvim() {
+    local machine release_arch asset url archive extracted
+    local installed_version install_dir link_temp
+
+    machine="$(uname -m)"
+    case "$machine" in
+        x86_64 | amd64) release_arch="x86_64" ;;
+        aarch64 | arm64) release_arch="arm64" ;;
+        *)
+            echo "Error: no official Neovim stable tarball mapping for Linux architecture: $machine" >&2
+            exit 1
+            ;;
+    esac
+
+    asset="nvim-linux-$release_arch"
+    url="https://github.com/neovim/neovim/releases/download/stable/$asset.tar.gz"
+    NVIM_DOWNLOAD_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/dotfiles-nvim.XXXXXX")"
+    archive="$NVIM_DOWNLOAD_TEMP/$asset.tar.gz"
+    extracted="$NVIM_DOWNLOAD_TEMP/$asset"
+    trap cleanup_nvim_download EXIT
+
+    echo "Installing official Neovim stable build for Linux $machine..."
+    curl --fail --location --retry 3 --output "$archive" "$url"
+    tar -xzf "$archive" -C "$NVIM_DOWNLOAD_TEMP"
+
+    if [[ ! -x "$extracted/bin/nvim" ]] || ! nvim_version_supported "$extracted/bin/nvim"; then
+        echo "Error: downloaded Neovim does not satisfy >= $NVIM_MIN_MAJOR.$NVIM_MIN_MINOR." >&2
+        exit 1
+    fi
+
+    installed_version="$(nvim_version "$extracted/bin/nvim")"
+    install_dir="$HOME/.local/opt/$asset-$installed_version"
+    mkdir -p "$HOME/.local/opt" "$HOME/.local/bin"
+
+    if [[ ! -d "$install_dir" ]]; then
+        mv "$extracted" "$install_dir"
+    fi
+
+    # Replace the command atomically without deleting an existing distro
+    # package. ~/.local/bin precedes /usr/bin in the managed worker PATH.
+    link_temp="$NVIM_DOWNLOAD_TEMP/nvim-link"
+    ln -s "$install_dir/bin/nvim" "$link_temp"
+    mv -f "$link_temp" "$HOME/.local/bin/nvim"
+
+    trap - EXIT
+    cleanup_nvim_download
+    NVIM_DOWNLOAD_TEMP=""
+}
+
+if ! command -v nvim >/dev/null 2>&1 || ! nvim_version_supported "$(command -v nvim)"; then
+    if [[ "$(uname -s)" = "Linux" ]]; then
+        install_supported_linux_nvim
+        hash -r
+    elif command -v nvim >/dev/null 2>&1; then
+        echo "Error: Neovim $(nvim_version "$(command -v nvim)") is too old; >= $NVIM_MIN_MAJOR.$NVIM_MIN_MINOR is required." >&2
+        exit 1
+    else
+        echo "Error: nvim not found. Install Neovim >= $NVIM_MIN_MAJOR.$NVIM_MIN_MINOR first." >&2
+        exit 1
+    fi
+fi
+
+if ! nvim_version_supported "$(command -v nvim)"; then
+    echo "Error: Neovim >= $NVIM_MIN_MAJOR.$NVIM_MIN_MINOR is still unavailable after installation." >&2
     exit 1
 fi
 

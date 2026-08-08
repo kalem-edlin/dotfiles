@@ -208,6 +208,26 @@ echo "== Local durability (tmux-continuum autosave) =="
 if ! tmux has-session 2>/dev/null && [ -z "${TMUX:-}" ]; then
   note "no local tmux server running -- continuum autosave not checked"
 else
+  save_path="$(tmux show-option -gqv @resurrect-save-script-path 2>/dev/null || true)"
+  case "$save_path" in
+    *tmux/scripts/resurrect_save.sh*)
+      pass "Continuum, manual saves, and headless saves share the verified save wrapper"
+      ;;
+    *)
+      fail "@resurrect-save-script-path does not point at tmux/scripts/resurrect_save.sh"
+      ;;
+  esac
+
+  manual_binding="$(tmux list-keys -T prefix C-s 2>/dev/null || true)"
+  case "$manual_binding" in
+    *manual_resurrect_save.sh*'#{@rw-worker}'*)
+      pass "prefix C-s dispatches saves to the focused remote worker"
+      ;;
+    *)
+      fail "prefix C-s is not wired to the remote-aware manual save dispatcher"
+      ;;
+  esac
+
   status_right="$(tmux show-option -gqv status-right 2>/dev/null || true)"
   case "$status_right" in
     *continuum_save.sh*)

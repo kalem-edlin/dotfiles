@@ -42,8 +42,8 @@
     "swift-lsp@claude-plugins-official": true
   },
   "tui": "default",
-  "theme": "dark",
   "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
   "editorMode": "vim",
   "verbose": true
 }
