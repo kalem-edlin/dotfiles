@@ -120,12 +120,44 @@ while IFS= read -r pane_record; do
     continue
   fi
 
+  # Bracketed-paste delivery needs BOTH halves right, learned the hard way
+  # (2026-08-08: every queued pane restored as literal "^[[200~cmd^[[201~"
+  # + "zsh: substitution failed", and the zsh buffer-capture hook then
+  # re-saved the mangled text into the sidecar):
+  #   1. paste-buffer's default vis(3) sanitization rewrites raw ESC bytes
+  #      into the two-character text "^[" -- -S is required for the
+  #      hand-rolled \e[200~ markers to reach the shell as control bytes.
+  #   2. zsh only interprets those markers once ZLE has enabled bracketed
+  #      paste; the shell-process check above passes well before that, so
+  #      wait for the pane's own bracket_paste_flag.
+  paste_ready="false"
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    if [ "$(tmux display-message -pt "$pane_id" -F '#{bracket_paste_flag}' 2>/dev/null)" = "1" ]; then
+      paste_ready="true"
+      break
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+
   buffer_name="workspace-resurrect-${pane_id#%}"
-  # Use terminal bracketed-paste markers so embedded newlines become part of
-  # the editable shell buffer instead of acting as Enter.
-  printf '\033[200~%s\033[201~' "$selected_command" |
-    tmux load-buffer -b "$buffer_name" -
-  tmux paste-buffer -b "$buffer_name" -t "$pane_id" -d
+  if [ "$paste_ready" = "true" ]; then
+    # Markers let embedded newlines join the editable shell buffer instead
+    # of acting as Enter; -S delivers them unsanitized.
+    printf '\033[200~%s\033[201~' "$selected_command" |
+      tmux load-buffer -b "$buffer_name" -
+    tmux paste-buffer -S -b "$buffer_name" -t "$pane_id" -d
+  elif [ "$selected_command" = "${selected_command%%$'\n'*}" ]; then
+    # No bracketed paste in sight (tmux without bracket_paste_flag, or a
+    # shell that never enabled it): a single-line command needs no markers.
+    printf '%s' "$selected_command" | tmux load-buffer -b "$buffer_name" -
+    tmux paste-buffer -b "$buffer_name" -t "$pane_id" -d
+  else
+    skipped=$((skipped + 1))
+    workspace_log "restore skipped for $logical_id: bracketed paste unavailable and command is multiline"
+    continue
+  fi
 
   if [ "$selected_source" = "pending-buffer" ] &&
     [[ "$pending_cursor" =~ ^[0-9]+$ ]] &&
