@@ -11,14 +11,6 @@
       "notes": "Linux VPS worker reached through the agents-roll OpenSSH alias."
     }
   ],
-  "reflected_repositories": [
-    {
-      "identity": "github.com/kalem-edlin/content-engine",
-      "workers": ["mini"],
-      "focus_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>",
-      "worker_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>"
-    }
-  ],
   "workspace_root": "~/rw-workspaces/<focus-machine-id>",
   "ssh": {
     "connect_timeout_seconds": 8,

@@ -10,7 +10,8 @@ PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$PLUGIN_DIR/config.json"
 
 if ! command -v jq >/dev/null 2>&1 || ! jq -e . "$CONFIG_FILE" >/dev/null 2>&1; then
-  tmux display-message "tmux-remote-workspaces: config.json is invalid or jq is unavailable"
+  "$PLUGIN_DIR/../../scripts/dialog.sh" --title "Remote workspace error" -- \
+    "config.json is invalid or jq is unavailable" || true
   exit 0
 fi
 
@@ -39,15 +40,20 @@ while IFS= read -r sid; do
   bash "$PLUGIN_DIR/scripts/session-created-hook.sh" "$sid" "$sname"
 done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null || true)
 
+# Repair display-only metadata on every load. A handoff can establish an
+# endpoint before its local pane becomes an attach loop; that intent must not
+# make a still-local process look remote in the status line.
+bash "$PLUGIN_DIR/scripts/rw-refresh-indicators.sh"
+
 # --- Per-pane remote-host status line --------------------------------------
 # host_indicator.sh (tmux/scripts/host_indicator.sh) sets a single
 # server-wide @catppuccin_host_text value at load time, before this plugin
 # runs. Extend it minimally into a live format string: a focused remote pane
 # shows its worker, local panes keep falling back to whatever
 # host_indicator.sh already computed. @remote-host is a pane-scoped cache set
-# by rw-ensure.sh/attach-loop.sh; format specifiers with no explicit target
-# resolve against the client's active pane, which is exactly the "focused
-# pane" semantics required here.
+# exclusively by attach-loop.sh (and repaired above from the live process
+# tree); format specifiers with no explicit target resolve against the
+# client's active pane, which is exactly the "focused pane" semantics here.
 existing_host_text="$(tmux show-option -gqv @catppuccin_host_text 2>/dev/null || true)"
 case "$existing_host_text" in
   *'#{@remote-host}'*) : ;; # already wrapped (e.g. config reload) -- don't nest again
@@ -72,9 +78,14 @@ esac
 existing_dir_text="$(tmux show-option -gqv @catppuccin_directory_text 2>/dev/null || true)"
 rw_dir_fmt="#{?#{m:/*,#{pane_title}},#{=/17/…:#{b:pane_title}},#{=/17/…:#{b:@rw-workspace}}}"
 case "$existing_dir_text" in
-  *'@rw-workspace'*) : ;; # already wrapped -- don't nest again
+  *'#{?@remote-host,'*) : ;; # already wrapped -- don't nest again
+  *'#{?@rw-workspace,'*)
+    # One-time migration from the old intent-based condition.
+    existing_dir_text="$(printf '%s' "$existing_dir_text" | sed 's/#{?@rw-workspace,/#{?@remote-host,/' )"
+    tmux set-option -gq @catppuccin_directory_text "$existing_dir_text"
+    ;;
   *)
-    tmux set-option -gq @catppuccin_directory_text "#{?@rw-workspace,${rw_dir_fmt},${existing_dir_text}}"
+    tmux set-option -gq @catppuccin_directory_text "#{?@remote-host,${rw_dir_fmt},${existing_dir_text}}"
     ;;
 esac
 
@@ -136,12 +147,12 @@ append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
 # inner pane is in copy-mode, every subsequent keystroke (vi motions,
 # search, y, q) already flows through the ssh tty into that mode, so entry
 # is the only round trip. Yank returns to the local clipboard via OSC 52
-# passthrough (allow-passthrough on). Local panes (no @rw-workspace) keep
+# passthrough (allow-passthrough on). Local panes (no live @remote-host) keep
 # stock behavior. prefix ] deliberately NOT forwarded: local paste-buffer
 # types the LOCAL buffer into the remote program, the useful direction.
-tmux bind-key '[' if-shell -F '#{@rw-workspace}' \
+tmux bind-key '[' if-shell -F '#{@remote-host}' \
   "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}'\"" \
   'copy-mode'
-tmux bind-key PPage if-shell -F '#{@rw-workspace}' \
+tmux bind-key PPage if-shell -F '#{@remote-host}' \
   "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}' --page-up\"" \
   'copy-mode -u'

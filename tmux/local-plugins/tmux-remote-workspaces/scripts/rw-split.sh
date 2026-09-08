@@ -27,10 +27,11 @@ pane_id="${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || true
 
 current_path="$(tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null || true)"
 endpoint="$(rw_pane_get "$pane_id" @rw-endpoint)"
+remote_host="$(rw_pane_get "$pane_id" @remote-host)"
 
 worker=""
 workspace=""
-if [ -n "$endpoint" ]; then
+if [ -n "$endpoint" ] && [ -n "$remote_host" ]; then
   # Source pane is itself remote-backed -- inherit its worker+workspace.
   worker="$(rw_pane_get "$pane_id" @rw-worker)"
   workspace="$(rw_pane_get "$pane_id" @rw-workspace)"

@@ -1,5 +1,12 @@
 # Tmux Remote Workspaces — Initial Plan
 
+> Historical record. Persistent numbered slots and worktree claims were
+> removed from the dotfiles in September 2026. Tmux Remote Workspaces now
+> treats every Git worktree as an independent ad hoc workspace and does not
+> prescribe how agents create, name, own, or remove worktrees. Slot and claim
+> sections below document the discarded design, not current behavior. See the
+> plugin README for the current contract.
+
 Status: implementation is complete dotfiles-side. The worker-provisioning
 prerequisite this plan depended on is now satisfied and verified — see
 "Headless worker provisioning results (2026-08-02)" below and
@@ -31,7 +38,8 @@ workflow into "start everything remotely" or "commit and push before changing
 machines." Those are explicitly not acceptable substitutes for the workflow
 described here.
 
-This is an active task document. Decisions that remain open are marked as such.
+This is an archived task document. It records the implementation process and
+includes decisions that were later reversed.
 
 ## Original intent
 

@@ -12,7 +12,7 @@ export EZA_CONFIG_DIR="$HOME/.config/eza"
 # non-login (unlike .zshrc, which noninteractive shells such as SSH hooks,
 # scp, and remote tmux commands never source). This is the only place that
 # reliably puts ~/.local/bin on PATH for those noninteractive contexts, so
-# hook-invoked executables (worktree-claim, provider hooks) resolve.
+# provider hooks and user-local tools resolve.
 if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
   export PATH="$HOME/.local/bin:$PATH"
 fi

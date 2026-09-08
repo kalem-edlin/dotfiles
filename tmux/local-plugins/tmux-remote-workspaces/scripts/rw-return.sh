@@ -19,8 +19,6 @@
 #      resume it in THIS pane.
 #   4. Stop the remote agent (default) only after the local resume has
 #      started. `--keep-remote` skips this and records divergence risk.
-#   5. Release the writer back to the focus host via `worktree-claim
-#      return-writer` (claims are optional; skipped cleanly when absent).
 #
 # Must be run from a LOCAL pane on the focus machine -- NOT typed into the
 # handed-off pane itself (that pane's foreground is an ssh PTY into the
@@ -95,7 +93,6 @@ workspace_mode="$(printf '%s' "$endpoint_json" | jq -r '.workspace.mode')"
 agent_provider="$(printf '%s' "$endpoint_json" | jq -r '.agent.provider // empty')"
 agent_session_id="$(printf '%s' "$endpoint_json" | jq -r '.agent.session_id // empty')"
 agent_mode_flags="$(printf '%s' "$endpoint_json" | jq -r '.agent.mode_flags // empty')"
-had_claim="$(printf '%s' "$endpoint_json" | jq -r '.agent.had_claim // false')"
 prior_divergence_risk="$(printf '%s' "$endpoint_json" | jq -r '.agent.divergence_risk // false')"
 
 rw_worker_known "$worker" || rw_die "rw return: worker '$worker' (recorded on this endpoint) is not declared in config.json"
@@ -219,33 +216,29 @@ if [ "$local_is_git" = "true" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Claim: release the writer back to this (focus) host, AFTER the transfer
-# so any marker that just arrived from the worker is already on disk and
-# available for wt_sync_claim_from_marker to adopt-if-newer before this
-# call's own flip. Skipped cleanly when there is no claim.
+# Step 2.5: make the SAME pane explicitly local before any resume dispatch.
+# A handed-off pane's ROOT process is attach-loop -> ssh: there is no local
+# shell underneath it to fall back to. Waiting for attach-loop to notice a
+# cleared option is also racy with the endpoint tombstone written later in
+# this script: the loop can observe the tombstone first and take its
+# intentional-close path, which kills the pane (observed live 2026-08-09,
+# endpoint a4723c98). Replace the pane root atomically with tmux's configured
+# local shell instead. This preserves the pane id, layout, and window while
+# guaranteeing that subsequent agent resume keys land on the focus host.
+# The endpoint registry/session are untouched here: close remains a separate
+# explicit decision after the local resume succeeds.
 # ---------------------------------------------------------------------------
 
-claim_bin="$(rw_sync_worktree_claim_bin)"
-if [ "$local_is_git" = "true" ] && { [ "$had_claim" = "true" ] || [ -f "$focus_path/$(rw_sync_claim_marker_name)" ]; } && [ -n "$claim_bin" ]; then
-  claim_out_file="$(mktemp "${TMPDIR:-/tmp}/rw-return-claim.XXXXXX")"
-  if ! "$claim_bin" return-writer --path "$focus_path" >"$claim_out_file" 2>&1; then
-    claim_status=$?
-    rw_warn "rw return: worktree-claim return-writer failed (exit $claim_status): $(cat "$claim_out_file") -- workspace content was already returned; resolve the claim manually with 'worktree-claim status --path $focus_path'."
-  fi
-  rm -f "$claim_out_file"
+local_shell="$(tmux show-options -gv default-shell 2>/dev/null || true)"
+if [ -z "$local_shell" ] || [ ! -x "$local_shell" ]; then
+  local_shell="${SHELL:-/bin/sh}"
 fi
-
-# ---------------------------------------------------------------------------
-# Step 2.5: make the pane LOCAL again before any resume dispatch. A
-# handed-off pane's foreground is attach-loop -> ssh, so anything typed
-# into it lands in the REMOTE shell (smoke lane w5 proved the "local"
-# resume executing on the worker while the registry recorded resumed).
-# Clearing the pane's endpoint cache is attach-loop's release signal (it
-# exits to the local shell instead of reattaching -- see pane_released in
-# attach-loop.sh); killing the pane's own ssh client wakes it immediately.
-# The endpoint registry/session are untouched: close remains a separate
-# explicit decision.
-# ---------------------------------------------------------------------------
+printf -v local_shell_command 'exec %q -l' "$local_shell"
+if ! tmux respawn-pane -k -t "$pane_id" -c "$focus_path" "$local_shell_command"; then
+  rw_warn "rw return: could not replace pane $pane_id with its local shell; the remote endpoint was left registered and was NOT stopped."
+  rw_log_event "return" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$return_start_ts")" "fail" "local_pane_respawn_failed"
+  exit 1
+fi
 
 rw_pane_unset "$pane_id" @rw-endpoint
 rw_pane_unset "$pane_id" @rw-worker
@@ -253,29 +246,6 @@ rw_pane_unset "$pane_id" @rw-workspace
 rw_pane_unset "$pane_id" @remote-host
 rw_pane_unset "$pane_id" @workspace-resurrect-skip
 
-localize_pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
-if [ -n "$localize_pane_pid" ]; then
-  # Kill only THIS pane's own ssh client (never a shared ControlMaster or
-  # any other pane's connection): descendants of the pane PID whose
-  # command is ssh.
-  localize_ssh_pids="$(ps axo pid=,ppid=,command= | awk -v root="$localize_pane_pid" '
-    {
-      pid = $1; ppid = $2
-      line = $0
-      sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", line)
-      cmd[pid] = line; parent[pid] = ppid
-    }
-    END {
-      for (p in cmd) {
-        q = p
-        while (q && q != root && (q in parent) && parent[q] != q) q = parent[q]
-        if (q == root && p != root && cmd[p] ~ /(^|\/)ssh([[:space:]]|$)/) print p
-      }
-    }')"
-  for localize_sp in $localize_ssh_pids; do
-    kill -TERM "$localize_sp" 2>/dev/null || true
-  done
-fi
 localize_i=0
 while [ "$localize_i" -lt 20 ]; do
   localize_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
@@ -419,11 +389,10 @@ rw_log_event "return" "$endpoint_id" "$worker" "$duration_ms" "success" \
 # (keyed on the pane's cached option) can never match this endpoint_id again
 # regardless; the next handoff of the same workspace always mints a fresh
 # endpoint_id/generation-0 anyway, tombstoned or not. Ad hoc workspace
-# *placement* (remote_path) is unaffected too: resolve-workspace.sh's
-# same-identity+worker reuse lookup falls back to the exact same
-# deterministic `$workspace_root/$slug` path (derived from identity alone)
-# when no live registry entry matches, so a future handoff still lands in
-# the same worker-side checkout.
+# *placement* (remote_path) is unaffected too: resolve-workspace.sh falls back
+# to the same deterministic path for this physical local worktree when no live
+# registry entry matches, so a future handoff still lands in the same
+# worker-side checkout.
 #
 # Only auto-close when nothing is deliberately being left running remotely:
 # no agent was ever involved, or the remote agent was actually stopped

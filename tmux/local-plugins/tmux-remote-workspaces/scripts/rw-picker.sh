@@ -190,11 +190,9 @@ pick_return() {
 
   # Run rw-return.sh directly (never send-keys -- see the header comment).
   # It targets $origin_pane explicitly via --pane, so running it here in
-  # the popup (rather than inside that pane) is fine: the pane itself gets
-  # released back to a local shell by attach-loop.sh's own pane_released()
-  # check, which fires the moment @rw-endpoint is cleared and this pane's
-  # ssh client is killed -- both of which rw-return.sh does directly
-  # against $origin_pane regardless of which pane it's actually running in.
+  # the popup (rather than inside that pane) is fine: rw-return.sh atomically
+  # respawns that exact pane with tmux's configured local shell before it
+  # resumes an agent or releases the remote endpoint.
   #
   # stdin redirected from /dev/null: rw-return.sh's own normal tail
   # (`exec "$SHELL" -l`) hands the CALLING pane a landing shell in the
@@ -236,15 +234,6 @@ rw_pick_failure_dialog() {
   if grep -q 'SOURCE workspace changed while the handoff was in flight\|source_changed_during_sync' "$out_file"; then
     cause="another writer (a running agent or editor) edited this workspace mid-handoff"
     action="pause/finish that writer, then retry"
-  elif grep -q 'exit 10' "$out_file"; then
-    cause="another session owns this worktree's claim"
-    action="run 'worktree-claim status' -- if the owner session is dead, have the coordinator GC it"
-  elif grep -q 'exit 11' "$out_file"; then
-    cause="claim is held by a different machine (host mismatch)"
-    action="return/hand back from that host, or resolve the claim explicitly"
-  elif grep -q 'exit 13' "$out_file"; then
-    cause="claim is in a conflicted state"
-    action="inspect with 'worktree-claim status' before anything else"
   elif grep -qi 'ssh_unreachable\|unreachable\|Connection timed out\|Could not resolve' "$out_file"; then
     cause="worker is unreachable over ssh"
     action="check the worker is awake/on the network, then retry"
@@ -257,6 +246,12 @@ rw_pick_failure_dialog() {
   elif grep -q 'destination content does not match' "$out_file"; then
     cause="post-sync verification failed; the worker copy is unverified"
     action="inspect the destination path from the log before retrying"
+  elif grep -q 'could not confirm a supported AI agent' "$out_file"; then
+    cause="the pane looked busy, but its agent session was not ready for a safe handoff"
+    action="wait for the agent to finish starting/persisting its thread, then retry"
+  elif grep -q 'attach loop was not started\|could not start the attach loop' "$out_file"; then
+    cause="the remote endpoint started, but the local pane could not safely switch into it"
+    action="the pane is still local; retry, or use rw return/close on the recorded endpoint"
   else
     cause="unrecognized failure -- last output:"
     action="$(tail -n 2 "$out_file" | tr '\n' ' ')"
@@ -281,11 +276,9 @@ pick_ensure() {
 
 # --- Intent 2b: shell prompt INSIDE a git worktree -> handoff by default --
 # A shell pane sitting in a worktree is almost always "send this workspace
-# to a worker" (sync + claim travel + this pane becomes the remote pane),
-# not "open an unrelated new window there" -- the 2026-08-06 Bucket 7 lap
-# hit exactly that: prefix e from a slot pane offered only ensure, which
-# attached the reflected slot AS-IS (detached HEAD, no sync, no claim
-# move). Default enter is now a workspace handoff; ctrl-o keeps the old
+# to a worker" (sync + this pane becomes the remote pane),
+# not "open an unrelated new window there". Default enter is a workspace
+# handoff; ctrl-o keeps the old
 # new-window ensure for when that is genuinely wanted.
 pick_shell_workspace() {
   local origin_pane="$1" origin_cwd="$2" out key alias header
@@ -374,7 +367,8 @@ pick() {
   if [ -n "$handoff_kind" ]; then
     pick_handoff "$origin_pane" "$origin_cmd" "$handoff_kind"
   else
-    tmux display-message "rw-picker: focused pane is running '$origin_cmd', not a shell prompt"
+    rw_dialog "Focused pane is running '$origin_cmd', not a shell prompt or supported handoff target." \
+      "$origin_pane" "Remote workspace"
     exit 0
   fi
 }

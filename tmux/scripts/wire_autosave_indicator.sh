@@ -16,10 +16,13 @@
 set -u
 
 # tmux format-expands the #() command line in status-line (active pane)
-# context BEFORE running it, so #{@rw-worker} arrives as $1: empty for a
-# local pane, the worker alias for a remote-backed one. The script then
+# context BEFORE running it, so #{@remote-host} arrives as $1: empty for a
+# local pane, the worker alias only while attach-loop owns a remote pane. The script then
 # renders local or remote autosave freshness accordingly.
-interp="#(~/.config/tmux/scripts/autosave_indicator.sh '#{@rw-worker}')"
+interp="#(~/.config/tmux/scripts/autosave_indicator.sh '#{@remote-host}')"
+# Intent-based worker form used before @remote-host became the authoritative
+# execution marker. Strip it during reload migration.
+worker_interp="#(~/.config/tmux/scripts/autosave_indicator.sh '#{@rw-worker}')"
 # Pre-worker-argument form; still present in status-right on live servers
 # that loaded the earlier version, so it must be stripped too or a reload
 # would stack both chips.
@@ -34,6 +37,9 @@ while :; do
   case "$stripped" in
     *"$interp"*)
       stripped="${stripped%%"$interp"*}${stripped#*"$interp"}"
+      ;;
+    *"$worker_interp"*)
+      stripped="${stripped%%"$worker_interp"*}${stripped#*"$worker_interp"}"
       ;;
     *"$legacy_interp"*)
       stripped="${stripped%%"$legacy_interp"*}${stripped#*"$legacy_interp"}"

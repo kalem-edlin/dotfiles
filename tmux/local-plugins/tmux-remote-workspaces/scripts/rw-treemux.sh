@@ -38,9 +38,7 @@ pane_id="${TMUX_PANE:-$(tmux display-message -p -F '#{pane_id}' 2>/dev/null || t
 show_error() {
   local message="$1"
   message="${message//$'\n'/ }"
-  if [ -n "$pane_id" ]; then
-    tmux display-message -t "$pane_id" "rw: $message" 2>/dev/null || true
-  fi
+  rw_dialog "$message" "$pane_id" "Remote Treemux error"
   rw_warn "$message"
 }
 

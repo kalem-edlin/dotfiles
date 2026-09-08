@@ -20,7 +20,7 @@ endif
 CONFIG_PACKAGES := aerospace ghostty nvim sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~) (full local install)
-STOW_PACKAGES := claude codex eza git kindavim pi ssh vim worktrees zsh
+STOW_PACKAGES := claude codex eza git kindavim pi ssh vim zsh
 
 # Headless variants: CLI-only subsets of the above (no aerospace, ghostty,
 # sketchybar, kindavim — GUI/local-specific). Kept as explicit lists rather
@@ -28,7 +28,7 @@ STOW_PACKAGES := claude codex eza git kindavim pi ssh vim worktrees zsh
 # between local and headless package sets stays visible here, not hidden in
 # logic. See docs/headless-vs-local.md for the shared-contract design.
 HEADLESS_CONFIG_PACKAGES := nvim tmux
-HEADLESS_STOW_PACKAGES := claude codex eza git pi ssh vim worktrees zsh
+HEADLESS_STOW_PACKAGES := claude codex eza git pi ssh vim zsh
 
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User

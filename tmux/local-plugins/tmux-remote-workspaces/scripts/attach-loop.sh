@@ -72,9 +72,9 @@ backoff_cap=30
 attempt=0
 
 status() {
-  # Unobtrusive: only touch the pane's own display, never another pane/TUI.
-  [ -n "$pane_id" ] || return 0
-  tmux display-message -pt "$pane_id" -F "rw: $1" 2>/dev/null || true
+  # The attach loop owns this pane while disconnected, so operational
+  # progress belongs in the pane itself—not tmux's command/message row.
+  printf 'rw: %s\n' "$1"
 }
 
 intentional_close() {
@@ -122,7 +122,9 @@ exit_pane_released() {
   # focus path when it is still known.
   local released_dir=""
   released_dir="$(rw_read_endpoint "$endpoint_id" 2>/dev/null | jq -r '.workspace.focus_path // empty' 2>/dev/null)"
-  [ -n "$released_dir" ] && [ -d "$released_dir" ] && cd "$released_dir" 2>/dev/null
+  if [ -n "$released_dir" ] && [ -d "$released_dir" ]; then
+    cd "$released_dir" 2>/dev/null || true
+  fi
   exec "${SHELL:-bash}" -l
 }
 
@@ -179,11 +181,11 @@ ask_worker_to_restore_then_recheck() {
 }
 
 while true; do
-  if intentional_close; then
-    exit_intentional_close
-  fi
   if pane_released; then
     exit_pane_released
+  fi
+  if intentional_close; then
+    exit_intentional_close
   fi
 
   endpoint_json="$(rw_read_endpoint "$endpoint_id")" || {
@@ -194,6 +196,12 @@ while true; do
   worker="$(printf '%s' "$endpoint_json" | jq -r '.worker')"
   remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path')"
   session_name="$(rw_session_name "$endpoint_id")"
+
+  # These are execution-state markers, not endpoint-intent markers. Only
+  # this foreground attach loop may make the pane advertise a remote host or
+  # opt out of local workspace-resurrect capture.
+  rw_pane_set "$pane_id" @remote-host "$worker"
+  rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
 
   # Tree endpoints have a focus-side companion (rw-tree-listener.sh) that
   # answers the worker shim's "need an editor pane" requests. It is a plain
@@ -221,8 +229,6 @@ while true; do
   attempt=$((attempt + 1))
 
   echo "rw: checking $worker ($session_name), attempt $attempt..."
-  rw_pane_set "$pane_id" @remote-host "$worker"
-
   probe_start_ts="$(rw_now_epoch)"
   state="$(remote_state "$worker" "$session_name")"
 
@@ -344,13 +350,13 @@ while true; do
 
   reset_local_terminal
 
-  if intentional_close; then
-    rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "closed" "exit=$exit_code"
-    exit_intentional_close
-  fi
   if pane_released; then
     rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "returned" "exit=$exit_code"
     exit_pane_released
+  fi
+  if intentional_close; then
+    rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "closed" "exit=$exit_code"
+    exit_intentional_close
   fi
 
   if [ "$exit_code" -eq 0 ] && [ "$duration_ms" -gt 2000 ]; then

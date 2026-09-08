@@ -1,9 +1,7 @@
 # Workspace handoff sync
 
-Implements the Phase 4/5 transactional handoff described in
-`docs/tasks/tmux-remote-workspaces/initial-plan.md` ("Workspace
-synchronization and handoff", "Local-first AI coding-agent handoff",
-"Worktree claims and editing ownership"). Moves dirty git state -- unpushed
+Implements the transactional handoff described in
+`docs/tasks/tmux-remote-workspaces/initial-plan.md`. Moves dirty git state -- unpushed
 commits, staged changes, unstaged changes, tracked renames/deletions,
 untracked files, and referenced Git LFS content -- between two worktrees
 without any commit/push/pull ceremony, with a destination backup and a
@@ -14,15 +12,14 @@ divergence check before ever overwriting a managed destination.
 - `handoff` -- the transfer core. A standalone executable with two
   subcommands (`sync`, `fingerprint`); testable and usable on its own,
   independent of tmux.
-- `common.sh` -- sourced-only helpers: the destination "exec wrapper"
-  abstraction, the content-fingerprint script, generation-state read/write
-  (registry- or file-backed), and claim-marker helpers. Extends (never
-  duplicates) `../../scripts/common.sh`.
+- `common.sh` -- sourced-only helpers for the destination exec wrapper,
+  content fingerprints, and generation-state read/write. It extends
+  `../../scripts/common.sh`.
 
 `../../scripts/rw-handoff.sh` and `../../scripts/rw-return.sh` are the
-command-surface callers (`rw handoff` / `rw return`); they own tmux/pane
-concerns, worker preflight, claim orchestration, and the agent-adapter
-contract. This directory owns none of that -- it is a pure two-worktree
+command-surface callers (`rw handoff` / `rw return`); they own tmux and pane
+concerns, worker preflight, and the agent-adapter contract. This directory owns
+none of that -- it is a pure two-worktree
 sync engine that happens to be driven by them.
 
 ## The exec wrapper: one code path for local-dir testing and real ssh
@@ -84,11 +81,6 @@ destination and verifies the result:
      that has Git LFS configured: `git lfs pull` first (best-effort, so
      changed content is materialized locally), then the whole
      `.git/lfs/objects` directory. See the LFS caveat below.
-   - `claim-marker.json` -- a verbatim copy of `.worktree-claim` at the
-     source root, present only if that file exists there. `.worktree-claim`
-     is globally gitignored, so it is intentionally captured as a distinct
-     step rather than relying on the generic untracked-file scan (which
-     would skip it).
 2. **Transfer**: `tar -cf - .` over the snapshot dir, piped through the exec
    wrapper into a destination staging directory (default
    `<state-dir>/handoff-staging/<token>/g<gen>-<ts>/`, resolved on whichever
@@ -145,8 +137,7 @@ destination and verifies the result:
    required here because the destination may have local modifications the
    overwrite is meant to discard (the backup above is what makes that
    safe); apply `staged.patch` with `--index` (not `--cached` -- see
-   Correctness notes) then `unstaged.patch` plain; extract `untracked.tar`;
-   copy the claim marker into place if present.
+   Correctness notes) then `unstaged.patch` plain; extract `untracked.tar`.
 7. **Verify**: recompute the destination's fingerprint and compare to the
    fingerprint captured from the source before anything was touched. A
    mismatch is reported as **exit 4** (destination was modified but is not
@@ -174,31 +165,6 @@ empty/non-repository path fingerprints as the literal string `EMPTY`. Two
 worktrees with this fingerprint equal have byte-identical HEAD, staged,
 unstaged, and untracked-file-list state (not full untracked *content*, see
 Correctness notes).
-
-## Claims integration
-
-`handoff` itself only carries the `.worktree-claim` marker file along as
-inert coordination metadata (capture step 1, apply step 6) -- it never
-invokes `worktree-claim`. The orchestration scripts do that, and only over
-local calls (never ssh):
-
-- `rw-handoff.sh`, before capturing the snapshot: `worktree-claim
-  handoff-writer --host <worker> --path <local-worktree>` on the FOCUS
-  machine. This bumps the claim's generation and flips
-  `active_writer_host` to the worker *before* the marker is captured, so
-  the copy that travels already reflects the new state.
-- `rw-return.sh`, after the workspace lands back locally: `worktree-claim
-  return-writer --path <local-worktree>` on the FOCUS machine. By then the
-  just-arrived marker (if its generation happened to be newer) has already
-  been adopted into the local registry by `wt_sync_claim_from_marker` --
-  every `worktree-claim` subcommand calls that first -- so `return-writer`
-  reconciles from the correct baseline before bumping again.
-
-Neither script requires `worktree-claim` to be installed/invokable on the
-worker for a handoff/return to succeed: adoption happens lazily, on
-whichever host next runs a `worktree-claim` subcommand against that path.
-Both scripts skip all of this cleanly when `.worktree-claim` is absent
-(claims are optional).
 
 ## Correctness notes / known limitations
 

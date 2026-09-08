@@ -1,6 +1,6 @@
 {
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.6-sol",
+  "defaultModel": "gpt-6-astra",
   "defaultThinkingLevel": "medium",
   "theme": "personal",
   "treeFilterMode": "default",
@@ -22,6 +22,6 @@
   "themes": [
     "themes"
   ],
-  "lastChangelogVersion": "0.79.1",
+  "lastChangelogVersion": "0.85.1",
   "autocompleteMaxVisible": 7
 }

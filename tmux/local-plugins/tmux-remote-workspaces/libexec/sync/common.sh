@@ -204,28 +204,3 @@ rw_sync_gen_write_statefile() {
   local file="$1" sync_json="$2"
   rw_write_json_atomic "$file" "$sync_json"
 }
-
-# ---------------------------------------------------------------------------
-# Claim marker helpers -- the .worktree-claim marker travels with the
-# workspace as coordination metadata (initial-plan.md "Worktree claims and
-# editing ownership"; worktrees/.local/lib/worktrees/common.sh's
-# wt_sync_claim_from_marker adopts it into the far side's registry lazily,
-# the next time anything there touches worktree-claim). This package never
-# calls worktree-claim over ssh; the marker file is enough.
-# ---------------------------------------------------------------------------
-
-rw_sync_claim_marker_name() { printf '.worktree-claim\n'; }
-
-# Resolve the worktree-claim executable: prefer $PATH (normal installed
-# case, ~/.local/bin/worktree-claim via the worktrees stow package), fall
-# back to the in-repo path so this also works from an unstowed checkout
-# (dev/test environments).
-rw_sync_worktree_claim_bin() {
-  if command -v worktree-claim >/dev/null 2>&1; then
-    command -v worktree-claim
-    return 0
-  fi
-  local candidate
-  candidate="$(cd "$RW_SYNC_LIB_DIR/../../../../.." && pwd)/worktrees/.local/bin/worktree-claim"
-  [ -x "$candidate" ] && printf '%s\n' "$candidate"
-}

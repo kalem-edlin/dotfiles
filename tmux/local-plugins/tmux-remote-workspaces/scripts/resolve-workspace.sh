@@ -11,7 +11,7 @@
 #     [--workspace auto|<path>]
 #
 # Prints JSON: {mode, identity, focus_path, remote_path, needs_clone, clone_url}
-#   mode: reflected | adhoc | plain
+#   mode: adhoc | plain
 #   needs_clone: true when an adhoc checkout must still be created by the
 #                caller (via the worker's own git/ssh auth) before use.
 
@@ -56,7 +56,7 @@ emit() {
 }
 
 # Explicit non-auto workspace: used verbatim as the remote path (with ~
-# substituted for the worker's home). No reflected/adhoc inference.
+# substituted for the worker's home). No automatic placement runs.
 if [ "$workspace_arg" != "auto" ]; then
   remote_path="$workspace_arg"
   # shellcheck disable=SC2088  # literal "~" pattern match, not expansion
@@ -84,84 +84,35 @@ if [ -z "$identity" ]; then
   exit 0
 fi
 
-# --- Reflected repository match -------------------------------------------
-reflected_count="$(jq '.reflected_repositories | length' "$RW_CONFIG_FILE" 2>/dev/null || echo 0)"
-i=0
-while [ "$i" -lt "$reflected_count" ]; do
-  entry="$(jq -c ".reflected_repositories[$i]" "$RW_CONFIG_FILE")"
-  cfg_identity="$(printf '%s' "$entry" | jq -r '.identity')"
-  focus_pattern="$(printf '%s' "$entry" | jq -r '.focus_path_pattern')"
-  worker_pattern="$(printf '%s' "$entry" | jq -r '.worker_path_pattern')"
-  worker_allowed="$(printf '%s' "$entry" | jq -r --arg worker "$worker" '
-    if (.workers == null or .workers == []) then true
-    elif (.workers | type) == "array" then (.workers | index($worker) != null)
-    else error("reflected_repositories[].workers must be an array")
-    end
-  ')" || rw_die "resolve-workspace: reflected repository 'workers' must be an array of worker aliases"
-  i=$((i + 1))
+# Canonicalize to the physical worktree root. Different worktrees for the same
+# repository must remain different remote workspaces, regardless of their
+# branch names or directory naming conventions.
+focus_path="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$cwd")"
 
-  [ "$cfg_identity" = "$identity" ] || continue
-  [ "$worker_allowed" = "true" ] || continue
-
-  # Patterns look like "~/Developer/x-trees/x-<N>"; split on the <N>
-  # placeholder into literal prefix/suffix and match cwd against those
-  # literals plus a numeric slot, avoiding any need to regex-escape paths.
-  case "$focus_pattern" in
-    *'<N>'*) : ;;
-    *) continue ;; # malformed entry -- config validation should catch this
-  esac
-
-  prefix="${focus_pattern%%<N>*}"
-  suffix="${focus_pattern#*<N>}"
-  prefix="${prefix/#\~/$HOME}"
-
-  case "$cwd" in
-    "$prefix"*) : ;;
-    *) continue ;;
-  esac
-
-  rest="${cwd#"$prefix"}"
-  slot="${rest%%[!0-9]*}"
-  [ -n "$slot" ] || continue
-
-  after_slot="${rest#"$slot"}"
-  case "$after_slot" in
-    "$suffix" | "$suffix"/*) : ;;
-    *) continue ;;
-  esac
-
-  worker_prefix="${worker_pattern%%<N>*}"
-  worker_suffix="${worker_pattern#*<N>}"
-  worker_prefix="${worker_prefix/#\~/$worker_home}"
-  remote_path="${worker_prefix}${slot}${worker_suffix}"
-
-  focus_path="${prefix}${slot}${suffix}"
-  emit "reflected" "$identity" "$focus_path" "$remote_path" false ""
-  exit 0
-done
-
-# --- Ad hoc workspace: reuse an existing one for the same responsibility --
+# --- Ad hoc workspace: reuse an existing endpoint for this worktree --------
 endpoints_dir="$(rw_endpoints_dir)"
 if [ -d "$endpoints_dir" ]; then
   existing_path="$(
     for f in "$endpoints_dir"/*.json; do
       [ -f "$f" ] || continue
-      jq -r --arg identity "$identity" --arg worker "$worker" \
-        'select(.workspace.mode == "adhoc" and .workspace.identity == $identity and .worker == $worker) | .workspace.remote_path' \
+      jq -r --arg identity "$identity" --arg worker "$worker" --arg focus_path "$focus_path" \
+        'select(.workspace.mode == "adhoc" and .workspace.identity == $identity and .workspace.focus_path == $focus_path and .worker == $worker) | .workspace.remote_path' \
         "$f" 2>/dev/null
     done | head -n1
   )"
   if [ -n "$existing_path" ]; then
-    emit "adhoc" "$identity" "$cwd" "$existing_path" false ""
+    emit "adhoc" "$identity" "$focus_path" "$existing_path" false ""
     exit 0
   fi
 fi
 
-# --- Ad hoc workspace: fresh checkout under the namespaced workspace_root -
+# --- Ad hoc workspace: stable checkout for this physical worktree ----------
 root="$(rw_workspace_root)"
 root="${root/#\~/$worker_home}"
-slug="$(printf '%s' "$identity" | tr '/:' '--')"
-remote_path="${root}/${slug}"
+repo_slug="$(printf '%s' "$identity" | tr '/:' '--')"
+worktree_name="$(printf '%s' "$(basename "$focus_path")" | tr -c '[:alnum:]._-' '-')"
+worktree_fingerprint="$(printf '%s' "$focus_path" | cksum | awk '{print $1}')"
+remote_path="${root}/${repo_slug}/${worktree_name}-${worktree_fingerprint}"
 
 clone_url="$(git -C "$cwd" remote get-url origin 2>/dev/null || true)"
-emit "adhoc" "$identity" "$cwd" "$remote_path" true "$clone_url"
+emit "adhoc" "$identity" "$focus_path" "$remote_path" true "$clone_url"

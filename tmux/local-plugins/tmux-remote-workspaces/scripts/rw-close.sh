@@ -10,10 +10,8 @@
 #   4. Close the local pane (unless --no-kill-pane, used by window-close so
 #      the caller's own kill-window can finish the job).
 #
-# Never deletes a workspace/checkout. Reflected slots are never touched; ad
-# hoc checkout removal is explicitly out of scope this wave (Resolved
-# decision #3) -- the checkout is retained and left for `rw status`/`doctor`
-# to surface.
+# Never deletes a workspace/checkout. Remote checkout removal is outside the
+# endpoint lifecycle, so the checkout remains available for later reuse.
 #
 # Usage: rw-close.sh [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
 

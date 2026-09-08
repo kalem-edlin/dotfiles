@@ -39,7 +39,7 @@
 #
 #   2. Pane-level: there is no stable per-pane UUID yet (only per-session --
 #      that is still Phase 2/3 future work per the plan's "Pane and window
-#      model" and "Worktree claims" sections). `renumber-windows on` means
+#      model" section). `renumber-windows on` means
 #      the recorded focus_window_index/focus_pane_index cannot be trusted
 #      as a primary key across a restart. Instead, within the now-resolved
 #      session, we match candidate panes by `#{pane_current_path}` against
@@ -212,12 +212,7 @@ for f in "$endpoints_dir"/*.json; do
   rw_pane_set "$resolved_pane" @rw-endpoint "$id"
   rw_pane_set "$resolved_pane" @rw-worker "$worker"
   rw_pane_set "$resolved_pane" @rw-workspace "$remote_path"
-  rw_pane_set "$resolved_pane" @remote-host "$worker"
   rw_pane_set "$resolved_pane" @rw-session-uuid "$old_uuid"
-  # Same opt-out rw-ensure.sh sets: this pane is managed, so a subsequent
-  # tmux-workspace-resurrect restore must never paste a stale command into
-  # it. Cache-only, so it needs to be re-set here too.
-  rw_pane_set "$resolved_pane" @workspace-resurrect-skip "1"
 
   # No --fresh here: unlike rw-ensure.sh, this script has not itself just
   # confirmed/created the remote session, so attach-loop.sh must run its

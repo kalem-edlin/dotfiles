@@ -475,17 +475,15 @@ check_stow_target() {
   fi
 }
 
-check_stow_target "stow:claude" "$TARGET_HOME/.claude/CLAUDE.md"
-check_stow_target "stow:codex" "$TARGET_HOME/.codex/AGENTS.md"
+check_stow_target "stow:claude" "$TARGET_HOME/.claude/settings.json"
+check_stow_target "stow:codex" "$TARGET_HOME/.codex/hooks.json"
 check_stow_target "stow:git" "$TARGET_HOME/.gitconfig"
-check_stow_target "stow:pi" "$TARGET_HOME/.pi/agent/AGENTS.md"
+check_stow_target "stow:pi" "$TARGET_HOME/.pi/agent/settings.json"
 check_stow_target "stow:ssh" "$TARGET_HOME/.ssh/config"
 check_stow_target "stow:vim" "$TARGET_HOME/.vimrc"
 check_stow_target "stow:zsh" "$TARGET_HOME/.zshrc" "$TARGET_HOME/.zshenv"
-check_stow_target "stow:worktrees" "$TARGET_HOME/.local/bin/worktree-slot"
-
 # ===========================================================================
-# 5. Executables: rw, worktree-slot, worktree-claim
+# 5. Executables: rw
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
@@ -508,8 +506,6 @@ check_executable() {
 }
 
 check_executable "exe:rw" "$TARGET_HOME/.local/bin/rw"
-check_executable "exe:worktree-slot" "$TARGET_HOME/.local/bin/worktree-slot"
-check_executable "exe:worktree-claim" "$TARGET_HOME/.local/bin/worktree-claim"
 
 if [ -n "$ZSH_BIN" ]; then
   if env -i HOME="$TARGET_HOME" USER="$TARGET_USER" TERM=dumb "$ZSH_BIN" -c "command -v rw" >/dev/null 2>&1; then

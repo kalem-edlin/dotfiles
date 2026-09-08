@@ -217,6 +217,13 @@ if not chunk then
 end
 chunk()
 
+-- Replace nvim-tree-remote's shell-built `tmux send-keys` open path. In
+-- particular, tmux 3.7 treats its separately-sent `--listen ...` fragment as
+-- a tmux flag, writes an error directly over this TUI, and can leave Neo-tree
+-- apparently unresponsive. The repo-owned bridge also reuses an editor pane
+-- that already exposes @workspace-nvim-server.
+dofile(vim.fn.expand("~/.config/tmux/treemux_safe_open.lua"))
+
 local neo_tree_events = require("neo-tree.events")
 
 neo_tree_events.subscribe({

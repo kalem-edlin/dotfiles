@@ -14,8 +14,7 @@
   pager = delta
   # Ignore file creation time changes (macOS changes these during moves)
   trustctime = false
-  # Globally ignore worktree-slot/worktree-claim runtime files so opted-in
-  # repositories never need their own .gitignore entry (worktrees package)
+  # Apply the dotfiles-owned global excludes.
   excludesFile = ~/.gitignore_global
 
 [init]

@@ -543,3 +543,33 @@ fi
 
 # Persist each tmux pane's last submitted command and current ZLE edit buffer.
 source_if_exists "$HOME/.zsh/tmux-workspace-resurrect.zsh"
+
+# Focus-mode agent launchers.
+#
+# Deliberately NOT named `claude`/`pi`. Automated agents (pi subagent tmux
+# panes, cron/AFK agents) invoke the bare binaries and must never inherit
+# this personal system prompt or --dangerously-skip-permissions. Opting in
+# under a distinct name makes bleed impossible by construction rather than
+# by detecting the caller. Prompt source: dotfiles/agents/communication.md.
+#
+# Both degrade to the plain binary when the prompt file isn't stowed yet
+# (fresh machine, headless worker mid-provision).
+claudef() {
+  local p="$HOME/.claude/communication.md"
+  if [[ -r $p ]]; then
+    command claude --dangerously-skip-permissions \
+      --append-system-prompt-file "$p" \
+      --append-subagent-system-prompt "$(<"$p")" "$@"
+  else
+    command claude --dangerously-skip-permissions "$@"
+  fi
+}
+
+pif() {
+  local p="$HOME/.pi/agent/communication.md"
+  if [[ -r $p ]]; then
+    command pi --append-system-prompt "$p" "$@"
+  else
+    command pi "$@"
+  fi
+}

@@ -281,12 +281,6 @@ cmd_sync() {
     fi
   fi
 
-  local claim_present="false"
-  if exec_source "test -f $sq_source/.worktree-claim" 2>/dev/null; then
-    exec_source "cat $sq_source/.worktree-claim" >"$snap_dir/claim-marker.json" 2>/dev/null
-    claim_present="true"
-  fi
-
   local source_fingerprint
   source_fingerprint="$(rw_sync_fingerprint_via exec_source_script "$source_path")"
   source_fingerprint="$(printf '%s' "$source_fingerprint" | tr -d '\r\n')"
@@ -301,7 +295,6 @@ cmd_sync() {
     --argjson unstaged_present "$unstaged_present" \
     --argjson untracked_count "${untracked_count:-0}" \
     --argjson lfs_present "$lfs_present" \
-    --argjson claim_present "$claim_present" \
     --arg source_fingerprint "$source_fingerprint" \
     --arg source_path "$source_path" \
     --arg dest_path "$dest_path" \
@@ -309,7 +302,7 @@ cmd_sync() {
     '{format_version: 1, direction: $direction, branch: $branch, head_commit: $head_commit,
       detached: $detached, bundle_present: $bundle_present, staged_present: $staged_present,
       unstaged_present: $unstaged_present, untracked_count: $untracked_count,
-      lfs_present: $lfs_present, claim_present: $claim_present,
+      lfs_present: $lfs_present,
       source_fingerprint: $source_fingerprint, source_path: $source_path, dest_path: $dest_path,
       created_at: $created_at}' >"$snap_dir/meta.json"
 
@@ -421,7 +414,6 @@ EOS
     printf '__RW_A_STAGED=%q\n' "$staged_present"
     printf '__RW_A_UNSTAGED=%q\n' "$unstaged_present"
     printf '__RW_A_LFS=%q\n' "$lfs_present"
-    printf '__RW_A_CLAIM=%q\n' "$claim_present"
     cat <<'EOS'
 mkdir -p "$__RW_A_DEST"
 if ! git -C "$__RW_A_DEST" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -468,10 +460,6 @@ if [ "$__RW_A_UNSTAGED" = "true" ]; then
 fi
 
 tar -C "$__RW_A_DEST" -xf "$__RW_A_STAGE/untracked.tar" || exit 25
-
-if [ "$__RW_A_CLAIM" = "true" ]; then
-  cp "$__RW_A_STAGE/claim-marker.json" "$__RW_A_DEST/.worktree-claim"
-fi
 
 rm -rf "$__RW_A_STAGE"
 printf 'apply-ok\n'
@@ -546,10 +534,9 @@ EOS
     --arg branch "$branch" \
     --arg fingerprint "$dest_fp_after" \
     --argjson duration_ms "$duration_ms" \
-    --argjson claim_transferred "$claim_present" \
     '{ok: $ok, generation: $generation, backup_dir: (if $backup_dir == "" then null else $backup_dir end),
       head_commit: $head_commit, branch: $branch, fingerprint: $fingerprint,
-      duration_ms: $duration_ms, claim_transferred: $claim_transferred}'
+      duration_ms: $duration_ms}'
   return 0
 }
 

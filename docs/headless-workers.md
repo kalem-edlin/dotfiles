@@ -63,9 +63,8 @@ this contract — not just that the installer exited zero.
   stable tarball under `~/.local/opt` and links it into `~/.local/bin` when
   the distribution package is older than that minimum.
 - **Dotfiles:** `~/.config/tmux` and `~/.config/nvim` linked to this
-  repository; the `claude`, `codex`, `git`, `pi`, `ssh`, `vim`, `worktrees`,
-  and `zsh` packages stowed; `~/.local/bin/rw`, `worktree-slot`, and
-  `worktree-claim` available.
+  repository; the `claude`, `codex`, `git`, `pi`, `ssh`, `vim`, and `zsh`
+  packages stowed; `~/.local/bin/rw` available.
 - **tmux plugins:** TPM itself, `tmux-resurrect` and `tmux-continuum`, and
   this repository's own `tmux-workspace-resurrect` and
   `tmux-remote-workspaces` plugin files exposed through the tmux dotfiles
@@ -231,7 +230,7 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    exits 0 — this also proves the doctor's own toolchain resolves under a
    noninteractive SSH shell.
 4. Full contract probe:
-   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar node npm pi codex claude nvim ob rw worktree-slot worktree-claim'` —
+   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar node npm pi codex claude nvim ob rw'` —
    every command must resolve, and the output must be paths only, with no
    shell-init noise. `tailscale` too, unless the worker was provisioned with
    `INSTALL_TAILSCALE=0`.

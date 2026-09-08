@@ -30,7 +30,5 @@ remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path // e
 rw_pane_set "$pane_id" @rw-endpoint "$endpoint_id"
 rw_pane_set "$pane_id" @rw-worker "$worker"
 rw_pane_set "$pane_id" @rw-workspace "$remote_path"
-rw_pane_set "$pane_id" @remote-host "$worker"
-rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
 
 exec "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id" --fresh

@@ -1,11 +1,5 @@
 {
-  "env": {
-    "ENABLE_TOOL_SEARCH": "true"
-  },
-  "permissions": {
-    "allow": []
-  },
-  "model": "claude-fable-5[1m]",
+  "model": "claude-fable-5-1[1m]",
   "hooks": {
     "SessionStart": [
       {
@@ -18,23 +12,19 @@
           }
         ]
       }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "wc=$(command -v worktree-claim 2>/dev/null); if [ -z \"$wc\" ]; then exit 0; fi; p=\"${CLAUDE_PROJECT_DIR:-$PWD}\"; out=$(\"$wc\" verify-writer --path \"$p\" 2>&1); rc=$?; if [ \"$rc\" -eq 0 ] || [ \"$rc\" -eq 12 ]; then exit 0; elif [ \"$rc\" -eq 10 ] || [ \"$rc\" -eq 11 ] || [ \"$rc\" -eq 13 ]; then printf '%s\\n' \"$out\" >&2; exit 2; else exit 0; fi",
-            "timeout": 5
-          }
-        ]
-      }
     ]
   },
   "statusLine": {
     "type": "command",
     "command": "ccline"
+  },
+  "env": {
+    "ENABLE_LSP_TOOL": "1",
+    "ENABLE_TOOL_SEARCH": "true"
+  },
+  "permissions": {
+    "deny": ["Task(claude-code-guide)", "Task(Plan)", "Task(Explore)"],
+    "ask": []
   },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
@@ -45,5 +35,6 @@
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
   "editorMode": "vim",
-  "verbose": true
+  "verbose": true,
+  "agentPushNotifEnabled": true
 }

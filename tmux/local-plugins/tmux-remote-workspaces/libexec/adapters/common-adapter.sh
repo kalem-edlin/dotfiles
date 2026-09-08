@@ -6,8 +6,7 @@
 # Deliberately self-contained -- adapters are called blind by rw-handoff.sh
 # (owned elsewhere) and must not assume any tmux-remote-workspaces runtime
 # state beyond this file. Conventions (state dirs, ssh transport, uuid/id
-# helpers) intentionally mirror ../../scripts/common.sh and
-# worktrees/.local/lib/worktrees/common.sh without sourcing either.
+# helpers) intentionally mirror ../../scripts/common.sh without sourcing it.
 #
 # Written bash-3.2-compatible (macOS system /bin/bash) as well as modern bash
 # on Linux workers -- no associative arrays, no `mapfile`.

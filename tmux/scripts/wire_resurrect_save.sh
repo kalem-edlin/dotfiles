@@ -6,5 +6,4 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmux set-option -gq @resurrect-save-script-path "$SCRIPT_DIR/resurrect_save.sh"
-tmux bind-key C-s run-shell "bash '$SCRIPT_DIR/manual_resurrect_save.sh' '#{@rw-worker}'"
-
+tmux bind-key C-s run-shell "bash '$SCRIPT_DIR/manual_resurrect_save.sh' '#{@remote-host}' '#{pane_id}'"

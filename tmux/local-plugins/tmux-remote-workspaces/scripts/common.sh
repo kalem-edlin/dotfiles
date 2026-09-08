@@ -63,6 +63,20 @@ rw_die() {
   exit "${2:-1}"
 }
 
+# rw_dialog <message> [pane-id] [title]
+# Interactive warnings belong in a popup, never tmux's status/message row.
+# The shared renderer falls back to stderr when no attached client exists,
+# preserving useful diagnostics for headless hooks and direct CLI calls.
+rw_dialog() {
+  local message="$1" pane_id="${2:-${TMUX_PANE:-}}" title="${3:-Remote workspace}"
+  local dialog="$RW_PLUGIN_DIR/../../scripts/dialog.sh"
+  if [ -n "$pane_id" ]; then
+    "$dialog" --pane "$pane_id" --title "$title" -- "$message" || true
+  else
+    "$dialog" --title "$title" -- "$message" || true
+  fi
+}
+
 rw_need_jq() {
   command -v jq >/dev/null 2>&1 || rw_die "jq is required but not installed (this plugin never installs anything itself)."
 }
@@ -513,6 +527,7 @@ rw_wait_remote_provider_started() {
     # was a correctness bug, not a convenience).
     remote_pane_pids="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
       "tmux list-panes -t '$session_name' -F '#{pane_pid}' 2>/dev/null" 2>/dev/null | tr '\n' ' ')"
+    # shellcheck disable=SC2086 # pane PID list intentionally expands into roots
     if [ -n "${remote_pane_pids// /}" ] &&
       rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "ps axo pid=,ppid=,command=" 2>/dev/null |
       rw_ps_tree_matches "$pattern" $remote_pane_pids; then

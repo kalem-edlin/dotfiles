@@ -1,5 +1,5 @@
 theme = catppuccin-mocha.conf
-background-opacity = 0.85
+background-opacity = 0.9
 font-family = JetBrains Mono NL
 font-family = Hack Nerd Font Mono
 font-size = 22

@@ -133,6 +133,25 @@ if [ "$agent_mode" = "none" ]; then
   fi
 fi
 
+# A cross-pane handoff must never downgrade a busy, apparently-agent pane to
+# a workspace-only handoff merely because provider detection raced the
+# agent's persistence/indexing. That exact race created a remote endpoint,
+# left the local Codex TUI running, then painted the local pane as remote.
+# Shells and editors are deliberate workspace-only targets; every other busy
+# command must be positively identified by an adapter before any sync or
+# remote endpoint mutation occurs.
+if [ "$pane_id" != "${TMUX_PANE:-}" ] && [ "$agent_mode" = "none" ]; then
+  target_pane_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
+  case "$target_pane_cmd" in
+    zsh | bash | sh | fish | dash | ksh | -zsh | -bash | nvim | vim | vi) : ;;
+    *)
+      rw_log_event "handoff" "" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" \
+        "agent_detection_unconfirmed:cmd=${target_pane_cmd:-unknown}"
+      rw_die "rw handoff: could not confirm a supported AI agent in pane $pane_id (command '${target_pane_cmd:-unknown}'); pane was left local and no endpoint was created. Wait for the agent session to finish starting, then retry."
+      ;;
+  esac
+fi
+
 # ---------------------------------------------------------------------------
 # Step 1 (continued): provider version policy, before anything is touched.
 # ---------------------------------------------------------------------------
@@ -185,12 +204,14 @@ if [ "$reattach" = "true" ]; then
   remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path')"
   workspace_mode="$(printf '%s' "$endpoint_json" | jq -r '.workspace.mode')"
   workspace_identity="$(printf '%s' "$endpoint_json" | jq -r '.workspace.identity')"
+  focus_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.focus_path')"
 else
   resolution="$("$SCRIPT_DIR/resolve-workspace.sh" \
     --cwd "$cwd" --worker "$worker" --worker-home "$worker_home" --workspace "$workspace_arg")" ||
     rw_die "rw handoff: workspace resolution failed"
   workspace_mode="$(printf '%s' "$resolution" | jq -r '.mode')"
   workspace_identity="$(printf '%s' "$resolution" | jq -r '.identity')"
+  focus_path="$(printf '%s' "$resolution" | jq -r '.focus_path')"
   remote_path="$(printf '%s' "$resolution" | jq -r '.remote_path')"
   endpoint_id="$(rw_new_short_id)"
 fi
@@ -243,31 +264,6 @@ if [ "$agent_mode" = "full" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Claim: bump the LOCAL claim's writer/generation before capturing the
-# snapshot, so the marker that travels with the workspace already reflects
-# the new active_writer_host. Skipped cleanly when there is no claim
-# (claims are optional). Never invoked over ssh -- worktree-claim adopts a
-# newer-generation marker lazily on the far side the next time anything
-# there touches it (wt_sync_claim_from_marker).
-# ---------------------------------------------------------------------------
-
-claim_bin="$(rw_sync_worktree_claim_bin)"
-had_claim="false"
-if [ "$local_is_git" = "true" ] && [ -f "$local_worktree_root/$(rw_sync_claim_marker_name)" ] && [ -n "$claim_bin" ]; then
-  had_claim="true"
-  claim_out_file="$(mktemp "${TMPDIR:-/tmp}/rw-handoff-claim.XXXXXX")"
-  claim_status=0
-  "$claim_bin" handoff-writer --host "$worker" --path "$local_worktree_root" >"$claim_out_file" 2>&1 || claim_status=$?
-  if [ "$claim_status" -ne 0 ]; then
-    rw_warn "rw handoff: refusing -- worktree-claim handoff-writer failed (exit $claim_status): $(cat "$claim_out_file")"
-    rm -f "$claim_out_file"
-    rw_log_event "handoff" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" "claim_mismatch:$claim_status"
-    exit 1
-  fi
-  rm -f "$claim_out_file"
-fi
-
-# ---------------------------------------------------------------------------
 # Step 2: workspace transfer (skipped for a non-git plain-directory pane --
 # nothing to transfer). Backup-root/staging-root are pinned to the WORKER's
 # own $HOME (from preflight), per libexec/sync/handoff's documented
@@ -308,13 +304,6 @@ if [ "$local_is_git" = "true" ]; then
     # so a failed handoff leaves no registry trace at all, matching "abort
     # leaves local untouched" for the registry layer too.
     [ "$reattach" = "true" ] || rm -f "$(rw_endpoint_file "$endpoint_id")"
-    # Roll back the writer flip made before the transfer: without this the
-    # worktree stays claimed to a worker that has no endpoint, and
-    # verify-writer then blocks the focus machine itself.
-    if [ "$had_claim" = "true" ] && [ -n "$claim_bin" ]; then
-      "$claim_bin" return-writer --path "$local_worktree_root" >/dev/null 2>&1 ||
-        rw_warn "rw handoff: could not roll back the writer claim after the failed transfer -- run 'worktree-claim return-writer --path $local_worktree_root' manually."
-    fi
     rw_log_event "handoff" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" "sync_failed:$sync_status"
     exit 1
   fi
@@ -485,7 +474,7 @@ registry_json="$(jq -nc \
   --arg focus_pane_id "$pane_id" \
   --arg workspace_mode "$workspace_mode" \
   --arg workspace_identity "$workspace_identity" \
-  --arg focus_path "$cwd" \
+  --arg focus_path "$focus_path" \
   --arg remote_path "$remote_path" \
   --arg launch_worker "$worker" \
   --arg launch_workspace_arg "$workspace_arg" \
@@ -499,7 +488,6 @@ registry_json="$(jq -nc \
   --arg agent_resume_cmd "$agent_resume_cmd" \
   --arg agent_outcome "$agent_outcome" \
   --argjson divergence_risk "$divergence_risk" \
-  --argjson had_claim "$had_claim" \
   --arg agent_state "$agent_state" \
   '{
     endpoint_id: $endpoint_id, worker: $worker, worker_identity: $worker_identity,
@@ -512,7 +500,7 @@ registry_json="$(jq -nc \
     agent: (if $agent_provider == "" then {provider: null, session_id: null, resume_intent: null, state: null}
       else {provider: $agent_provider, session_id: $agent_session_id, resume_intent: $agent_resume_cmd,
         mode_flags: (if $agent_mode_flags == "" then null else $agent_mode_flags end),
-        outcome: $agent_outcome, divergence_risk: $divergence_risk, had_claim: $had_claim,
+        outcome: $agent_outcome, divergence_risk: $divergence_risk,
         state: (if $agent_state == "null" then null else $agent_state end)} end),
     created_at: $created_at, updated_at: $updated_at, generation: $generation
   }')"
@@ -531,12 +519,6 @@ rw_write_json_atomic "$(rw_endpoint_file "$endpoint_id")" "$registry_json"
 rw_pane_set "$pane_id" @rw-endpoint "$endpoint_id"
 rw_pane_set "$pane_id" @rw-worker "$worker"
 rw_pane_set "$pane_id" @rw-workspace "$remote_path"
-rw_pane_set "$pane_id" @remote-host "$worker"
-rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
-
-duration_ms="$(rw_elapsed_ms "$handoff_start_ts")"
-rw_log_event "handoff" "$endpoint_id" "$worker" "$duration_ms" "success" \
-  "generation=$sync_generation agent=${agent_provider:-none} agent_outcome=$agent_outcome keep_local=$keep_local"
 
 # The attach loop must own the TARGET pane's tty. When --pane named a pane
 # other than the calling one, exec-ing here would hijack the CALLER's
@@ -544,6 +526,9 @@ rw_log_event "handoff" "$endpoint_id" "$worker" "$duration_ms" "success" \
 # X's endpoint later collaterally killed Y) -- respawn the target pane
 # into the loop in that case.
 if [ "$pane_id" = "${TMUX_PANE:-}" ]; then
+  duration_ms="$(rw_elapsed_ms "$handoff_start_ts")"
+  rw_log_event "handoff" "$endpoint_id" "$worker" "$duration_ms" "success" \
+    "generation=$sync_generation agent=${agent_provider:-none} agent_outcome=$agent_outcome keep_local=$keep_local"
   exec "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id" --fresh
 else
   # respawn-pane -k kills whatever the target pane is running. Only safe
@@ -560,14 +545,35 @@ else
   # header warns the operator that unsaved buffers do not transfer before
   # they ever confirm, so it's safe to move the pane the same way as an
   # idle shell here.
-  target_pane_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
+  # A stopped provider may take a moment to unwind back to its shell. Wait
+  # for that observable state instead of immediately misclassifying the
+  # still-retiring process as an unsafe target.
+  target_pane_cmd=""
+  wait_attempt=0
+  while [ "$wait_attempt" -lt 15 ]; do
+    target_pane_cmd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_command}' 2>/dev/null || true)"
+    case "$target_pane_cmd" in
+      zsh | bash | sh | fish | dash | ksh | -zsh | -bash | nvim | vim | vi) break ;;
+    esac
+    wait_attempt=$((wait_attempt + 1))
+    sleep 0.2
+  done
   case "$target_pane_cmd" in
-    zsh | bash | sh | fish | -zsh | -bash | nvim | vim | vi)
-      tmux respawn-pane -k -t "$pane_id" "$SCRIPT_DIR/attach-loop.sh '$endpoint_id' --fresh" 2>/dev/null ||
-        rw_warn "rw handoff: could not start the attach loop in pane $pane_id -- attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
+    zsh | bash | sh | fish | dash | ksh | -zsh | -bash | nvim | vim | vi)
+      if tmux respawn-pane -k -t "$pane_id" "$SCRIPT_DIR/attach-loop.sh '$endpoint_id' --fresh" 2>/dev/null; then
+        duration_ms="$(rw_elapsed_ms "$handoff_start_ts")"
+        rw_log_event "handoff" "$endpoint_id" "$worker" "$duration_ms" "success" \
+          "generation=$sync_generation agent=${agent_provider:-none} agent_outcome=$agent_outcome keep_local=$keep_local"
+      else
+        rw_log_event "handoff" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" \
+          "attach_loop_respawn_failed:pane=$pane_id"
+        rw_die "rw handoff: could not start the attach loop in pane $pane_id. The endpoint remains registered as $endpoint_id, but this pane is still local; retry or return/close the endpoint explicitly."
+      fi
       ;;
     *)
-      rw_warn "rw handoff: pane $pane_id still runs '$target_pane_cmd' (possibly the source agent) -- NOT respawning it into the attach loop. Attach manually with: $SCRIPT_DIR/attach-loop.sh $endpoint_id"
+      rw_log_event "handoff" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$handoff_start_ts")" "fail" \
+        "attach_loop_not_started:pane=$pane_id cmd=${target_pane_cmd:-unknown}"
+      rw_die "rw handoff: pane $pane_id still runs '${target_pane_cmd:-unknown}', so the attach loop was not started. The endpoint remains registered as $endpoint_id, but this pane is still local; retry or return/close the endpoint explicitly."
       ;;
   esac
 fi

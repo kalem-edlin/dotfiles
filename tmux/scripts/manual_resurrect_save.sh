@@ -11,9 +11,20 @@ RW_COMMON="$SCRIPT_DIR/../local-plugins/tmux-remote-workspaces/scripts/common.sh
 source "$RW_COMMON"
 
 worker="${1:-}"
+pane_id="${2:-}"
+
+save_dialog() {
+  local title="$1" message="$2"
+  if [ -n "$pane_id" ]; then
+    "$SCRIPT_DIR/dialog.sh" --pane "$pane_id" --title "$title" -- "$message" || true
+  else
+    "$SCRIPT_DIR/dialog.sh" --title "$title" -- "$message" || true
+  fi
+}
+
 case "$worker" in
   *[!A-Za-z0-9._-]*)
-    tmux display-message "Tmux save failed: invalid remote worker alias"
+    save_dialog "Tmux save failed" "Invalid remote worker alias."
     exit 1
     ;;
 esac
@@ -27,8 +38,7 @@ trap 'rm -f "$err_file"' EXIT
 local_ts="$(bash "$SCRIPT_DIR/resurrect_save.sh" --print-timestamp 2>"$err_file")"
 case "$local_ts" in
   '' | *[!0-9]*)
-    tmux display-message -d 10000 \
-      "Tmux save failed: …$(tail -c 220 "$err_file" | tr '\n' ' ')"
+    save_dialog "Tmux save failed" "$(tail -c 220 "$err_file" | tr '\n' ' ')"
     exit 1
     ;;
 esac
@@ -47,8 +57,8 @@ remote_ts="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
   'bash -s -- --print-timestamp' <"$SCRIPT_DIR/resurrect_save.sh" 2>"$err_file")"
 case "$remote_ts" in
   '' | *[!0-9]*)
-    tmux display-message -d 10000 \
-      "Local tmux saved; remote save FAILED on $worker: …$(tail -c 200 "$err_file" | tr '\n' ' ')"
+    save_dialog "Remote tmux save failed" \
+      "Local tmux saved, but the save on $worker failed: $(tail -c 200 "$err_file" | tr '\n' ' ')"
     exit 1
     ;;
 esac

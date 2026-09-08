@@ -100,11 +100,12 @@ worker.
 ```text
 rw ensure --worker mini
   -> preflight mini over ssh (tmux, git, git-lfs; consume-never-provision)
-  -> resolve workspace placement (reflected slot | ad hoc checkout | plain $HOME)
+  -> resolve workspace placement (worktree-specific checkout | plain $HOME)
   -> create/validate rw-<focus-short-id>-<endpoint-id> on mini's own tmux server
   -> write endpoints/<endpoint-id>.json (source of truth)
-  -> set pane cache options: @rw-endpoint @rw-worker @rw-workspace @remote-host
+  -> set endpoint-intent cache: @rw-endpoint @rw-worker @rw-workspace
   -> exec attach-loop.sh <endpoint-id>   (this pane's foreground process from here on)
+  -> attach-loop sets execution cache: @remote-host @workspace-resurrect-skip
 ```
 
 `attach-loop.sh` runs `ssh -t mini tmux new-session -A -s <endpoint>` in a
@@ -138,6 +139,11 @@ rw.log                 free-text diagnostic log
 `@session-uuid`, `@rw-endpoint`, `@rw-worker`, `@rw-workspace`, `@remote-host`
 are tmux user options and are **cache only** -- they do not survive a server
 restart. The jsonl/json files under the state root are authoritative.
+`@remote-host` specifically means the local pane is currently owned by an
+attach loop; it is not inferred merely from endpoint intent. Host/directory
+chips and remote-aware bindings use that execution marker, and config reload
+repairs it from the live pane process tree. This prevents a failed or racing
+handoff from labeling a still-local agent as remote.
 `renumber-windows on` (`tmux/tmux.conf:13`) means nothing is ever keyed on
 `session:window.index`.
 
@@ -157,45 +163,30 @@ TMUX_REMOTE_WORKSPACES_CONFIG=/path/to/alt-config.json \
     { "alias": "mini", "platform": "darwin", "notes": "..." },
     { "alias": "agents-roll", "platform": "linux", "notes": "..." }
   ],
-  "reflected_repositories": [{
-    "identity": "github.com/kalem-edlin/content-engine",
-    "workers": ["mini"],
-    "focus_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>",
-    "worker_path_pattern": "~/Developer/content-engine-trees/content-engine-<N>"
-  }],
   "workspace_root": "~/rw-workspaces/<focus-machine-id>",
   "ssh": { "connect_timeout_seconds": 8, "preflight_timeout_seconds": 10, "status_timeout_seconds": 3 }
 }
 ```
 
-Adding a reflected repository is config-only: append an entry with its
-normalized `identity` (host/owner/repo, from `git remote get-url origin`,
-never `.git`, always lowercase), optional worker-alias allowlist, and the two
-path patterns. Omitting `workers` (or using an empty array) reflects the
-repository to every configured worker; a non-empty array limits reflection to
-those worker aliases, allowing other workers to use ad hoc placement. `<N>` is
-the only supported placeholder (a numbered slot); `~` in either pattern is
-substituted for the relevant host's own `$HOME` at resolution time -- never an
-absolute username. Patterns are matched with plain prefix/suffix string
-comparison (see `scripts/resolve-workspace.sh`), not regex, so path
-metacharacters in a pattern are never a hazard.
+`workspace_root` is namespaced by the focus machine's stable id. Automatic Git
+workspace placement adds the normalized repository identity, the local
+worktree's directory name, and a checksum of its canonical path. Two physical
+worktrees for the same repository therefore get separate remote checkouts.
+Branch names and numbered-directory conventions do not affect placement.
 
 Workspace resolution order (`--workspace auto`, the default):
 
 1. Not a git repo (no `origin` remote) -> `plain`, worker's `$HOME`.
-2. Repo matches a configured reflected pattern for the selected worker (cwd
-   is the slot dir or beneath it) -> `reflected`, no clone, no filesystem
-   changes.
-3. Repo, not reflected, but a live-registry `adhoc` endpoint already exists
-   for the same normalized identity on the same worker -> reuse its path.
-4. Otherwise -> fresh `adhoc` checkout under `workspace_root`, cloned with
-   the *worker's own* git/ssh auth. A clone failure aborts with a message
-   about registering the worker's key with the git host -- this plugin never
-   supplies or forwards credentials.
+2. A live `adhoc` endpoint already exists for the same canonical local
+   worktree on the same worker -> reuse its path.
+3. Otherwise -> use that worktree's stable `adhoc` checkout under
+   `workspace_root`, cloned with the *worker's own* git/ssh auth when absent.
+   A clone failure aborts with a message about registering the worker's key
+   with the Git host. This plugin never supplies or forwards credentials.
 
 `--workspace <path>` (anything other than `auto`) is used verbatim as the
-remote path (`~` substituted for the worker's home); no reflected/ad hoc
-inference runs.
+remote path (`~` substituted for the worker's home); no automatic placement
+runs.
 
 ## `rw status` / `rw doctor`
 
@@ -232,8 +223,8 @@ dotfiles clone having pulled the same revision first.
   to exercise the reachable/unreachable/missing-binaries paths without
   touching a real worker.
 - `scripts/resolve-workspace.sh` takes the worker's `$HOME` as an explicit
-  argument (not resolved via ssh itself), so reflected/ad hoc/plain
-  resolution logic is fully testable offline.
+  argument (not resolved via ssh itself), so ad hoc/plain resolution logic is
+  fully testable offline.
 - Use a private tmux socket (`tmux -L <name>`) for any test that needs a real
   tmux server -- never exercise pane/session/hook behavior against a live
   server you also use interactively.
@@ -252,9 +243,7 @@ not a seam.
 
 Implemented: transactional workspace handoff/return (`libexec/sync/handoff`
 -- see `libexec/sync/README.md` for the full wire format, exit codes, and
-correctness notes) plus claims integration
-(`worktree-claim handoff-writer`/`return-writer`, marker travels with the
-workspace). Agent handoff (detect/versions/export/install/resume-cmd) is
+correctness notes). Agent handoff (detect/versions/export/install/resume-cmd) is
 wired against the adapter contract in `libexec/adapters/README.md` and all
 three provider adapters (`pi`, `claude`, `codex`) are implemented there --
 see `libexec/adapters/README.md` for per-provider details and its
@@ -298,8 +287,8 @@ The operator smoke journey CLOSED 2026-08-08 with every bucket passing
 `docs/tasks/tmux-remote-workspaces/smoke-journey.md`, deleted after
 close). Smoke-VERIFIED end to end on the live laptop server: ensure /
 splits / close semantics, drop-reattach, remote Treemux (tree-as-endpoint
-v2), ad-hoc + reflected-slot handoff/return with claim generation round
-trips, agent handoff with verbatim access-mode replay (claude + codex),
+v2), ad-hoc handoff/return, agent handoff with verbatim
+access-mode replay (claude + codex),
 OSC 52 clipboard from remote (shell + nvim yank), server-side copy-mode
 entry, laptop server-loss restore, worker-reboot endpoint rebuild from
 manifest, picker failure dialogs.
@@ -321,10 +310,6 @@ NOT yet organically validated (watch stochastically in daily use):
 - After a laptop tmux server loss, restore via `tmux-restore` (on PATH;
   tmux/scripts/tmux_restore.sh) from outside tmux — it refuses when
   there is no snapshot and leaves no bootstrap session behind.
-- Server loss mints NEW session uuids; only endpoint-hosting sessions
-  get re-stamped. Any worktree claim held by a pre-loss session uuid
-  then refuses handoffs with exit 10 until GC'd (verify the owner uuid
-  is dead, then `worktree-claim claim --force-takeover` + `release`).
 - Endpoints do NOT survive a laptop server loss: restored attach-loop
   panes come back as plain shells, so reconcile closes the endpoints
   cleanly (no zombies). Re-open with `prefix e`. Reattach-on-restore is
@@ -341,22 +326,17 @@ NOT yet organically validated (watch stochastically in daily use):
 
 1. Endpoint reattach-on-restore design (attach-loop panes aren't
    resurrect-whitelisted; server loss closes endpoints instead).
-2. Post-restore claim sweep: auto-release claims owned by session uuids
-   no longer alive on this machine.
-3. Worker-side resurrect save filter for CLOSED rw-* sessions (zombie
+2. Worker-side resurrect save filter for CLOSED rw-* sessions (zombie
    revival loop).
-4. Sync fingerprint hardening: hash content (write-tree), not diff text
+3. Sync fingerprint hardening: hash content (write-tree), not diff text
    (host-config-sensitive via core.abbrev auto / diff.algorithm); derive
    the source fingerprint from the captured artifacts to shrink the
    mid-sync race.
-5. `rw close --endpoint <id>` alias (today `--pane` only).
-6. CLI close without `--reason` logs the misleading default
+4. `rw close --endpoint <id>` alias (today `--pane` only).
+5. CLI close without `--reason` logs the misleading default
    `reason=prefix+q`.
-7. Stock resurrect's `ps` save-strategy captures the tree-listener's ssh
+6. Stock resurrect's `ps` save-strategy captures the tree-listener's ssh
    child as a stray (harmless, unreplayable) snapshot line.
-8. Tombstones record `endpoint_id: null`.
-9. Tree-endpoint rebuild recreates a shell session; tree endpoints are
+7. Tombstones record `endpoint_id: null`.
+8. Tree-endpoint rebuild recreates a shell session; tree endpoints are
    not guarded against handoff eligibility.
-10. Laptop HostName pin (`sudo scutil --set HostName ...`) — unset
-    HostName flips host identity across reboots and storms claim
-    host-mismatch (exit 11).

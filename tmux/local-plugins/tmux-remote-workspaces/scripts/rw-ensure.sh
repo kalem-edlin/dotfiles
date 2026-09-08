@@ -15,15 +15,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SYNC_DIR="$SCRIPT_DIR/../libexec/sync"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
-# Sourced only for rw_sync_worktree_claim_bin/rw_sync_claim_marker_name (the
-# claim checkpoint below) -- re-sources scripts/common.sh harmlessly.
-# shellcheck source-path=SCRIPTDIR/../libexec/sync
-# shellcheck source=../libexec/sync/common.sh
-source "$SYNC_DIR/common.sh"
 
 rw_need_jq
 rw_config_valid || rw_die "config.json ($RW_CONFIG_FILE) is invalid"
@@ -57,40 +51,6 @@ rw_worker_known "$worker" || rw_die "rw ensure: worker '$worker' is not declared
 start_ts="$(rw_now_epoch)"
 
 cwd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null || pwd)"
-
-# ---------------------------------------------------------------------------
-# Claim checkpoint (initial-plan.md, "Worktree claims and editing ownership",
-# Enforcement surface 1: "Tmux and handoff commands: claim, handoff, return,
-# endpoint launch, and release operations validate both responsibility and
-# host. These are hard failures on mismatch."). Cheap and local-only (no ssh
-# round trip, runs before preflight): a single verify-writer call, only when
-# the resolved LOCAL workspace is a git worktree that actually has a claim
-# marker, and only when the binary is on PATH -- claims are optional, so a
-# missing binary or an unclaimed worktree both proceed silently.
-# ---------------------------------------------------------------------------
-
-claim_bin="$(rw_sync_worktree_claim_bin)"
-if [ -n "$claim_bin" ] && git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  local_worktree_root="$(git -C "$cwd" rev-parse --show-toplevel)"
-  if [ -f "$local_worktree_root/$(rw_sync_claim_marker_name)" ]; then
-    claim_verify_err="$(mktemp "${TMPDIR:-/tmp}/rw-ensure-claim.XXXXXX")"
-    "$claim_bin" verify-writer --path "$local_worktree_root" >/dev/null 2>"$claim_verify_err"
-    claim_verify_status=$?
-    case "$claim_verify_status" in
-      0 | 12 | 14) : ;; # ok / no stable session identity (advisory here) / no existing claim
-      10 | 11 | 13)
-        rw_warn "rw ensure: worktree-claim blocks endpoint launch for '$local_worktree_root' (exit $claim_verify_status):"
-        rw_warn "$(cat "$claim_verify_err")"
-        rm -f "$claim_verify_err"
-        exit 1
-        ;;
-      *)
-        rw_warn "rw ensure: worktree-claim verify-writer failed unexpectedly (exit $claim_verify_status); proceeding. $(cat "$claim_verify_err")"
-        ;;
-    esac
-    rm -f "$claim_verify_err"
-  fi
-fi
 
 # Git-host auth preflight (Enforcement/"Consume, never provision"): pass the
 # local repo's origin remote, when this pane resolves to one, so
@@ -130,6 +90,7 @@ if [ "$reattach" = "true" ]; then
   remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path')"
   workspace_mode="$(printf '%s' "$endpoint_json" | jq -r '.workspace.mode')"
   workspace_identity="$(printf '%s' "$endpoint_json" | jq -r '.workspace.identity')"
+  focus_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.focus_path')"
   generation="$(printf '%s' "$endpoint_json" | jq -r '.generation // 0')"
   generation=$((generation + 1))
 else
@@ -139,6 +100,7 @@ else
 
   workspace_mode="$(printf '%s' "$resolution" | jq -r '.mode')"
   workspace_identity="$(printf '%s' "$resolution" | jq -r '.identity')"
+  focus_path="$(printf '%s' "$resolution" | jq -r '.focus_path')"
   remote_path="$(printf '%s' "$resolution" | jq -r '.remote_path')"
   needs_clone="$(printf '%s' "$resolution" | jq -r '.needs_clone')"
   clone_url="$(printf '%s' "$resolution" | jq -r '.clone_url')"
@@ -201,7 +163,7 @@ registry_json="$(jq -nc \
   --arg focus_pane_id "$pane_id" \
   --arg workspace_mode "$workspace_mode" \
   --arg workspace_identity "$workspace_identity" \
-  --arg focus_path "$cwd" \
+  --arg focus_path "$focus_path" \
   --arg remote_path "$remote_path" \
   --arg launch_worker "$worker" \
   --arg launch_workspace_arg "$workspace_arg" \
@@ -242,13 +204,7 @@ rw_write_json_atomic "$(rw_endpoint_file "$endpoint_id")" "$registry_json"
 rw_pane_set "$pane_id" @rw-endpoint "$endpoint_id"
 rw_pane_set "$pane_id" @rw-worker "$worker"
 rw_pane_set "$pane_id" @rw-workspace "$remote_path"
-rw_pane_set "$pane_id" @remote-host "$worker"
 [ -n "$session_uuid" ] && rw_pane_set "$pane_id" @rw-session-uuid "$session_uuid"
-
-# Opt this pane out of tmux-workspace-resurrect's command replay so a
-# restore never pastes a stale `ssh worker` command into a pane this plugin
-# now manages. See initial-plan.md, "Local restore of remote attachments".
-rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
 
 duration_ms="$(rw_elapsed_ms "$start_ts")"
 rw_log_event "$([ "$reattach" = "true" ] && echo reattach || echo create)" \

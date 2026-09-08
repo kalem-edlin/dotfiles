@@ -3,6 +3,5 @@ tmux/plugins/
 raycast
 fzf
 history.txt
-.worktree-claim
 */**/*.swp
 */**/*.bak

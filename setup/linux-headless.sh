@@ -20,10 +20,9 @@ SETUP_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 # shellcheck source=setup/lib.sh
 . "$DOTFILES_DIR/setup/lib.sh"
 
-# ~/.local/bin holds `claude` (installed by misc-headless.sh below), `rw`
-# (linked by install_headless_dotfiles below via lib.sh's link_rw), and the
-# worktree-slot/worktree-claim entrypoints the `worktrees` package stows
-# later in this same script. Put it FIRST on PATH now so every later step in
+# ~/.local/bin holds `claude` (installed by misc-headless.sh below) and `rw`
+# (linked by install_headless_dotfiles below via lib.sh's link_rw). Put it
+# FIRST on PATH now so every later step in
 # THIS process — including the upstream Neovim fallback and verify_commands
 # — resolves managed user-local commands ahead of old distro packages.
 export PATH="$HOME/.local/bin:$PATH"
@@ -538,8 +537,8 @@ install_headless_dotfiles() {
 
   ensure_ssh_dirs
 
-  backup_conflicts claude codex eza git pi ssh vim worktrees zsh
-  stow_packages claude codex eza git pi ssh vim worktrees zsh
+  backup_conflicts claude codex eza git pi ssh vim zsh
+  stow_packages claude codex eza git pi ssh vim zsh
 
   # codex ships no config.toml in the stowed package (codex writes project
   # trust entries straight into that file, so symlinking it would dirty the

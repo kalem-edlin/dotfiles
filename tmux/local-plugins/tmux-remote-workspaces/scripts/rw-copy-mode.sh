@@ -30,7 +30,8 @@ page_up="${2:-}"
 endpoint_id="$(rw_pane_get "$pane_id" @rw-endpoint)"
 worker="$(rw_pane_get "$pane_id" @rw-worker)"
 if [ -z "$endpoint_id" ] || [ -z "$worker" ]; then
-  tmux display-message "rw copy-mode: pane $pane_id has no endpoint cache -- falling back to local copy-mode"
+  rw_dialog "Pane $pane_id has no remote endpoint cache. Falling back to local copy mode." \
+    "$pane_id" "Remote copy mode"
   tmux copy-mode -t "$pane_id"
   exit 0
 fi
@@ -41,4 +42,5 @@ flags=""
 
 rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
   "tmux copy-mode$flags -t '$session_name'" >/dev/null 2>&1 ||
-  tmux display-message "rw copy-mode: could not reach worker '$worker' (endpoint $endpoint_id)"
+  rw_dialog "Could not reach worker '$worker' for endpoint $endpoint_id." \
+    "$pane_id" "Remote copy mode error"
