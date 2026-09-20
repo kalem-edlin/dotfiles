@@ -203,23 +203,15 @@ function fmtTokens(n: number): string {
 
 type BranchEntry = { type: string; message?: { role: string } };
 
-function totalUsage(branch: ReadonlyArray<BranchEntry>): {
-  inputTokens: number;
-  outputTokens: number;
-  cost: number;
-} {
-  let inputTokens = 0;
-  let outputTokens = 0;
+function totalCost(branch: ReadonlyArray<BranchEntry>): number {
   let cost = 0;
   for (const e of branch) {
     if (e.type === "message" && e.message?.role === "assistant") {
       const m = e.message as unknown as AssistantMessage;
-      inputTokens += m.usage?.input ?? 0;
-      outputTokens += m.usage?.output ?? 0;
       cost += m.usage?.cost?.total ?? 0;
     }
   }
-  return { inputTokens, outputTokens, cost };
+  return cost;
 }
 
 function isCodexProvider(provider: string | undefined): boolean {
@@ -289,11 +281,11 @@ export default function (pi: ExtensionAPI) {
         invalidate() {},
         render(width: number): string[] {
           const branch = footerData.getGitBranch();
-          const { inputTokens, outputTokens, cost } = totalUsage(ctx.sessionManager.getBranch());
-          const totalTokens = inputTokens + outputTokens;
+          const cost = totalCost(ctx.sessionManager.getBranch());
 
           const ctxUse = ctx.getContextUsage();
           const ctxPercent = ctxUse?.percent != null ? `${ctxUse.percent.toFixed(1)}%` : "?%";
+          const ctxTokens = ctxUse?.tokens != null ? fmtTokens(ctxUse.tokens) : "?";
 
           const thinking = pi.getThinkingLevel();
           const thinkingLabel = thinking === "off" ? "off" : thinking;
@@ -312,7 +304,7 @@ export default function (pi: ExtensionAPI) {
           }
 
           segments.push(
-            fg(COLOR.ctx, `${ICON.ctx} ${ctxPercent} · ${fmtTokens(totalTokens)} tokens`, true),
+            fg(COLOR.ctx, `${ICON.ctx} ${ctxPercent} · ${ctxTokens} tokens`, true),
           );
 
           if (codexUsage) {

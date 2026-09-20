@@ -6,7 +6,7 @@
   "treeFilterMode": "default",
   "doubleEscapeAction": "fork",
   "quietStartup": false,
-  "hideThinkingBlock": false,
+  "hideThinkingBlock": true,
   "steeringMode": "one-at-a-time",
   "followUpMode": "one-at-a-time",
   "images": {

@@ -60,6 +60,7 @@ interface SpawnOptions {
 interface SubState {
 	id: number;
 	status: "running" | "done" | "error";
+	widgetHidden?: boolean;
 	task: string;
 	textChunks: string[];
 	toolCount: number;
@@ -158,6 +159,9 @@ export default function (pi: ExtensionAPI) {
 
 		for (const [id, state] of Array.from(agents.entries())) {
 			const key = `sub-${id}`;
+			// Continuing an agent restores its card until a later user prompt.
+			if (state.status === "running") state.widgetHidden = false;
+			if (state.widgetHidden) continue;
 			widgetCtx.ui.setWidget(key, (_tui: any, theme: any) => {
 				const container = new Container();
 				const borderFn = (s: string) => theme.fg("dim", s);
@@ -319,7 +323,9 @@ export default function (pi: ExtensionAPI) {
 					customType: "subagent-result",
 					content: `Subagent #${state.id}${state.turnCount > 1 ? ` (Turn ${state.turnCount})` : ""} finished "${prompt}" in ${Math.round(state.elapsed / 1000)}s.\n\nResult:\n${result.slice(0, 8000)}${result.length > 8000 ? "\n\n... [truncated]" : ""}`,
 					display: true,
-				}, { deliverAs: "followUp", triggerTurn: true });
+				// Deliver before the coordinator's next model call so it can synthesize the
+				// result and leave its own response at the bottom of the transcript.
+				}, { deliverAs: "steer", triggerTurn: true });
 
 				resolve();
 			});
@@ -339,7 +345,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.registerTool({
 		name: "subagent_create",
-		description: "Spawn a background subagent with full read and write tools. Thinking level is required and is the primary way to match the subagent to task complexity: low for lightweight/simple tasks, medium for routine tasks needing moderate reasoning, high for complex multi-step work, and xhigh for the hardest tasks or when accuracy and performance are critical. Unless the user explicitly requests a specific model, omit model and use the default inherited parent model. Partition concurrent writing tasks by file or subsystem so agents do not edit the same files. Returns immediately and delivers results as a follow-up message.",
+		description: "Spawn a background subagent with full read and write tools. Thinking level is required and is the primary way to match the subagent to task complexity: low for lightweight/simple tasks, medium for routine tasks needing moderate reasoning, high for complex multi-step work, and xhigh for the hardest tasks or when accuracy and performance are critical. Unless the user explicitly requests a specific model, omit model and use the default inherited parent model. Partition concurrent writing tasks by file or subsystem so agents do not edit the same files. Returns immediately and delivers results before the coordinator's next model call.",
 		parameters: Type.Object({
 			task: Type.String({ description: "The complete task description for the subagent to perform" }),
 			model: Type.Optional(Type.String({
@@ -612,6 +618,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── Session lifecycle ─────────────────────────────────────────────────────
+
+	pi.on("input", async (event, ctx) => {
+		// Background/extension messages must not dismiss the current result cards.
+		if (event.source === "extension") return;
+		widgetCtx = ctx;
+		for (const [id, state] of agents) {
+			if (state.status === "running") continue;
+			state.widgetHidden = true;
+			ctx.ui.setWidget(`sub-${id}`, undefined);
+		}
+	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		for (const [id, state] of Array.from(agents.entries())) {
