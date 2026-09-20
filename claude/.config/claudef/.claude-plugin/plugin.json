@@ -1,0 +1,8 @@
+{
+  "name": "dotfiles-focus",
+  "description": "Focus-only commands and skills maintained in dotfiles",
+  "version": "1.0.0",
+  "author": {
+    "name": "Kale Medlin"
+  }
+}

@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+profile=${CLAUDEF_PROFILE:-"$HOME/.config/claudef"}
+prompt="$profile/communication.md"
+native_ccline="$HOME/.claude/ccline"
+
+# ccline reads configuration from Claude's native directory. Link only its
+# tracked configuration; credentials and mutable cache files remain native.
+mkdir -p "$native_ccline/themes"
+for name in config.toml models.toml; do
+  source="$profile/ccline/$name"
+  target="$native_ccline/$name"
+  if [ -r "$source" ] && { [ -L "$target" ] || [ ! -e "$target" ]; }; then
+    ln -sfn "$source" "$target"
+  fi
+done
+source="$profile/ccline/themes/personal.toml"
+target="$native_ccline/themes/personal.toml"
+if [ -r "$source" ] && { [ -L "$target" ] || [ ! -e "$target" ]; }; then
+  ln -sfn "$source" "$target"
+fi
+
+if [ -r "$prompt" ]; then
+  exec env -u CLAUDE_CONFIG_DIR claude \
+    --dangerously-skip-permissions \
+    --settings "$profile/settings.json" \
+    --setting-sources user,project,local \
+    --plugin-dir "$profile" \
+    --append-system-prompt-file "$prompt" \
+    "$@"
+fi
+
+exec env -u CLAUDE_CONFIG_DIR claude \
+  --dangerously-skip-permissions \
+  --settings "$profile/settings.json" \
+  --setting-sources user,project,local \
+  --plugin-dir "$profile" \
+  "$@"

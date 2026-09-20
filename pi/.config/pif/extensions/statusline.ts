@@ -3,7 +3,7 @@
  * styled to match the user's CCometixLine config used by Claude Code.
  *
  * Layout:
- *    Model | git branch ●/○ | ctx% · tokens | codex 5h% · 7d% | thinking | $cost
+ *    Model (thinking) | git branch ●/○ | ctx% · tokens | codex usage | $cost
  *
  * Codex subscription usage is queried via `codex app-server` (JSONRPC
  * account/rateLimits/read) when the active provider is openai-codex.
@@ -29,7 +29,6 @@ const COLOR = {
   git: 109,
   ctx: 5,
   usage: 14,
-  thinking: 141,
   cost: 214,
   sep: 240,
 } as const;
@@ -38,7 +37,6 @@ const ICON = {
   model: "\u{E26D}",
   git: "\u{F02A2}",
   ctx: "\u{F49B}",
-  thinking: "\u{F12F5}",
   cost: "\u{EEC1}",
 } as const;
 
@@ -65,15 +63,45 @@ function pieIcon(percent: number): string {
 const SEP = ` ${fg(COLOR.sep, "|")} `;
 const DIRTY_POLL_MS = 4000;
 const CODEX_POLL_MS = 5 * 60 * 1000;
+const COUNTDOWN_RENDER_MS = 60 * 1000;
 const CODEX_RPC_TIMEOUT_MS = 5000;
 
+type UsageWindow = {
+  usedPct: number;
+  durationMins: number;
+  resetsAt: number;
+};
+
 type CodexUsage = {
-  primaryPct: number;
-  secondaryPct: number;
+  short?: UsageWindow;
+  weekly?: UsageWindow;
   planType: string;
 };
 
-function fetchCodexUsage(): Promise<CodexUsage | undefined> {
+function parseUsageWindow(value: any): UsageWindow | undefined {
+  const usedPct = Number(value?.usedPercent);
+  const durationMins = Number(value?.windowDurationMins);
+  const resetsAt = Number(value?.resetsAt);
+  if (![usedPct, durationMins, resetsAt].every(Number.isFinite)) return undefined;
+  return { usedPct, durationMins, resetsAt };
+}
+
+function remainingWindow(resetsAt: number): string {
+  const minutes = Math.max(0, Math.floor((resetsAt * 1000 - Date.now()) / 60_000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h` : `${minutes}m`;
+}
+
+function weeklyResetDate(resetsAt: number): string {
+  const reset = new Date(resetsAt * 1000);
+  const days = Math.max(0, Math.floor((resetsAt * 1000 - Date.now()) / 86_400_000));
+  return `${reset.getUTCMonth() + 1}-${reset.getUTCDate()}-${days}`;
+}
+
+function normalizeModelName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function fetchCodexUsage(modelId?: string): Promise<CodexUsage | undefined> {
   return new Promise((resolve) => {
     let proc: ReturnType<typeof spawn>;
     try {
@@ -118,12 +146,19 @@ function fetchCodexUsage(): Promise<CodexUsage | undefined> {
               })}\n`,
             );
           } else if (msg.id === 2 && msg.result?.rateLimits) {
-            const rl = msg.result.rateLimits;
-            finish({
-              primaryPct: Number(rl.primary?.usedPercent ?? 0),
-              secondaryPct: Number(rl.secondary?.usedPercent ?? 0),
-              planType: String(rl.planType ?? ""),
-            });
+            const modelName = normalizeModelName(modelId ?? "");
+            const modelLimit = Object.values(msg.result.rateLimitsByLimitId ?? {}).find(
+              (candidate: any) =>
+                candidate?.limitName && normalizeModelName(candidate.limitName) === modelName,
+            ) as any;
+            const rl = modelLimit ?? msg.result.rateLimits;
+            const windows = [parseUsageWindow(rl.primary), parseUsageWindow(rl.secondary)]
+              .filter((window): window is UsageWindow => !!window);
+            const short = windows.find((window) => window.durationMins <= 24 * 60);
+            const weekly = windows
+              .filter((window) => window.durationMins > 24 * 60)
+              .sort((a, b) => b.durationMins - a.durationMins)[0];
+            finish({ short, weekly, planType: String(rl.planType ?? "") });
             return;
           }
         } catch {
@@ -198,6 +233,7 @@ export default function (pi: ExtensionAPI) {
     let codexUsage: CodexUsage | undefined;
     let dirtyTimer: ReturnType<typeof setInterval> | undefined;
     let codexTimer: ReturnType<typeof setInterval> | undefined;
+    let countdownTimer: ReturnType<typeof setInterval> | undefined;
     let activeTui: { requestRender: () => void } | undefined;
 
     const refreshDirty = async () => {
@@ -219,7 +255,7 @@ export default function (pi: ExtensionAPI) {
         }
         return;
       }
-      const next = await fetchCodexUsage();
+      const next = await fetchCodexUsage(ctx.model?.id);
       if (next) {
         codexUsage = next;
         activeTui?.requestRender();
@@ -240,12 +276,14 @@ export default function (pi: ExtensionAPI) {
       void refreshCodexUsage();
       dirtyTimer = setInterval(() => void refreshDirty(), DIRTY_POLL_MS);
       codexTimer = setInterval(() => void refreshCodexUsage(), CODEX_POLL_MS);
+      countdownTimer = setInterval(() => tui.requestRender(), COUNTDOWN_RENDER_MS);
 
       return {
         dispose() {
           unsub();
           if (dirtyTimer) clearInterval(dirtyTimer);
           if (codexTimer) clearInterval(codexTimer);
+          if (countdownTimer) clearInterval(countdownTimer);
           activeTui = undefined;
         },
         invalidate() {},
@@ -261,7 +299,11 @@ export default function (pi: ExtensionAPI) {
           const thinkingLabel = thinking === "off" ? "off" : thinking;
 
           const segments: string[] = [
-            fg(COLOR.model, `${ICON.model} ${prettyModel(ctx.model?.id)}`, true),
+            fg(
+              COLOR.model,
+              `${ICON.model} ${prettyModel(ctx.model?.id)} (${thinkingLabel})`,
+              true,
+            ),
           ];
 
           if (branch) {
@@ -274,16 +316,19 @@ export default function (pi: ExtensionAPI) {
           );
 
           if (codexUsage) {
-            segments.push(
-              fg(
-                COLOR.usage,
-                `${pieIcon(codexUsage.secondaryPct)} ${codexUsage.primaryPct}%`,
-                true,
-              ),
-            );
+            const displayPct = codexUsage.short?.usedPct ?? codexUsage.weekly?.usedPct;
+            if (displayPct != null) {
+              const resetParts = [
+                codexUsage.short ? remainingWindow(codexUsage.short.resetsAt) : undefined,
+                codexUsage.weekly ? weeklyResetDate(codexUsage.weekly.resetsAt) : undefined,
+              ].filter(Boolean);
+              const resetLabel = resetParts.length ? ` · ${resetParts.join(" ")}` : "";
+              segments.push(
+                fg(COLOR.usage, `${pieIcon(displayPct)} ${displayPct}%${resetLabel}`, true),
+              );
+            }
           }
 
-          segments.push(fg(COLOR.thinking, `${ICON.thinking} ${thinkingLabel}`, true));
           segments.push(fg(COLOR.cost, `${ICON.cost} $${cost.toFixed(2)}`, true));
 
           const line = segments.join(SEP);

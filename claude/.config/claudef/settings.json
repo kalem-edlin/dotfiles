@@ -1,4 +1,17 @@
 {
+  "env": {
+    "ENABLE_LSP_TOOL": "1",
+    "ENABLE_TOOL_SEARCH": "true"
+  },
+  "permissions": {
+    "deny": [
+      "Task(claude-code-guide)",
+      "Task(Plan)",
+      "Task(Explore)"
+    ],
+    "ask": [],
+    "defaultMode": "bypassPermissions"
+  },
   "model": "claude-fable-5-1[1m]",
   "hooks": {
     "SessionStart": [
@@ -16,15 +29,7 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "ccline"
-  },
-  "env": {
-    "ENABLE_LSP_TOOL": "1",
-    "ENABLE_TOOL_SEARCH": "true"
-  },
-  "permissions": {
-    "deny": ["Task(claude-code-guide)", "Task(Plan)", "Task(Explore)"],
-    "ask": []
+    "command": "python3 \"$HOME/.config/claudef/ccline/statusline.py\""
   },
   "enabledPlugins": {
     "pyright-lsp@claude-plugins-official": true,
@@ -35,6 +40,7 @@
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark",
   "editorMode": "vim",
-  "verbose": true,
+  "verbose": false,
+  "remoteControlAtStartup": false,
   "agentPushNotifEnabled": true
 }

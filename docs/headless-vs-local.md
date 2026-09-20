@@ -159,44 +159,26 @@ Linux and macOS headless) still diverge, as of this writing.
    sync per the worker-sync procedure above), not to gate provisioning
    success on it.
 
-## Why the durability mechanisms differ
+## Durability scheduling
 
-tmux-continuum's autosave isn't a background service — it's a status-line
-`#()` command interpolation (`continuum_save.sh`) that tmux itself re-runs
-every time the status line redraws. That only happens while a client is
-attached and rendering the status bar. A fully detached worker tmux server
-has no client, so the status line never redraws, and the interpolation never
-fires — hence the separate launchd/systemd timers described above, which
-invoke the save script directly and don't depend on any client being
-attached.
+Tmux-continuum implements autosave as a status-line `#()` command. That made
+save timing depend on client attachment and status redraws. It also let
+Continuum record an attempt timestamp before the verified save finished.
+Local and headless machines now use launchd or systemd timers instead.
+Continuum remains installed only for restore-on-start, with its save interval
+set to zero and its command removed from `status-right`.
 
-All four triggers now converge on `tmux/scripts/resurrect_save.sh`: local
-Continuum, a clean client detach, the headless timer, and the manual
-`prefix C-s` binding. The wrapper serializes overlapping attempts, validates
-the authoritative Resurrect snapshot and the freshly replaced
-workspace-resurrect sidecar, and only then records the completion timestamp.
+The periodic timer, a clean client detach, and the manual `prefix C-s`
+binding converge on `tmux/scripts/resurrect_save.sh`. The wrapper serializes
+overlapping attempts, validates the authoritative Resurrect snapshot and the
+freshly replaced workspace-resurrect sidecar, and only then records the
+completion timestamp.
 For an rw-backed focused pane the manual dispatcher first verifies the outer
 laptop save and then invokes the same wrapper over SSH on that pane's worker.
 It writes the confirmed worker timestamp directly into the powerline cache,
-so a success renders `0m` immediately. The fixed headless timer cadence does
-not move; local Continuum measures its next interval from the manual save.
-
-There's a related trap, discovered on 2026-08-01: tmux-continuum refuses to
-even arm that interpolation in the first place whenever any other tmux
-process is running on the machine besides the server's own attached clients
-(`another_tmux_server_running`, `tmux/plugins/tmux-continuum/continuum.tmux`,
-checked before the status-right update at the point it would otherwise set
-the interpolation). Every `source-file` re-runs the full config (including
-catppuccin, which rewrites `status-right`), so a single orphaned tmux
-process — an isolated test harness, a stray `tmux new-session -d` left over
-from a test run — leaves autosave silently disarmed after the very next
-config reload, with no error printed anywhere. `rw doctor`
-(`tmux/local-plugins/tmux-remote-workspaces/scripts/rw-doctor.sh`) now
-checks for exactly this: it inspects `status-right` for the
-`continuum_save.sh` interpolation, checks the age of the last recorded save,
-and separately counts stray `tmux` processes against attached clients using
-the same comparison continuum's own `another_tmux_server_running` uses, so a
-disarmed-but-otherwise-healthy-looking worker gets flagged with its cause.
+so a success renders `0m` immediately. The local indicator reads the same
+verified marker from disk. Its text has a fixed width, so age changes cannot
+resize the tmux window list. Both doctors check the timer and marker age.
 
 ## Platform support boundary
 

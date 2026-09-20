@@ -266,5 +266,5 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
 10. `rw doctor` from the laptop reports the worker healthy, and
     `rw ensure --worker <alias>` can stand up or attach to a workspace on
     it — beyond that, remote-workspace behavior (handoff, reconnect,
-    reboot/restore) is validated by the smoke-test checklist in
-    `docs/tasks/tmux-remote-workspaces/initial-plan.md`.
+    reboot/restore) is recorded with its validation history in
+    `docs/tmux-remote-workspaces.md`.
