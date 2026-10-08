@@ -40,8 +40,7 @@ shared CLI/dotfile/provider contract both consume.
 The Linux lane uses distro packages instead of Homebrew, then reuses the shared
 setup scripts and dotfiles for:
 
-- Stow-managed configs: `claude`, `eza`, `git`, `pi`, `ssh`, `vim`,
-  `zsh`
+- Stow-managed configs: `claude`, `git`, `pi`, `ssh`, `vim`, `zsh`
 - Direct `~/.config` links: `nvim`, `tmux`
 - CLI tooling: zsh, tmux, Neovim, Git/Git LFS, Stow, fd/ripgrep/bat/fzf/jq,
   Python/pyenv/pipx, Node/fnm/npm globals, Go (pinned upstream tarball, builds
@@ -109,7 +108,6 @@ dotfiles/
 ├── sketchybar/         → ~/.config/sketchybar    (direct symlink)
 ├── tmux/               → ~/.config/tmux          (direct symlink)
 ├── claude/.claude/     → ~/.claude/              (stow)
-├── eza/.config/eza/    → ~/.config/eza/          (stow)
 ├── git/                → ~/.gitconfig            (stow)
 ├── vim/                → ~/.vimrc                (stow)
 ├── zsh/                → ~/.zshrc                (stow)

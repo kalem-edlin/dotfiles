@@ -538,8 +538,8 @@ install_headless_dotfiles() {
   ensure_ssh_dirs
 
   cleanup_focus_agent_links
-  backup_conflicts claude eza git pi ssh vim zsh
-  stow_packages claude eza git pi ssh vim zsh
+  backup_conflicts claude git pi ssh vim zsh
+  stow_packages claude git pi ssh vim zsh
 
   link_rw
 
