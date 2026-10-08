@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Codex provider adapter. Partially degated per initial-plan.md's own smoke
-# test (see "Provider notes" / Phase 5 DECISION): Codex resume is driven by
+# Codex provider adapter. Codex resume is driven by
 # a private SQLite `threads` table in ~/.codex/state_5.sqlite, 1:1 against
 # rollout files under ~/.codex/sessions/YYYY/MM/DD/. A live CODEX_HOME
-# sandbox test (run as part of this task; see the RETURN report) confirmed:
+# sandbox test confirmed:
 #
 #   - Codex lazily BACKFILLS the threads table from rollout files on disk
 #     the next time codex starts with a missing/stale state DB -- no manual

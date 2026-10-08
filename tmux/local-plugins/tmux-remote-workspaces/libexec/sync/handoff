@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# libexec/sync/handoff -- workspace transfer core (Phase 4/5).
+# libexec/sync/handoff -- workspace transfer core.
 #
-# Implements the correctness model from docs/tasks/tmux-remote-workspaces/
-# initial-plan.md, "Workspace synchronization and handoff": move dirty git
+# Implements the correctness model from docs/tmux-remote-workspaces.md: move dirty git
 # state (unpushed commits, staged changes, unstaged changes, untracked
 # files, tracked deletions/renames, and referenced LFS content) between two
 # git worktrees without any commit/push/pull ceremony, with a destination

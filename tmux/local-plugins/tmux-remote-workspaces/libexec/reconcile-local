@@ -9,7 +9,7 @@
 #
 # Usage: reconcile-local [--min-age <seconds>] [--dry-run]
 #
-# "Provably" is the load-bearing word. The plan's rule stands: a SOFT
+# "Provably" is the load-bearing word. A soft
 # pane-match failure must never gate an irreversible remote deletion.
 # rw-post-restore.sh never rewrites endpoint files -- it re-stamps live
 # pane @vars only -- so the registry's focus_pane_id is ensure-time cache,

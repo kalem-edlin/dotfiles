@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pi provider adapter -- the simplest of the three per initial-plan.md
+# Pi provider adapter -- the simplest of the three per docs/tmux-remote-workspaces.md
 # ("Provider notes"): `pi --session <path|id>` accepts an arbitrary session
 # file path *or* a partial UUID, so no destination directory-encoding
 # mimicry is required for resume to work. This adapter still places the

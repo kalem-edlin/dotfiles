@@ -2,7 +2,7 @@
 # Attach/reconnect loop for one remote endpoint. Runs as the pane's foreground
 # process (rw-ensure.sh `exec`s into this; rw-post-restore.sh `respawn-pane`s
 # into this after a laptop resurrection). Not invoked as a separate `rw`
-# subcommand -- see initial-plan.md Resolved decision #5.
+# subcommand. See docs/tmux-remote-workspaces.md, "Endpoint and state model".
 #
 # Usage: attach-loop.sh <endpoint-id> [--fresh]
 #
@@ -18,10 +18,8 @@
 # Before EVERY reconnect this loop determines actual remote state over ssh,
 # rather than blindly running `tmux new-session -A` (which would silently
 # recreate a session an operator intentionally killed directly on the
-# worker, forever). See initial-plan.md, "Endpoint lifetime follows user
-# intent": "Directly killing the remote endpoint is also intentional and
-# must be reconciled back into the focus registry instead of being
-# recreated forever."
+# worker forever). See docs/tmux-remote-workspaces.md, "Intentional close is
+# different from a disconnect".
 #
 # Branches, from a single cheap status probe over ssh each iteration:
 #   (a) worker unreachable            -> ordinary drop: backoff, retry.
@@ -38,7 +36,7 @@
 #                                         safe), recheck, and if the session
 #                                         is still absent, rebuild it from
 #                                         the registry manifest exactly as
-#                                         `rw ensure` would (initial-plan.md,
+#                                         `rw ensure` would (docs/tmux-remote-workspaces.md,
 #                                         "Local restore of remote
 #                                         attachments", steps 3-5).
 #
@@ -156,7 +154,7 @@ remote_state() {
 }
 
 # ask_worker_to_restore_then_recheck <worker> <session_name>
-# Case (d), steps 3-4 of "Local restore of remote attachments": start the
+# Worker restore path: start the
 # worker's tmux server and ask its own tmux-resurrect installation to
 # restore non-interactively, then recheck for our specific session. Prints
 # "yes" or "no". The worker runs the same dotfiles, so its tmux-resurrect

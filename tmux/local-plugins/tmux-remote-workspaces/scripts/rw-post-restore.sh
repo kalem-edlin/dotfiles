@@ -2,10 +2,8 @@
 # Post-restore re-establishment of remote attachments: chained onto
 # tmux-resurrect's @resurrect-hook-post-restore-all (see
 # tmux-remote-workspaces.tmux), appended BEFORE libexec/reconcile in that
-# same hook. See initial-plan.md, "Local restore of remote attachments" and
-# Phase 2 ("Reattach remembered endpoints on laptop restore... Define UUID
-# re-resolution across restore/renumber, with the endpoint registry
-# authoritative and pane `@vars` treated as cache only").
+# same hook. See docs/tmux-remote-workspaces.md, "Persistence and
+# reconciliation".
 #
 # Never destructive: this script only ever sets cache pane options and
 # respawns a pane's *local* foreground process into attach-loop.sh, which
@@ -37,9 +35,8 @@
 #      `=name` exact-match target syntax is used throughout to avoid its
 #      normal fuzzy/prefix session matching.
 #
-#   2. Pane-level: there is no stable per-pane UUID yet (only per-session --
-#      that is still Phase 2/3 future work per the plan's "Pane and window
-#      model" section). `renumber-windows on` means
+#   2. Pane-level: pane identity is resolved conservatively from restored
+#      state. `renumber-windows on` means
 #      the recorded focus_window_index/focus_pane_index cannot be trusted
 #      as a primary key across a restart. Instead, within the now-resolved
 #      session, we match candidate panes by `#{pane_current_path}` against

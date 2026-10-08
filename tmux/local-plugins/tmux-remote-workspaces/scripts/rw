@@ -5,7 +5,7 @@
 #
 # There is no separate attach/reconnect verb -- `rw ensure` is idempotent and
 # handles both first establishment and reattachment of an existing pane's
-# endpoint (initial-plan.md, Resolved decision #5).
+# endpoint (docs/tmux-remote-workspaces.md, "Endpoint and state model").
 
 set -uo pipefail
 

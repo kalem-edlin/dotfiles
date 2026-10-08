@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # `rw close` -- lifecycle-aware intentional close of a remote-backed pane.
 #
-# Order matters (initial-plan.md, "Endpoint lifetime follows user intent"):
+# Order matters (docs/tmux-remote-workspaces.md, "Intentional close is
+# different from a disconnect"):
 #   1. Write the tombstone FIRST, so a crash mid-cleanup can never let an
 #      older resurrect snapshot revive a deliberately closed endpoint.
 #   2. Release/remove the registry entry.

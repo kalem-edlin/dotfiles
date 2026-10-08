@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for the Phase 5 provider agent adapters
+# Shared helpers for the provider agent adapters.
 # (libexec/adapters/{pi,claude,codex}). Sourced by each adapter; never
 # executed directly.
 #

@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 # Resurrection reconciliation and orphan disposal.
 #
-# See docs/tasks/tmux-remote-workspaces/initial-plan.md, "Resurrection
-# reconciliation and orphan disposal" (top-level requirement) and Phase 2
-# ("Reconcile and close owned remote endpoints missing from a completed
-# local resurrection"). This is deterministic mirror reconciliation, never
+# See docs/tmux-remote-workspaces.md, "Persistence and reconciliation".
+# This is deterministic mirror reconciliation, never
 # age-based garbage collection: every closure below is justified by a
 # provably-departed local desired set, never by how long an endpoint has
 # existed.
@@ -31,7 +29,7 @@
 #   - Manual: invoke this file directly at any time (e.g. `--dry-run` from
 #     `rw doctor`, or for real after fixing a worker's reachability).
 #
-# HARD SAFETY RULES (initial-plan.md):
+# HARD SAFETY RULES (docs/tmux-remote-workspaces.md):
 #   - A missing/unreadable snapshot is NOT an empty desired set. This script
 #     independently re-verifies the tmux-workspace-resurrect sidecar (not
 #     just trusting that it was hook-chained after a successful restore) and
@@ -56,24 +54,24 @@
 #      thing that ever removes a registry entry is rw_close_endpoint_core
 #      (intentional close), never anything pane/topology-shaped. Note this
 #      deliberately does NOT require every desired endpoint to have a
-#      re-resolvable local pane after restore (initial-plan.md warns pane
+#      re-resolvable local pane after restore (docs/tmux-remote-workspaces.md warns pane
 #      `@vars` are cache only, destabilized by `renumber-windows on`) --
 #      soft pane-matching failures in rw-post-restore.sh must never gate an
 #      irreversible remote deletion. If rw-post-restore.sh could not
 #      re-resolve a pane for a still-desired endpoint, that endpoint stays
 #      in the desired set here and is simply left for `rw status`/`doctor`
-#      to surface, per the plan's "never destructive when ambiguous" rule.
+#      to surface. Ambiguous state must never trigger deletion.
 #   2. Drop (and finish closing) any endpoint whose tombstone
 #      (tombstones/<id>.json) timestamp is NEWER THAN OR EQUAL TO the
-#      just-restored snapshot's saved_at. This is exactly the crash race
-#      the plan calls out: "Recording intent first prevents an older
-#      Resurrect snapshot from reviving a deliberately closed endpoint
-#      after a crash during cleanup" -- rw_close_endpoint_core always
+#      just-restored snapshot's saved_at. This is the crash race that the
+#      tombstone-first rule addresses: recording intent first prevents an
+#      older Resurrect snapshot from reviving a deliberately closed endpoint
+#      after a crash during cleanup. rw_close_endpoint_core always
 #      writes the tombstone before removing the registry file, so a crash
 #      between those two steps can leave both on disk simultaneously. An
 #      OLDER tombstone (strictly predating the snapshot) does NOT suppress
-#      -- per the plan, "a newer close tombstone suppresses stale local
-#      snapshot entries", not any tombstone ever written for that id (and
+#      because only a newer close tombstone suppresses a stale local
+#      snapshot entry, not any tombstone ever written for that id. Endpoint
 #      endpoint ids are never reused, so an older tombstone next to a live
 #      registry entry of the same id cannot legitimately happen outside
 #      that same crash race, already handled by the >= case above).

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Claude Code provider adapter.
 #
-# Verified fact (initial-plan.md, "Provider notes"): the transcript must be
+# Verified fact (docs/tmux-remote-workspaces.md, "Provider notes"): the transcript must be
 # placed under a directory whose name encodes the *destination* absolute
 # project path (slashes -> dashes) beneath ~/.claude/projects/. Never copies
 # ~/.claude.json (auth/other state; per-path trust seeding is explicitly out

@@ -2,7 +2,7 @@
 # `rw doctor` -- read-only diagnostics. Never installs, mutates, or injects
 # messages into shells/TUIs; only prints a report to stdout for the user who
 # explicitly ran this command. Hosts the consume-never-provision preflight
-# report for every configured worker (Resolved decision #5).
+# report for every configured worker.
 
 set -uo pipefail
 
@@ -196,31 +196,23 @@ else
 fi
 
 echo
-echo "== Local durability (tmux-continuum autosave) =="
-# tmux-continuum arms its autosave by prepending a `#(continuum_save.sh)`
-# interpolation to status-right, and it SKIPS that step whenever any other
-# tmux process is running (another_tmux_server_running in continuum.tmux).
-# Every `source-file` re-runs catppuccin, which rewrites status-right and
-# drops the interpolation -- so a single stray test server (an isolated
-# TMUX_TMPDIR harness, an orphaned `tmux new-session -d` from a test run)
-# leaves autosave permanently disarmed with no error anywhere. Observed
-# 2026-08-01: six orphaned servers kept saves dead for two days.
+echo "== Local durability (verified operating-system timer) =="
 if ! tmux has-session 2>/dev/null && [ -z "${TMUX:-}" ]; then
-  note "no local tmux server running -- continuum autosave not checked"
+  note "no local tmux server running -- autosave state not checked"
 else
   save_path="$(tmux show-option -gqv @resurrect-save-script-path 2>/dev/null || true)"
   case "$save_path" in
     *tmux/scripts/resurrect_save.sh*)
-      pass "Continuum, manual saves, and headless saves share the verified save wrapper"
+      pass "manual and periodic saves share the verified save wrapper"
       ;;
     *)
       fail "@resurrect-save-script-path does not point at tmux/scripts/resurrect_save.sh"
       ;;
   esac
 
-  manual_binding="$(tmux list-keys -T prefix C-s 2>/dev/null || true)"
+  manual_binding="$(tmux list-keys -T prefix 2>/dev/null | grep ' C-s ' || true)"
   case "$manual_binding" in
-    *manual_resurrect_save.sh*'#{@rw-worker}'*)
+    *manual_resurrect_save.sh*'#{@remote-host}'*)
       pass "prefix C-s dispatches saves to the focused remote worker"
       ;;
     *)
@@ -231,47 +223,54 @@ else
   status_right="$(tmux show-option -gqv status-right 2>/dev/null || true)"
   case "$status_right" in
     *continuum_save.sh*)
-      pass "tmux-continuum autosave is armed (status-right holds the save interpolation)"
+      fail "status-right still contains Continuum's save scheduler"
       ;;
     *)
-      fail "tmux-continuum autosave is NOT armed -- status-right has no continuum_save.sh interpolation, so nothing is saving your session landscape. Fix: kill stray tmux servers (see below), then re-source tmux.conf."
+      pass "status-right contains no save scheduler"
       ;;
   esac
 
-  last_save="$(tmux show-option -gqv @continuum-save-last-timestamp 2>/dev/null || true)"
-  if [ -n "$last_save" ]; then
-    save_age=$(($(date +%s) - last_save))
-    if [ "$save_age" -lt 3600 ]; then
-      pass "last continuum save was ${save_age}s ago"
-    else
-      fail "last continuum save was ${save_age}s ago (>1h) -- autosave has stalled"
-    fi
-  else
-    note "@continuum-save-last-timestamp is unset (no save since this server started)"
-  fi
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      if launchctl print "gui/$(id -u)/com.kalem.tmux-resurrect-save" >/dev/null 2>&1; then
+        pass "launchd verified-save timer is loaded"
+      else
+        fail "launchd verified-save timer is not loaded"
+      fi
+      ;;
+    Linux)
+      if systemctl --user is-active --quiet tmux-resurrect-save.timer 2>/dev/null; then
+        pass "systemd verified-save timer is active"
+      else
+        fail "systemd verified-save timer is not active"
+      fi
+      ;;
+  esac
 
-  # Report the CAUSE whether or not the symptom is present, mirroring
-  # continuum's own test exactly (helpers.sh: another_tmux_server_running):
-  # it compares every `tmux ...` process except this server against this
-  # server's client count, and disarms when the former exceeds the latter.
-  server_pid="$(tmux display-message -p '#{pid}' 2>/dev/null || true)"
-  others="$(ps -u "$(id -u)" -o "command pid" 2>/dev/null |
-    grep '^tmux' | grep -v '^tmux source' |
-    grep -v " ${server_pid:-__no_pid__}\$" || true)"
-  other_count="$(printf '%s' "$others" | grep -c . || true)"
-  client_count="$(tmux list-clients 2>/dev/null | grep -c . || true)"
-  if [ "${other_count:-0}" -gt "${client_count:-0}" ]; then
-    fail "$other_count tmux process(es) besides this server vs $client_count attached client(s) -- continuum will refuse to re-arm on the next config reload. Kill the stray servers below, then re-source tmux.conf:"
-    printf '%s\n' "$others" | sed 's/^/     /'
-  else
-    pass "no stray tmux servers competing with this one ($other_count other process(es), $client_count client(s))"
-  fi
+  resurrect_dir="$(tmux show-option -gqv @resurrect-dir 2>/dev/null || true)"
+  [ -n "$resurrect_dir" ] || resurrect_dir="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+  host="$(hostname 2>/dev/null || true)"
+  resurrect_dir="$(printf '%s\n' "$resurrect_dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host,g; s,~,$HOME,g")"
+  last_save="$(sed -n '1p' "$resurrect_dir/.last-successful-save" 2>/dev/null || true)"
+  interval="$(tmux show-option -gqv @workspace-autosave-interval 2>/dev/null || true)"
+  case "$interval" in '' | *[!0-9]*) interval=5 ;; esac
+  case "$last_save" in
+    '' | *[!0-9]*) fail "verified successful-save marker is missing or invalid" ;;
+    *)
+      save_age=$(($(date +%s) - last_save))
+      if [ "$save_age" -le $((interval * 60 * 3)) ]; then
+        pass "last verified save was ${save_age}s ago"
+      else
+        fail "last verified save was ${save_age}s ago; periodic saving has stalled"
+      fi
+      ;;
+  esac
 fi
 
 echo
-echo "== Deferred (explicitly out of v1 scope, not bugs -- initial-plan.md) =="
-note "continuous watch-mode synchronization and the Mosh transport are deferred; see deferred-sync-and-transport.md."
-note "ad hoc worker workspace archive/remove commands are deferred to Phase 6; cleanup is manual only by design."
+echo "== Boundaries (out of scope by design -- docs/tmux-remote-workspaces.md) =="
+note "handoff is explicit and transactional; continuous synchronization and Mosh transport are not part of the system."
+note "endpoint close never removes a worker checkout; workspace archival and removal remain manual."
 
 echo
 if [ "$failures" -eq 0 ]; then

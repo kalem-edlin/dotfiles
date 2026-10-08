@@ -7,9 +7,9 @@ VMs). Local-first: remote is opt-in per pane, never the default. Worker names
 are logical identities: OpenSSH may route `mini` over its LAN listener or
 Tailscale without the plugin treating those paths as different workers.
 
-Full intent, requirements, and design rationale live in
-[`docs/tasks/tmux-remote-workspaces/initial-plan.md`](../../../docs/tasks/tmux-remote-workspaces/initial-plan.md).
-This README documents what is actually implemented in this wave.
+The maintained system design and decision record live in
+[`docs/tmux-remote-workspaces.md`](../../../docs/tmux-remote-workspaces.md).
+This README is the command and operational reference.
 
 ## Consume, never provision
 
@@ -34,7 +34,7 @@ rw return  [--pane <pane-id>] [--keep-remote] [--check-lfs]
 There is no separate `attach`/`reconnect` verb. `rw ensure` is idempotent: run
 against a pane with no endpoint it establishes one; run against a pane that
 already has a live `@rw-endpoint`, it revalidates and reattaches instead of
-creating a second endpoint (initial-plan.md, Resolved decision #5).
+creating a second endpoint.
 
 `rw` is linked onto `$PATH` by `make install`/`make install-headless`
 (`~/.local/bin/rw` -> this repo's `scripts/rw`), so `rw <command>` works
@@ -55,8 +55,7 @@ directly after setup. It can still be invoked by full path,
   forwarded key and produced two operator-facing incidents; it is gone.)
 - `prefix \` / `prefix /`: unchanged local splits, *unless* the source pane
   is remote-backed, in which case the new pane inherits the same
-  worker+workspace and becomes its own endpoint via `rw ensure` (new
-  endpoint id -- pane-based ownership per the plan's pane/window model).
+  worker+workspace and becomes its own pane-scoped endpoint via `rw ensure`.
 - `prefix &`: now closes any remote endpoints owned by panes in the window
   before killing it (`rw-close-window.sh`), behind the same confirmation
   prompt tmux ships by default.
@@ -116,7 +115,7 @@ and closes the pane. Anything else is treated as a drop: retry quietly,
 never delete anything, keep the pane alive. On return from each ssh attempt
 it resets local mouse-tracking state and redraws, working around the known
 "unclean inner-session end leaves the outer pane with garbled mouse state"
-artifact from initial-plan.md's Transport section.
+terminal artifact.
 
 For the Mini specifically, always pass `mini` to `rw`. The SSH package makes
 that alias location-aware: it prefers `Alfies-Mac-mini.local` when the verified
@@ -197,8 +196,8 @@ matching `events.jsonl` line.
 
 `rw doctor` is read-only: local prerequisites (jq/ssh/uuid source/config
 validity/state-dir writability), a consume-never-provision preflight report
-per configured worker (this is where that report lives per Resolved decision
-#5), registry/live-pane consistency (orphans are reported, never touched),
+per configured worker, registry/live-pane consistency (orphans are reported,
+never touched),
 and clipboard/`allow-passthrough` checks on both the local and (where
 reachable) worker tmux layers. It never writes into another pane or TUI.
 
@@ -231,13 +230,11 @@ dotfiles clone having pulled the same revision first.
 
 ## Restore opt-out integration (implemented in the sibling plugin)
 
-`rw ensure` sets `@workspace-resurrect-skip` on a managed pane so a
-`tmux-workspace-resurrect` restore skips pasting a stale command (e.g. an
-old `ssh mini`) into it, per initial-plan.md's "Local restore of remote
-attachments". `tmux-workspace-resurrect/scripts/restore.sh` reads that
-option (see its restore loop, around the `@workspace-resurrect-skip` check)
-and skips the pane accordingly -- this integration is implemented and wired,
-not a seam.
+The attach loop sets `@workspace-resurrect-skip` while it owns a managed pane,
+so a `tmux-workspace-resurrect` restore skips pasting a stale command such as
+an old `ssh mini` into it. `rw-refresh-indicators.sh` repairs that execution
+marker from the live process tree after a config reload. The sibling plugin's
+`scripts/restore.sh` reads the marker and skips the pane accordingly.
 
 ## `rw handoff` / `rw return`
 
@@ -282,10 +279,9 @@ dry-run.
 
 ## Field-validation status
 
-The operator smoke journey CLOSED 2026-08-08 with every bucket passing
-(full blow-by-blow record: git history of
-`docs/tasks/tmux-remote-workspaces/smoke-journey.md`, deleted after
-close). Smoke-VERIFIED end to end on the live laptop server: ensure /
+The operator smoke campaign closed on 2026-08-08 with every bucket passing.
+Its deleted journey file remains available in git history through commit
+`be0ae44`. Smoke-verified end to end on the live laptop server: ensure /
 splits / close semantics, drop-reattach, remote Treemux (tree-as-endpoint
 v2), ad-hoc handoff/return, agent handoff with verbatim
 access-mode replay (claude + codex),
@@ -293,17 +289,13 @@ OSC 52 clipboard from remote (shell + nvim yank), server-side copy-mode
 entry, laptop server-loss restore, worker-reboot endpoint rebuild from
 manifest, picker failure dialogs.
 
-NOT yet organically validated (watch stochastically in daily use):
+Pure network loss and laptop sleep rely on the same bounded attach-loop retry
+used by the verified worker-reboot path. These are accepted operating
+conditions, not missing implementation.
 
-- Network-loss drop resilience (Wi-Fi off/on mid-attach): attach-loop's
-  ssh ServerAlive timeout + backoff path. Inner-detach reattach and a
-  full worker reboot ARE smoke-verified; a pure network drop is not.
-- Laptop sleep/wake with endpoints attached — deferred; it exercises the
-  same attach-loop backoff the reboot drill proved.
-- `reconcile-local`'s events.jsonl eligibility path (proof via
-  restore-reattach after a server restart) — synthetic fixtures proved
-  the created-after-start path and both protective guards; the
-  post-restore rebind path awaits a real crash + pane-death sequence.
+`reconcile-local` has synthetic coverage for its created-after-start path and
+both protective guards. Ambiguous post-restore state remains report-only by
+design.
 
 ## Operational notes (learned in the field)
 
@@ -312,8 +304,8 @@ NOT yet organically validated (watch stochastically in daily use):
   there is no snapshot and leaves no bootstrap session behind.
 - Endpoints do NOT survive a laptop server loss: restored attach-loop
   panes come back as plain shells, so reconcile closes the endpoints
-  cleanly (no zombies). Re-open with `prefix e`. Reattach-on-restore is
-  a backlog design item, not a bug.
+  cleanly (no zombies). Re-open with `prefix e`. This is the accepted restore
+  behavior.
 - Don't hand off a worktree while another local agent/editor is actively
   writing in it — the sync verify will (correctly) refuse; the picker
   dialog names this case. Pause the writer, retry.
@@ -321,22 +313,3 @@ NOT yet organically validated (watch stochastically in daily use):
   saves (live-endpoint durability is the point; closed ones are noise).
   Laptop-side `libexec/reconcile` protects pre-restart registry entries
   by design; a lingering one is closed with `rw_close_endpoint_core`.
-
-## Post-journey backlog (queued, non-blocking)
-
-1. Endpoint reattach-on-restore design (attach-loop panes aren't
-   resurrect-whitelisted; server loss closes endpoints instead).
-2. Worker-side resurrect save filter for CLOSED rw-* sessions (zombie
-   revival loop).
-3. Sync fingerprint hardening: hash content (write-tree), not diff text
-   (host-config-sensitive via core.abbrev auto / diff.algorithm); derive
-   the source fingerprint from the captured artifacts to shrink the
-   mid-sync race.
-4. `rw close --endpoint <id>` alias (today `--pane` only).
-5. CLI close without `--reason` logs the misleading default
-   `reason=prefix+q`.
-6. Stock resurrect's `ps` save-strategy captures the tree-listener's ssh
-   child as a stray (harmless, unreplayable) snapshot line.
-7. Tombstones record `endpoint_id: null`.
-8. Tree-endpoint rebuild recreates a shell session; tree endpoints are
-   not guarded against handoff eligibility.

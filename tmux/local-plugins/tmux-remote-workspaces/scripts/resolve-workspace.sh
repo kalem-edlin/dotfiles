@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Resolve where an endpoint's remote directory should be, per initial-plan.md
+# Resolve where an endpoint's remote directory should be, per docs/tmux-remote-workspaces.md
 # "Workspace placement". Pure resolution logic -- no ssh, no filesystem
 # mutation -- so it is testable without a reachable worker. The caller
 # supplies the worker's $HOME (from preflight.sh) rather than this script

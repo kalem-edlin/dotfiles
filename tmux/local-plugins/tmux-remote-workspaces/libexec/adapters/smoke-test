@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # libexec/adapters/smoke-test -- on-demand dev tool for the provider agent
-# adapters (Phase 5; see ../README.md's "Contract" and initial-plan.md's
-# "Local-first AI coding-agent handoff" / "Vendor-independent operation":
-# "Provider adapters must have smoke tests that prove a transferred
-# transcript can be resumed from the corresponding destination directory.").
+# adapters. See ../README.md's "Contract" and
+# docs/tmux-remote-workspaces.md, "Handoff and return".
 #
 # For each provider (pi, claude, codex) this runs a fully sandboxed
 # export -> install round trip against a synthetic transcript fixture and

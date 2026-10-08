@@ -4,7 +4,7 @@
 #
 # This extends, never duplicates, the shared plugin helpers in
 # scripts/common.sh (machine id, event log, endpoint registry, ssh
-# transport). It adds the pieces specific to Phase 4/5 handoff: a
+# transport). It adds the pieces specific to handoff: a
 # destination "exec wrapper" abstraction so the same code path drives a real
 # ssh worker and a plain local directory in tests, plus a content
 # fingerprint used for divergence detection.
@@ -26,7 +26,7 @@ source "$RW_SYNC_SCRIPTS_DIR/common.sh"
 #
 # The wrapper is an argv PREFIX (binary + fixed args); the actual command is
 # always appended as the final argv element -- this is the "exec-wrapper"
-# initial-plan.md asks for so local-dir testing and real ssh share one code
+# docs/tmux-remote-workspaces.md asks for so local-dir testing and real ssh share one code
 # path:
 #   ssh -o BatchMode=yes -o ConnectTimeout=8 mini   -- real worker
 #   bash -c                                          -- local-dir test double
@@ -169,7 +169,7 @@ rw_sync_fingerprint_via() {
 # Generation state: "what was the last-known-good synced fingerprint, and
 # what generation number is that". Two interchangeable backends so the core
 # is testable standalone (--state-file) as well as integrated with the real
-# endpoint registry (--endpoint), per initial-plan.md's synchronization
+# endpoint registry (--endpoint), per docs/tmux-remote-workspaces.md's synchronization
 # generation requirement.
 # ---------------------------------------------------------------------------
 

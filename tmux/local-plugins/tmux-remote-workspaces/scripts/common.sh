@@ -286,7 +286,8 @@ rw_write_tombstone() {
 # rw_close_endpoint_core <endpoint_id> <reason> [worker_override]
 # Tombstone-first teardown of a single endpoint's remote session and
 # registry entry (steps 1-3 of intentional close; see
-# initial-plan.md "Endpoint lifetime follows user intent"):
+# docs/tmux-remote-workspaces.md, "Intentional close is different from a
+# disconnect"):
 #   1. Write the tombstone FIRST, so a crash mid-cleanup can never let an
 #      older resurrect snapshot revive a deliberately closed endpoint.
 #   2. Release/remove the registry entry.
@@ -343,7 +344,8 @@ rw_close_endpoint_core() {
 
 # rw_create_remote_session <worker> <session_name> <remote_path> <timeout>
 # Create the durable endpoint session on <worker> with the recommended
-# endpoint session config (initial-plan.md, "Remote-side tmux durability").
+# endpoint session config (docs/tmux-remote-workspaces.md, "Persistence and
+# reconciliation").
 # Shared by rw-ensure.sh (first establishment) and attach-loop.sh (case d:
 # rebuilding a session lost to worker infrastructure loss, "as if being
 # established again"). Exit status is the ssh command's own exit status.
@@ -416,8 +418,8 @@ rw_ssh_batch() {
 }
 
 # ---------------------------------------------------------------------------
-# Provider-process start verification (initial-plan.md, "Local-first AI
-# coding-agent handoff" step 4: never stop one side's agent until the OTHER
+# Provider-process start verification (docs/tmux-remote-workspaces.md,
+# "Handoff and return": never stop one side's agent until the other
 # side's resume has verifiably started). Local and remote variants share the
 # same per-provider match patterns as libexec/adapters/common-adapter.sh's
 # ca_patterns_* -- kept in sync deliberately rather than sourced, mirroring

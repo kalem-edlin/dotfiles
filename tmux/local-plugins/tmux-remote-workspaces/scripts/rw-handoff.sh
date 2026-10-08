@@ -3,8 +3,8 @@
 # coding agent is running in it, the agent's conversation) to a durable
 # remote endpoint on a worker.
 #
-# Implements initial-plan.md's 5-step transactional ordering ("Local-first
-# AI coding-agent handoff"):
+# Implements docs/tmux-remote-workspaces.md's five-step transactional ordering
+# ("Handoff and return"):
 #   1. Preflight (worker reachability/binaries, provider version policy).
 #      A failure here aborts with the local agent untouched.
 #   2. Snapshot, transfer, and verify worker-side resume eligibility
@@ -100,7 +100,7 @@ worker_home="$(printf '%s' "$preflight_json" | jq -r '.home')"
 # ---------------------------------------------------------------------------
 # Agent detection (blind against the adapter contract -- libexec/adapters/
 # is owned by a parallel workstream; a missing/non-executable adapter file
-# degrades cleanly to workspace-only, per the contract in initial-plan.md).
+# degrades cleanly to workspace-only, per the contract in docs/tmux-remote-workspaces.md).
 # ---------------------------------------------------------------------------
 
 agent_provider=""
@@ -217,10 +217,8 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Duplicate managed-writer guard (initial-plan.md, "Concurrent resumes and
-# transcript divergence": "The system should prevent its own remote handoff
-# command from launching two managed writers for the same logical agent
-# session."). Scans the endpoint registry for another endpoint (not this
+# Duplicate managed-resume guard (docs/tmux-remote-workspaces.md, "Handoff
+# and return"). Scans the endpoint registry for another endpoint (not this
 # one -- a reattach re-runs against itself) that already records this same
 # provider+session_id with state "handed-off" (an active managed writer
 # elsewhere). Wrapped in rw_with_lock so the check-then-act sequence is
@@ -374,7 +372,7 @@ if [ "$agent_mode" = "full" ]; then
       agent_resume_cmd=""
     else
       # Dispatch the resume command, then verify it actually started before
-      # this script's Step 4 stops the local agent (initial-plan.md step 4:
+      # this script's Step 4 stops the local agent (docs/tmux-remote-workspaces.md step 4:
       # "Stop the local agent ... only after the remote resume has started
       # successfully"). Both the dispatch's own exit status AND a brief
       # poll for the provider process in the remote session are checked --

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Intentional window close for the `&` binding: tears down every remote
-# endpoint owned by panes in this window (initial-plan.md, "Endpoint lifetime
-# follows user intent" -- "An intentional local window close must close the
-# remote endpoints owned by that window"), then kills the window itself.
+# endpoint owned by panes in this window (docs/tmux-remote-workspaces.md,
+# "Intentional close is different from a disconnect"), then kills the window.
 #
 # Reuses rw-close.sh per pane (--no-kill-pane, since kill-window below closes
 # every pane anyway) so endpoint teardown has exactly one implementation.

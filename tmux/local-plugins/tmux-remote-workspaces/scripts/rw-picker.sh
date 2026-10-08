@@ -210,7 +210,7 @@ pick_return() {
 # failure, hold the popup open as a dismissible DIALOG explaining the
 # failure in one cause line + one action line. Never a status-bar
 # display-message: refusals flashed there were unreadable/mistakable
-# (2026-08-05 invisible version block; 2026-08-06 truncated claim refusal;
+# (2026-08-05 invisible version block; 2026-08-06 truncated refusal;
 # 2026-08-08 operator: "a dialog I can dismiss, not useless text in the
 # command bar").
 rw_pick_run_visible() {

@@ -1,7 +1,7 @@
 # Workspace handoff sync
 
 Implements the transactional handoff described in
-`docs/tasks/tmux-remote-workspaces/initial-plan.md`. Moves dirty git state -- unpushed
+`docs/tmux-remote-workspaces.md`. Moves dirty git state -- unpushed
 commits, staged changes, unstaged changes, tracked renames/deletions,
 untracked files, and referenced Git LFS content -- between two worktrees
 without any commit/push/pull ceremony, with a destination backup and a
@@ -153,7 +153,7 @@ destination and verifies the result:
    share one generation counter.
 
 Every step logs to `events.jsonl` (`rw_log_event`) with duration and
-outcome, including failed attempts, per initial-plan.md's Observability
+outcome, including failed attempts, per docs/tmux-remote-workspaces.md's Observability
 section.
 
 ## Content fingerprint

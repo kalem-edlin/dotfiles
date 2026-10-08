@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # `rw ensure` -- idempotent establish/re-establish of a durable remote
-# endpoint for the CURRENT pane. See initial-plan.md, "Resolved decisions" #5:
+# endpoint for the current pane. See docs/tmux-remote-workspaces.md,
+# "Endpoint and state model":
 # there is no separate attach/reconnect verb; ensure is idempotent and
 # re-running it against a pane that already has a live endpoint revalidates
 # and reattaches instead of creating a second one.

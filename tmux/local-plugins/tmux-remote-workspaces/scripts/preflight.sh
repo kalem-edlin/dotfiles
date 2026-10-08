@@ -108,7 +108,7 @@ while IFS='=' read -r key value; do
   esac
 done <<<"$output"
 
-# Git-host auth preflight (initial-plan.md, "Consume, never provision":
+# Git-host auth preflight (docs/tmux-remote-workspaces.md, "Consume, never provision":
 # "worker-side git SSH authentication for the repository host ... a private
 # clone/fetch fails without the worker's own registered key"). Only
 # attempted when the caller passed a repo remote AND the worker actually

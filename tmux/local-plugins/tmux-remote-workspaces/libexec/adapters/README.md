@@ -1,9 +1,7 @@
 # Provider agent adapters
 
-Phase 5 implementation of the local-first AI coding-agent handoff described
-in `docs/tasks/tmux-remote-workspaces/initial-plan.md`, section "Local-first
-AI coding-agent handoff" (see especially "Provider notes" for the verified
-per-provider storage facts this implementation is built against).
+Provider adapters for the agent handoff described in
+`docs/tmux-remote-workspaces.md`, section "Handoff and return".
 
 ```text
 adapters/
@@ -126,9 +124,7 @@ Codex is **de-gated**: `codex install` is implemented and `codex`'s own
 private SQLite `threads` table (`~/.codex/state_5.sqlite`, one row per
 rollout file, indexed by cwd) no longer needs to be touched directly.
 
-A sandboxed `CODEX_HOME` smoke test (run against a real `codex` binary, see
-this task's implementation record in
-`docs/tasks/tmux-remote-workspaces/initial-plan.md`) confirmed:
+A sandboxed `CODEX_HOME` smoke test against a real `codex` binary confirmed:
 
 - Codex lazily **backfills** the `threads` table from rollout files on disk
   the next time it starts against a `CODEX_HOME` with a missing/stale row --
@@ -147,14 +143,9 @@ the first line's `payload.cwd` to `--dest-path`, then relies on Codex's own
 backfill for the DB row -- this adapter never touches sqlite directly. See
 `./codex`'s own header comment for the full verified-facts writeup.
 
-**Remaining caveat, not yet exercised by any sandboxed test**: actually
-*completing* an interactive `codex resume` after backfill needs a real TTY
-and authenticated model access, neither available in an automated sandbox.
-Only the indexing/backfill mechanism itself (and, via `smoke-test`, correct
-rollout placement + `payload.cwd` rewriting) has been confirmed. Treat a
-passing `smoke-test` run as "correctly staged and discoverable," not as
-proof a full conversation resumes cleanly -- run one real interactive
-`codex resume` by hand before relying on this for a real handoff.
+The sandboxed smoke test proves indexing, placement, and `payload.cwd`
+rewriting. The later live operator journey also completed a real Codex
+handoff and return, including prompt continuity and destination-only resume.
 
 ## Smoke test
 

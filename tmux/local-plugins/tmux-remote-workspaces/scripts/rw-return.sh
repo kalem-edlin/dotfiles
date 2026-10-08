@@ -9,7 +9,7 @@
 # worktree recorded at handoff time (this process's own filesystem). See
 # libexec/sync/handoff's `--pull` flag and libexec/sync/README.md.
 #
-# Ordering (mirrors initial-plan.md's 5-step handoff ordering):
+# Ordering (mirrors docs/tmux-remote-workspaces.md's 5-step handoff ordering):
 #   1. Preflight the worker; a failure aborts, remote agent/workspace
 #      untouched.
 #   2. Transfer the workspace back (shared safety model: destination
@@ -265,7 +265,7 @@ fi
 # recorded divergence_risk (the local agent was kept running with
 # --keep-local), the local resume uses the adapter's provider-native
 # `resume-cmd --fork` instead of a plain resume -- forking preserves both
-# lineages (initial-plan.md: "adapters lean on provider-native forking ...
+# lineages (docs/tmux-remote-workspaces.md: "adapters lean on provider-native forking ...
 # rather than building bespoke copy-and-track bookkeeping"). The remote
 # lineage is deliberately left running/backed up either way, never
 # auto-stopped, since both lineages are being kept.
@@ -307,7 +307,7 @@ if [ -n "$agent_provider" ] && [ -n "$agent_session_id" ]; then
         agent_outcome="resume_gated"
       else
         # Dispatch, then verify the local resume actually started before
-        # stopping the remote copy (initial-plan.md step 4, mirrored: never
+        # stopping the remote copy (docs/tmux-remote-workspaces.md step 4, mirrored: never
         # stop the OTHER side's agent until THIS side's resume has
         # verifiably started).
         if ! tmux send-keys -t "$pane_id" "$agent_resume_cmd" Enter 2>"$export_err"; then

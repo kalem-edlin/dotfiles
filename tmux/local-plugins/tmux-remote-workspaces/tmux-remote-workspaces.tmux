@@ -58,7 +58,7 @@ existing_host_text="$(tmux show-option -gqv @catppuccin_host_text 2>/dev/null ||
 case "$existing_host_text" in
   *'#{@remote-host}'*) : ;; # already wrapped (e.g. config reload) -- don't nest again
   *)
-    tmux set-option -gq @catppuccin_host_text "#{?@remote-host,#{@remote-host},${existing_host_text}}"
+    tmux set-option -gq @catppuccin_host_text "#{?@remote-host,#{=/7/…:#{@remote-host}},${existing_host_text}}"
     ;;
 esac
 
@@ -97,14 +97,13 @@ esac
 # replacing) is the same multi-consumer pattern tmux-workspace-resurrect
 # itself uses for its own post-save-all/post-restore-all hooks -- duplicated
 # here deliberately rather than sourced cross-plugin, matching the "sibling
-# consumer, not a fork" relationship described in initial-plan.md's
-# "Configuration and extensibility" section.
+# consumer, not a fork" relationship described in
+# docs/tmux-remote-workspaces.md, "Tmux and persistence integration".
 #
 # Order matters: rw-post-restore.sh (session-UUID re-resolution + pane
 # re-establishment) runs first, then libexec/reconcile (orphan disposal)
-# -- matching the order Phase 2 lists them in ("Reattach remembered
-# endpoints on laptop restore... Reconcile and close owned remote
-# endpoints..."). Both are independently safe regardless of order (neither
+# so endpoint re-establishment precedes orphan reconciliation. Both are
+# independently safe regardless of order (neither
 # closes an endpoint the other one just touched), but running
 # re-establishment first means a freshly-set @rw-* pane cache and a
 # respawned attach-loop.sh are already in place by the time reconciliation
@@ -131,10 +130,8 @@ append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/scripts/rw-post-rest
 append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
 
 # --- doctor -----------------------------------------------------------------
-# CLI only this wave (see README.md); no new keybinding is added to avoid
-# widening the keymap changes beyond what initial-plan.md's BEHAVIOR list
-# requires (prefix+q and the \ / split bindings, both wired from
-# tmux.reset.conf directly).
+# `rw doctor` remains CLI-only; lifecycle bindings are wired from
+# tmux.reset.conf directly.
 
 # --- Copy-mode forwarding for remote-backed panes ---------------------------
 # A remote-backed pane is an ssh-attached worker tmux client on the outer
@@ -151,8 +148,8 @@ append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
 # stock behavior. prefix ] deliberately NOT forwarded: local paste-buffer
 # types the LOCAL buffer into the remote program, the useful direction.
 tmux bind-key '[' if-shell -F '#{@remote-host}' \
-  "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}'\"" \
+  "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}' || true\"" \
   'copy-mode'
 tmux bind-key PPage if-shell -F '#{@remote-host}' \
-  "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}' --page-up\"" \
+  "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}' --page-up || true\"" \
   'copy-mode -u'
