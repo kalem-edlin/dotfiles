@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Prints an autosave-freshness chip for tmux status-right, derived from
-# tmux-continuum's @continuum-save-last-timestamp option.
+# Prints a compact autosave-freshness chip for tmux status-right. Local
+# and remote modes both read the verified `.last-successful-save` marker.
 #
 # Styling: this renders a chip byte-identical in structure to catppuccin's
 # own status modules (the "dotfiles"/"mac" chips), so it sits flush against
@@ -20,14 +20,12 @@
 # or turns on @catppuccin_status_connect_separator, this chip will stop
 # matching and the recipe above must be re-derived from catppuccin.tmux.
 #
-# Runs on every status refresh, so it must stay cheap and must never print
+# Tmux caches #() output, but this still must stay cheap and must never print
 # an error string: any failure path prints nothing and exits 0.
 #
 # Cost note: each separate `tmux show-option` call spawns its own client
-# process and pays a full socket round-trip (~5ms measured on this
-# machine). `tmux show-options -g` dumps every global option in a single
-# client spawn, so all five values we need (status-right, the two
-# continuum options, and the two separator glyphs) come out of one call.
+# process and pays a full socket round-trip. `tmux show-options -g` dumps
+# every global option in one client spawn.
 
 set -u
 
@@ -49,7 +47,7 @@ STALE_COLOR="#f38ba8" # thm_red
 ICON="󰄬"
 
 GRACE_SECONDS=60
-DEFAULT_INTERVAL_MIN=15
+DEFAULT_INTERVAL_MIN=5
 DEFAULT_LSEP=""
 DEFAULT_RSEP=""
 
@@ -81,16 +79,22 @@ chip() {
     "$THM_GRAY" "$THM_BG" "$rsep"
 }
 
+age_text() {
+  local minutes="$1"
+  if [ "$minutes" -gt 9999 ]; then
+    printf '9999+'
+  else
+    printf '%dm' "$minutes"
+  fi
+}
+
 opts="$(tmux show-options -g 2>/dev/null)" || exit 0
 
-status_right=""
 interval_min=""
-last_save=""
+configured_dir=""
 lsep="$DEFAULT_LSEP"
 rsep="$DEFAULT_RSEP"
-have_status_right=0
 have_interval=0
-have_last_save=0
 
 # show-options quotes values that need it; strip one layer of surrounding
 # double quotes from the ones we use as data (the separators are single
@@ -105,17 +109,12 @@ unquote() {
 
 while IFS= read -r line; do
   case "$line" in
-    "status-right "*)
-      status_right="${line#status-right }"
-      have_status_right=1
-      ;;
-    "@continuum-save-interval "*)
-      interval_min="$(unquote "${line#@continuum-save-interval }")"
+    "@workspace-autosave-interval "*)
+      interval_min="$(unquote "${line#@workspace-autosave-interval }")"
       have_interval=1
       ;;
-    "@continuum-save-last-timestamp "*)
-      last_save="$(unquote "${line#@continuum-save-last-timestamp }")"
-      have_last_save=1
+    "@resurrect-dir "*)
+      configured_dir="$(unquote "${line#@resurrect-dir }")"
       ;;
     "@catppuccin_status_left_separator "*)
       lsep="$(unquote "${line#@catppuccin_status_left_separator }")"
@@ -176,7 +175,7 @@ if [ -n "$worker" ]; then
   [ -f "$cache" ] && last_remote="$(cat "$cache" 2>/dev/null)"
   if ! is_uint "$last_remote"; then
     # No successful fetch yet (first focus, or worker unreachable).
-    chip "$LATE_COLOR" "…"
+    chip "$LATE_COLOR" "  …  "
     exit 0
   fi
   age=$((now - last_remote))
@@ -186,28 +185,14 @@ if [ -n "$worker" ]; then
   fresh_max=$((interval_sec + GRACE_SECONDS))
   stale_min=$((interval_sec * 3))
   if [ "$age" -ge "$stale_min" ]; then
-    chip "$STALE_COLOR" "${age_min}m"
+    chip "$STALE_COLOR" "$(age_text "$age_min")"
   elif [ "$age" -gt "$fresh_max" ]; then
-    chip "$LATE_COLOR" "${age_min}m"
+    chip "$LATE_COLOR" "$(age_text "$age_min")"
   else
-    chip "$FRESH_COLOR" "${age_min}m"
+    chip "$FRESH_COLOR" "$(age_text "$age_min")"
   fi
   exit 0
 fi
-
-# The one failure mode this indicator exists to catch: continuum's own save
-# interpolation missing from status-right (disarmed autosave). This check
-# must win even when the last save timestamp still looks recent.
-if [ "$have_status_right" -eq 0 ]; then
-  exit 0
-fi
-case "$status_right" in
-  *continuum_save.sh*) ;;
-  *)
-    chip "$STALE_COLOR" "OFF"
-    exit 0
-    ;;
-esac
 
 if [ "$have_interval" -eq 0 ] || ! is_uint "$interval_min"; then
   interval_min="$DEFAULT_INTERVAL_MIN"
@@ -219,18 +204,27 @@ interval_sec=$((interval_min * 60))
 fresh_max=$((interval_sec + GRACE_SECONDS))
 stale_min=$((interval_sec * 3))
 
-if [ "$have_last_save" -eq 0 ] || ! is_uint "$last_save"; then
-  # Empty on first plugin load until the first save fires. Treat as Late
-  # (armed, just not saved yet) within one interval+grace of server start;
-  # beyond that, an empty timestamp is suspicious rather than benign.
+if [ -z "$configured_dir" ]; then
+  if [ -d "$HOME/.tmux/resurrect" ]; then
+    configured_dir="$HOME/.tmux/resurrect"
+  else
+    configured_dir="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+  fi
+fi
+host="$(hostname 2>/dev/null || true)"
+resurrect_dir="$(printf '%s\n' "$configured_dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host,g; s,~,$HOME,g")"
+last_save=""
+[ -f "$resurrect_dir/.last-successful-save" ] && last_save="$(sed -n '1p' "$resurrect_dir/.last-successful-save" 2>/dev/null)"
+
+if ! is_uint "$last_save"; then
   start_time="$(tmux display-message -p -F '#{start_time}' 2>/dev/null)"
   is_uint "$start_time" || exit 0
   since_start=$((now - start_time))
   [ "$since_start" -lt 0 ] && since_start=0
   if [ "$since_start" -le "$fresh_max" ]; then
-    chip "$LATE_COLOR" "$((since_start / 60))m"
+    chip "$LATE_COLOR" "$(age_text "$((since_start / 60))")"
   else
-    chip "$STALE_COLOR" "NO SAVE"
+    chip "$STALE_COLOR" " NONE"
   fi
   exit 0
 fi
@@ -240,9 +234,9 @@ age=$((now - last_save))
 age_min=$((age / 60))
 
 if [ "$age" -ge "$stale_min" ]; then
-  chip "$STALE_COLOR" "${age_min}m"
+  chip "$STALE_COLOR" "$(age_text "$age_min")"
 elif [ "$age" -gt "$fresh_max" ]; then
-  chip "$LATE_COLOR" "${age_min}m"
+  chip "$LATE_COLOR" "$(age_text "$age_min")"
 else
-  chip "$FRESH_COLOR" "${age_min}m"
+  chip "$FRESH_COLOR" "$(age_text "$age_min")"
 fi

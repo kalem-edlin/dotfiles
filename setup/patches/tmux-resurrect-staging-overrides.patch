@@ -1,0 +1,15 @@
+diff --git a/scripts/helpers.sh b/scripts/helpers.sh
+index 7d237cb..bd764c1 100644
+--- a/scripts/helpers.sh
++++ b/scripts/helpers.sh
+@@ -11,8 +11,8 @@ resurrect_dir_option="@resurrect-dir"
+ SUPPORTED_VERSION="1.9"
+ RESURRECT_FILE_PREFIX="tmux_resurrect"
+ RESURRECT_FILE_EXTENSION="txt"
+-_RESURRECT_DIR=""
+-_RESURRECT_FILE_PATH=""
++_RESURRECT_DIR="${TMUX_RESURRECT_OVERRIDE_DIR:-}"
++_RESURRECT_FILE_PATH="${TMUX_RESURRECT_OVERRIDE_FILE_PATH:-}"
+ 
+ d=$'\t'
+ 

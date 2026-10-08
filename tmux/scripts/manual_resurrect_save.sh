@@ -13,6 +13,9 @@ source "$RW_COMMON"
 worker="${1:-}"
 pane_id="${2:-}"
 
+# The dialog is the error report. Callers exit 0 after it: run-shell opens
+# view mode on any non-zero exit, which would take over the pane a second
+# time after the dialog was dismissed.
 save_dialog() {
   local title="$1" message="$2"
   if [ -n "$pane_id" ]; then
@@ -25,7 +28,7 @@ save_dialog() {
 case "$worker" in
   *[!A-Za-z0-9._-]*)
     save_dialog "Tmux save failed" "Invalid remote worker alias."
-    exit 1
+    exit 0
     ;;
 esac
 
@@ -39,7 +42,7 @@ local_ts="$(bash "$SCRIPT_DIR/resurrect_save.sh" --print-timestamp 2>"$err_file"
 case "$local_ts" in
   '' | *[!0-9]*)
     save_dialog "Tmux save failed" "$(tail -c 220 "$err_file" | tr '\n' ' ')"
-    exit 1
+    exit 0
     ;;
 esac
 
@@ -59,7 +62,7 @@ case "$remote_ts" in
   '' | *[!0-9]*)
     save_dialog "Remote tmux save failed" \
       "Local tmux saved, but the save on $worker failed: $(tail -c 200 "$err_file" | tr '\n' ' ')"
-    exit 1
+    exit 0
     ;;
 esac
 

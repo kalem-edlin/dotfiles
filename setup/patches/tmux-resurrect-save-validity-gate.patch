@@ -4,7 +4,7 @@ index ce94cc6..23ecbf0 100755
 +++ b/scripts/save.sh
 @@ -274,6 +274,50 @@ remove_old_backups() {
  		find "${files[@]}" -type f -mtime "+${delete_after}" -exec rm -v "{}" \; > /dev/null
- }
+ 	}
  
 +# Sanity gate for a just-written resurrect file, run before it is ever
 +# allowed to become `last` (the file restore.sh actually reads). Without
@@ -53,10 +53,10 @@ index ce94cc6..23ecbf0 100755
  save_all() {
  	local resurrect_file_path="$(resurrect_file_path)"
  	local last_resurrect_file="$(last_resurrect_file)"
-@@ -283,7 +327,18 @@ save_all() {
+@@ -283,7 +327,20 @@ save_all() {
  	dump_windows >> "$resurrect_file_path"
  	dump_state   >> "$resurrect_file_path"
- 	execute_hook "post-save-layout" "$resurrect_file_path"
+-	execute_hook "post-save-layout" "$resurrect_file_path"
 -	if files_differ "$resurrect_file_path" "$last_resurrect_file"; then
 +	if ! resurrect_file_looks_sane "$resurrect_file_path"; then
 +		# Never repoint `last` at a save that failed the sanity check -- a
@@ -69,7 +69,24 @@ index ce94cc6..23ecbf0 100755
 +		# (see setup/templates/tmux-resurrect-save.sh, launchd/systemd
 +		# StandardErrorPath capture it).
 +		echo "tmux-resurrect: WARNING - $resurrect_file_path failed the save sanity check (empty, or missing a complete pane/state record) -- leaving $last_resurrect_file pointed at the previous save." >&2
-+	elif files_differ "$resurrect_file_path" "$last_resurrect_file"; then
++		return 1
++	fi
++	execute_hook "post-save-layout" "$resurrect_file_path"
++	if files_differ "$resurrect_file_path" "$last_resurrect_file"; then
  		ln -fs "$(basename "$resurrect_file_path")" "$last_resurrect_file"
  	else
  		rm "$resurrect_file_path"
+@@ -307,6 +307,12 @@ main() {
+ 		if show_output; then
+ 			start_spinner "Saving..." "Tmux environment saved!"
+ 		fi
+-		save_all
++		if ! save_all; then
++			if show_output; then
++				stop_spinner
++				display_message "Tmux environment save failed!"
++			fi
++			return 1
++		fi
+ 		if show_output; then
+ 			stop_spinner

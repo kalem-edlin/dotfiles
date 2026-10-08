@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Direct periodic save trigger for tmux-resurrect on a headless worker.
+# Direct periodic save trigger for tmux-resurrect.
 #
 # Why this exists: tmux-continuum's autosave is a `#()` interpolation baked
 # into `status-right`, evaluated only while some client is actively
@@ -8,11 +8,12 @@
 # scripts/continuum_save.sh). A fully detached worker tmux server — the
 # normal state for an always-on headless box with no attached SSH client —
 # never renders a status line, so that interpolation never fires and the
-# server never autosaves. This script is installed as the command body of a
-# launchd user agent (macOS) / systemd user timer (Linux) so saves happen on
+# server never autosaves. Keeping all machines on this path also avoids
+# treating a status-line redraw as a durability timer. This script is the
+# command body of a launchd user agent on macOS or a systemd user timer on
+# Linux, so saves happen on
 # a fixed interval independent of any client. See
-# docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
-# durability".
+# docs/tmux-remote-workspaces.md, "Persistence and reconciliation".
 #
 # It invokes tmux/scripts/resurrect_save.sh with the "quiet" flag — the same
 # serialized, verified wrapper configured as Continuum's

@@ -1,0 +1,28 @@
+diff --git a/scripts/save.sh b/scripts/save.sh
+--- a/scripts/save.sh
++++ b/scripts/save.sh
+@@ -226,14 +226,22 @@ fetch_and_dump_grouped_sessions(){
+ 
+ # translates pane pid to process command running inside a pane
+ dump_panes() {
+-	local full_command
++	local full_command configured_processes
++	# Process replay is disabled for this setup, so capturing every pane's
++	# descendant command is needless and expensive. Read once outside the
++	# loop because get_tmux_option itself talks to the tmux server.
++	configured_processes="$(get_tmux_option "$restore_processes_option" "$restore_processes")"
+ 	dump_panes_raw |
+ 		while IFS=$d read line_type session_name window_number window_active window_flags pane_index pane_title dir pane_active pane_command pane_pid history_size; do
+ 			# not saving panes from grouped sessions
+ 			if is_session_grouped "$session_name"; then
+ 				continue
+ 			fi
+-			full_command="$(pane_full_command $pane_pid)"
++			if [ "$configured_processes" = "false" ]; then
++				full_command=""
++			else
++				full_command="$(pane_full_command "$pane_pid")"
++			fi
+ 			dir=$(echo $dir | sed 's/ /\\ /') # escape all spaces in directory path
+ 			echo "${line_type}${d}${session_name}${d}${window_number}${d}${window_active}${d}${window_flags}${d}${pane_index}${d}${pane_title}${d}${dir}${d}${pane_active}${d}${pane_command}${d}:${full_command}"
+ 		done

@@ -185,9 +185,9 @@ fi
 # worker tmux server never autosaves. This installs a direct periodic timer
 # that invokes tmux-resurrect's save entrypoint on its own, independent of
 # any attached client. See setup/templates/tmux-resurrect-save.sh and
-# docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
-# durability". Continuum itself is untouched — it still runs normally
-# wherever a client is attached (e.g. this same worker, interactively).
+# docs/tmux-remote-workspaces.md, "Persistence and reconciliation".
+# Continuum remains available for restore-on-start, but its save scheduler is
+# disabled in tmux configuration on every machine.
 
 TEMPLATES_DIR="$DOTFILES_DIR/setup/templates"
 RESURRECT_WRAPPER="$TEMPLATES_DIR/tmux-resurrect-save.sh"

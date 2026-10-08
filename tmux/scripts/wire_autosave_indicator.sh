@@ -3,10 +3,9 @@
 # renders to the LEFT of catppuccin's directory/host chips.
 #
 # Invoked via `run-shell` in tmux.conf AFTER the TPM line, so catppuccin and
-# tmux-continuum have already finished rewriting/prepending to status-right
-# (continuum's own add_resurrect_save_interpolation does the same
-# prepend-if-absent operation -- see
-# ~/.config/tmux/plugins/tmux-continuum/scripts/helpers.sh).
+# tmux-continuum has already finished rewriting status-right. This script
+# removes Continuum's save interpolation because autosave runs from an
+# operating-system timer instead of UI rendering.
 #
 # Any existing copy is stripped before prepending rather than short-
 # circuiting on "already present". That keeps repeated `source-file` calls
@@ -27,6 +26,8 @@ worker_interp="#(~/.config/tmux/scripts/autosave_indicator.sh '#{@rw-worker}')"
 # that loaded the earlier version, so it must be stripped too or a reload
 # would stack both chips.
 legacy_interp="#(~/.config/tmux/scripts/autosave_indicator.sh)"
+continuum_interp="#($HOME/.config/tmux/plugins/tmux-continuum/scripts/continuum_save.sh)"
+continuum_tilde_interp="#(~/.config/tmux/plugins/tmux-continuum/scripts/continuum_save.sh)"
 current="$(tmux show-option -gqv status-right 2>/dev/null)" || exit 0
 
 # Strip every existing occurrence of either form (bash 3.2-safe: no
@@ -43,6 +44,12 @@ while :; do
       ;;
     *"$legacy_interp"*)
       stripped="${stripped%%"$legacy_interp"*}${stripped#*"$legacy_interp"}"
+      ;;
+    *"$continuum_interp"*)
+      stripped="${stripped%%"$continuum_interp"*}${stripped#*"$continuum_interp"}"
+      ;;
+    *"$continuum_tilde_interp"*)
+      stripped="${stripped%%"$continuum_tilde_interp"*}${stripped#*"$continuum_tilde_interp"}"
       ;;
     *) break ;;
   esac
