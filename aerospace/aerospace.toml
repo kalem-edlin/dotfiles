@@ -36,6 +36,27 @@ on-focused-monitor-changed = ['move-mouse monitor-lazy-center']
 # Also see: https://nikitabobko.github.io/AeroSpace/goodies#disable-hide-app
 automatically-unhide-macos-hidden-apps = true
 
+# Peek is a display-only companion to Neovim. Restore the previous window once
+# on creation; later deliberate focus changes into Peek are left alone.
+[[on-window-detected]]
+if.app-name-regex-substring = '^deno$'
+if.window-title-regex-substring = '^Peek preview$'
+if.during-aerospace-startup = false
+run = [
+    'layout tiling',
+    '''exec-and-forget
+        if [ "$(aerospace list-windows --focused --format "%{window-title}")" = "Peek preview" ]; then
+            aerospace focus-back-and-forth
+        fi
+    '''
+]
+
+# Xcode can expose regular editor windows in a way that triggers AeroSpace's
+# dialog heuristic. Override that classification so every Xcode window tiles.
+[[on-window-detected]]
+if.app-id = 'com.apple.dt.Xcode'
+run = 'layout tiling'
+
 [[on-window-detected]]
 if.app-name-regex-substring = 'settings'
 run = 'layout floating'
