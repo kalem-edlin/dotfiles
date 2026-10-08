@@ -1,0 +1,34 @@
+[
+  {
+    "id": "cursor-unslop",
+    "repository": "https://github.com/cursor/plugins.git",
+    "ref": "refs/heads/main",
+    "baselineCommit": "71ed0d1076fec562c1b74ee353121a8d00f75382",
+    "upstreamPath": "pstack/skills/unslop/SKILL.md",
+    "localPaths": ["agents/communication.md"]
+  },
+  {
+    "id": "disler-smartass-communication",
+    "repository": "https://github.com/disler/fixing-smartass-opus-5.git",
+    "ref": "refs/heads/main",
+    "baselineCommit": "5a349e87201c1987f22191fbac4ca772822aa352",
+    "upstreamPath": "sr_opus_5_system_prompt.md",
+    "localPaths": ["agents/communication.md"]
+  },
+  {
+    "id": "disler-pi-subagent-widget",
+    "repository": "https://github.com/disler/pi-vs-claude-code.git",
+    "ref": "refs/heads/main",
+    "baselineCommit": "0ed11f44932fdef29bd98467700019762298f50d",
+    "upstreamPath": "extensions/subagent-widget.ts",
+    "localPaths": ["pi/.config/pif/extensions/subagent-widget.ts"]
+  },
+  {
+    "id": "disler-pi-session-replay",
+    "repository": "https://github.com/disler/pi-vs-claude-code.git",
+    "ref": "refs/heads/main",
+    "baselineCommit": "0ed11f44932fdef29bd98467700019762298f50d",
+    "upstreamPath": "extensions/session-replay.ts",
+    "localPaths": ["pi/.config/pif/extensions/session-replay.ts"]
+  }
+]
