@@ -41,6 +41,7 @@ packages=(
     @burneikis/pi-vim
     @cometix/ccline
     @mariozechner/pi-coding-agent
+    @mermaid-js/mermaid-cli
     @openai/codex
     @sasazame/ccresume
     @vtsls/language-server

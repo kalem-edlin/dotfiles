@@ -94,6 +94,11 @@ local function apply_editor_chrome()
   vim.api.nvim_set_hl(0, "ScrollbarHandle", { fg = mocha.surface2, bg = "NONE" })
   vim.api.nvim_set_hl(0, "ScrollbarCursor", { fg = mocha.blue, bg = "NONE" })
   vim.api.nvim_set_hl(0, "ScrollbarCursorHandle", { fg = mocha.blue, bg = "NONE" })
+  -- Keep file suggestions legible over the prose beneath the floating menu.
+  vim.api.nvim_set_hl(0, "BlinkCmpMenu", { fg = mocha.text, bg = "#1e1e2e" })
+  vim.api.nvim_set_hl(0, "BlinkCmpMenuBorder", { fg = mocha.blue, bg = "#1e1e2e" })
+  vim.api.nvim_set_hl(0, "BlinkCmpMenuSelection", { bg = mocha.surface1, bold = true })
+  vim.api.nvim_set_hl(0, "BlinkCmpLabelMatch", { fg = mocha.mauve, bold = true })
 end
 
 -- Bootstrap lazy.nvim for a small, repo-owned Neovim setup.
@@ -342,7 +347,76 @@ telescope_live_grep = function(include_misc, opts)
   }):find()
 end
 
+local markdown_treesitter_parsers = {
+  "markdown",
+  "markdown_inline",
+}
+
 require("lazy").setup({
+  {
+    "saghen/blink.cmp",
+    version = "v1.10.2", -- v1 supports the Neovim 0.10 workers too.
+    event = "InsertEnter",
+    opts = {
+      enabled = function()
+        return require("file_mentions").is_enabled(0)
+      end,
+      keymap = {
+        preset = "none",
+        ["<C-Space>"] = { "show", "fallback" },
+        ["<Tab>"] = { "select_and_accept", "fallback" },
+        ["<CR>"] = { "accept", "fallback" },
+        ["<C-n>"] = { "select_next", "fallback" },
+        ["<C-p>"] = { "select_prev", "fallback" },
+        ["<Down>"] = { "select_next", "fallback" },
+        ["<Up>"] = { "select_prev", "fallback" },
+        ["<C-e>"] = { "cancel", "fallback" },
+      },
+      completion = {
+        keyword = { range = "prefix" },
+        list = { selection = { preselect = false, auto_insert = false } },
+        menu = {
+          border = "rounded",
+          max_height = 7,
+          direction_priority = { "s", "n" },
+          draw = { columns = { { "label" } } },
+        },
+        documentation = { auto_show = false },
+        accept = { auto_brackets = { enabled = false } },
+        trigger = {
+          show_on_backspace = true,
+          show_on_accept_on_trigger_character = false,
+        },
+      },
+      -- fzf ranks the entire @query, including directories. Blink preserves
+      -- that order and supplies the popup; it needs no Rust binary here.
+      fuzzy = { implementation = "lua", sorts = { "sort_text" } },
+      sources = {
+        default = { "file_mentions" },
+        providers = {
+          file_mentions = {
+            name = "Files",
+            module = "file_mentions",
+            opts = { excludes = misc_file_excludes },
+          },
+        },
+      },
+      cmdline = { enabled = false },
+      term = { enabled = false },
+    },
+  },
+  {
+    "nvim-treesitter/nvim-treesitter",
+    lazy = false,
+    build = function()
+      local treesitter = require("nvim-treesitter")
+      treesitter.install(markdown_treesitter_parsers):wait(300000)
+      treesitter.update(markdown_treesitter_parsers):wait(300000)
+    end,
+    config = function()
+      require("nvim-treesitter").install(markdown_treesitter_parsers)
+    end,
+  },
   {
     "catppuccin/nvim",
     name = "catppuccin",
@@ -497,6 +571,51 @@ require("lazy").setup({
       sync_scrollbar_for_wrap()
     end,
   },
+  {
+    "delphinus/md-render.nvim",
+    version = "v3.8.3",
+    config = function(plugin)
+      require("markdown_tables").setup(plugin.dir)
+      require("md_render_tmux").setup(plugin.dir)
+      require("markdown_source").setup(plugin.dir)
+      require("markdown_view").setup(plugin.dir)
+    end,
+    ft = { "markdown" },
+    keys = {
+      {
+        "<leader>mr",
+        function()
+          require("markdown_render").toggle_reader()
+        end,
+        desc = "Toggle Markdown reader",
+      },
+    },
+  },
+  {
+    "toppair/peek.nvim",
+    build = "deno task --quiet build:fast",
+    ft = { "markdown" },
+    keys = {
+      {
+        "<leader>mw",
+        function()
+          require("markdown_render").toggle_web()
+        end,
+        desc = "Toggle Markdown web preview",
+      },
+    },
+    opts = {
+      app = "webview",
+      auto_load = true,
+      close_on_bdelete = true,
+      syntax = true,
+      theme = "dark",
+      update_on_change = true,
+    },
+    config = function(_, opts)
+      require("peek").setup(opts)
+    end,
+  },
 }, {
   change_detection = {
     notify = false,
@@ -507,8 +626,70 @@ vim.api.nvim_create_autocmd("ColorScheme", {
   callback = apply_editor_chrome,
 })
 
+vim.api.nvim_create_user_command("FileMentionsRefresh", function()
+  require("file_mentions").clear_cache()
+end, { desc = "Refresh the @ file list on the next completion" })
+
+vim.api.nvim_create_user_command("FileMentionsRoot", function(args)
+  if args.bang then
+    vim.b.file_mentions_root = nil
+  elseif args.args ~= "" then
+    local path = vim.fn.fnamemodify(vim.fn.expand(args.args), ":p")
+    if vim.fn.isdirectory(path) ~= 1 then
+      vim.notify("Not a directory: " .. path, vim.log.levels.ERROR)
+      return
+    end
+    vim.b.file_mentions_root = path
+  end
+  require("file_mentions").clear_cache()
+  vim.notify("@ files: " .. require("file_mentions").root(0))
+end, { nargs = "?", bang = true, complete = "dir", desc = "Show or set this buffer's @ search root; ! resets it" })
+
 vim.api.nvim_create_autocmd({ "FocusGained", "BufEnter", "CursorHold" }, {
   command = "checktime",
+})
+
+-- Agent input editors and a bare `nvim` start with an unnamed, untyped
+-- buffer. Treat those buffers as Markdown so prose gets useful highlighting.
+-- If the buffer later receives a filename, prefer the type inferred from it.
+local unnamed_markdown_group = vim.api.nvim_create_augroup("unnamed_markdown", { clear = true })
+
+local function default_unnamed_buffer_to_markdown(args)
+  local bufnr = args.buf or vim.api.nvim_get_current_buf()
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    return
+  end
+
+  if vim.api.nvim_buf_get_name(bufnr) == ""
+    and vim.bo[bufnr].buftype == ""
+    and vim.bo[bufnr].filetype == ""
+  then
+    vim.bo[bufnr].filetype = "markdown"
+    vim.b[bufnr].defaulted_to_markdown = true
+  end
+end
+
+vim.api.nvim_create_autocmd({ "VimEnter", "BufEnter" }, {
+  group = unnamed_markdown_group,
+  callback = default_unnamed_buffer_to_markdown,
+})
+
+vim.api.nvim_create_autocmd("BufFilePost", {
+  group = unnamed_markdown_group,
+  callback = function(args)
+    if not vim.b[args.buf].defaulted_to_markdown then
+      return
+    end
+
+    local detected = vim.filetype.match({
+      buf = args.buf,
+      filename = vim.api.nvim_buf_get_name(args.buf),
+    })
+    if detected and detected ~= "" then
+      vim.bo[args.buf].filetype = detected
+      vim.b[args.buf].defaulted_to_markdown = nil
+    end
+  end,
 })
 
 -- Basic settings
