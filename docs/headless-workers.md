@@ -61,14 +61,21 @@ this contract — not just that the installer exited zero.
   by the managed config and remote Treemux) and `ob` as part of the intended
   headless toolset. On Linux, provisioning installs the official upstream
   stable tarball under `~/.local/opt` and links it into `~/.local/bin` when
-  the distribution package is older than that minimum.
+  the distribution package is older than that minimum. `go` builds the
+  tmux-agent-sessions picker (`bin/agent-picker`). On Linux, `setup/go.sh`
+  installs a pinned, checksum-verified upstream tarball the same way,
+  because distribution packages are too old.
 - **Dotfiles:** `~/.config/tmux` and `~/.config/nvim` linked to this
-  repository; the `claude`, `codex`, `git`, `pi`, `ssh`, `vim`, and `zsh`
-  packages stowed; `~/.local/bin/rw` available.
+  repository; the `claude`, `git`, `pi`, `ssh`, `vim`, and `zsh`
+  packages stowed; `~/.local/bin/rw` available. Codex CLI remains installed,
+  but has no repo-managed config or hooks, and setup does not seed
+  `~/.codex/config.toml`. `codexf` loads shared instructions directly from
+  `$DOTFILES/agents/communication.md`.
 - **tmux plugins:** TPM itself, `tmux-resurrect` and `tmux-continuum`, and
   this repository's own `tmux-workspace-resurrect` and
   `tmux-remote-workspaces` plugin files exposed through the tmux dotfiles
-  link.
+  link. Live Codex session IDs are recovered from the native process and
+  its open rollout file, without installing or trusting a Codex hook.
 - **Durability service:** on macOS, a loaded launchd job that can find
   Homebrew tmux; on Linux, an active systemd user timer with linger enabled
   for the target user.
@@ -173,7 +180,7 @@ registered:
 ```sh
 # Noninteractive command-resolution probe — must succeed without an
 # interactive/login shell and without shell-init output on stdout.
-ssh <worker> 'command -v tmux git git-lfs jq node pi codex claude'
+ssh <worker> 'command -v tmux git git-lfs jq node pi codex claude go'
 ```
 
 Durability timer, per platform:
@@ -230,7 +237,7 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    exits 0 — this also proves the doctor's own toolchain resolves under a
    noninteractive SSH shell.
 4. Full contract probe:
-   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar node npm pi codex claude nvim ob rw'` —
+   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar node npm pi codex claude nvim ob go rw'` —
    every command must resolve, and the output must be paths only, with no
    shell-init noise. `tailscale` too, unless the worker was provisioned with
    `INSTALL_TAILSCALE=0`.

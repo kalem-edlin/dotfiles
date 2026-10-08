@@ -1,11 +1,10 @@
 # Focus-agent profiles
 
-`claudef` and `pif` are opt-in focus profiles layered over the normal Claude
-Code and Pi installations. Bare `claude` and `pi` keep their native behavior.
-The split matters because other programs may invoke those binaries and must not
-inherit interactive prompts, extensions, themes, or focus instructions.
-
-Codex is outside this profile system.
+`claudef`, `pif`, and `codexf` are opt-in focus launchers layered over the
+normal Claude Code, Pi, and Codex installations. Bare `claude`, `pi`, and
+`codex` keep their native behavior. The split matters because other programs
+may invoke those binaries and must not inherit interactive prompts, extensions,
+themes, or focus instructions.
 
 ## Ownership model
 
@@ -27,6 +26,10 @@ Authentication, transcripts, caches, project history, telemetry, and other
 mutable runtime data stay in each tool's native directory. Do not commit them
 or duplicate credentials into a focus profile.
 
+Codex has no repo-managed Stow package, config, or hooks. Setup installs the
+CLI but does not seed `~/.codex/config.toml`. Codex owns its native settings
+and runtime data.
+
 ## Claude profile
 
 The shell function `claudef` delegates to the stowed
@@ -41,8 +44,13 @@ focus profile explicitly:
 --settings ~/.config/claudef/settings.json
 --setting-sources user,project,local
 --plugin-dir ~/.config/claudef
---append-system-prompt-file ~/.config/claudef/communication.md
+--system-prompt-snapshot off
+--append-system-prompt-file ~/.local/state/focus-agents/prompt.md
 ```
+
+The generated prompt contains `agents/communication.md`. Prompt snapshots are
+disabled so resumed conversations receive the current rules instead of keeping
+the system prompt recorded when the conversation was created.
 
 The user setting source remains enabled for two intentional global behaviors:
 
@@ -132,7 +140,18 @@ project-local expert catalog.
 
 ## Shared communication and provenance
 
-Both profiles use `agents/communication.md`. Its upstream inspirations and the
+All three focus launchers load `agents/communication.md`. Other files under
+`agents/`, including `upstream_audit.md`, are references or skill content and
+are not system instructions.
+
+`codexf` runs `codex --dangerously-bypass-approvals-and-sandbox`, forwards
+arguments unchanged, and reads `$DOTFILES/agents/communication.md` directly.
+It injects that file as `developer_instructions`,
+Codex's per-launch equivalent of these shared system rules. The former always-on
+`unslop` skill is removed because `communication.md` is now the canonical
+writing guidance. Bare Codex is unchanged.
+
+The communication prompt's upstream inspirations and the
 two Pi derivatives are recorded in `upstream-sources.json`. The profile
 skill links reserve `agents/skills/upstream-audit/SKILL.md` as their canonical
 target. Keep that target present when enabling agent-triggered audits. See
@@ -144,16 +163,17 @@ target. Keep that target present when enabling agent-triggered audits. See
 | --- | --- |
 | Claude launcher | `claude/.local/bin/claudef` |
 | Pi launcher and runtime links | `zsh/.zshrc`, function `pif` |
+| Codex focus launcher | `zsh/.zshrc`, function `codexf` |
 | Claude focus profile | `claude/.config/claudef/` |
 | Intentional global Claude files | `claude/.claude/keybindings.json`, `claude/.claude/commands/plan.md` |
 | Pi focus profile | `pi/.config/pif/` |
-| Shared prompt | `agents/communication.md` |
+| Shared system instructions | `agents/communication.md` |
 | Profile cleanup and doctor checks | `setup/lib.sh`, `setup/headless-doctor.sh` |
 | Upstream audit | `upstream-sources.json`, `scripts/audit-upstreams.py`, `agents/upstream_audit.md` |
 
 ## Maintenance checks
 
-When changing either profile, verify these boundaries:
+When changing a focus launcher, verify these boundaries:
 
 1. Bare `pi` loads no dotfiles-managed focus resources.
 2. Bare `claude` loads only the two intentional global behaviors.
@@ -167,6 +187,8 @@ When changing either profile, verify these boundaries:
 7. Subagent reports appear before the coordinator response, and `/replay` does
    not mutate theme or title.
 8. Profile launches do not write mutable runtime data into tracked paths.
+9. `codexf` forwards explicit arguments with unrestricted execution and the
+   shared communication instructions, while bare `codex` remains unchanged.
 
 The migration and noninteractive isolation checks were completed in September
 2026.

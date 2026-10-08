@@ -26,12 +26,12 @@ correctly omits, or a worker-only concern that local correctly omits.
 
 | Aspect | Full local (`make setup`) | Headless (`make setup-headless`) |
 | --- | --- | --- |
-| Entry point & target chain | `make setup` → `brew neovim node obsidian python macos install misc`, then `make reload` | `make setup-headless` dispatches on `uname -s`: Darwin → `setup/macos-headless.sh` (runs `brew-headless python neovim node obsidian install-headless misc-headless headless-doctor` via `make`); Linux → `setup-linux-headless-run` (`setup/linux-headless.sh`) then `headless-doctor` |
+| Entry point & target chain | `make setup` → `brew helium neovim node obsidian python macos install misc`, then `make reload` | `make setup-headless` dispatches on `uname -s`: Darwin → `setup/macos-headless.sh` (runs `brew-headless python neovim node obsidian install-headless misc-headless headless-doctor` via `make`); Linux → `setup-linux-headless-run` (`setup/linux-headless.sh`) then `headless-doctor` |
 | Package manager & bundle file | Homebrew, `Brewfile` | macOS: Homebrew, `Brewfile.headless` (`make brew-headless` / `BREWFILE_HEADLESS=1 ./setup/brew.sh`). Linux: no Homebrew — distro package manager (apt/dnf/pacman/zypper/apk) with package lists hardcoded in `setup/linux-headless.sh`, not a Brewfile |
 | CLI packages | `Brewfile`'s `brew` lines | Nearly identical to local. `Brewfile.headless` matches `Brewfile`'s CLI package list except it omits `cameroncooke/axe/axe`, `git-gui`, and `felixkratz/formulae/sketchybar` (the sketchybar formula, tied to the GUI bar) — everything else CLI-wise is the same. Linux headless installs its own required/optional package split per distro (see `setup/linux-headless.sh`), not a mirror of `Brewfile.headless` |
-| GUI casks | `Brewfile` installs 19 casks: `aerospace`, `android-platform-tools`, `arc`, `chromium`, `cursor`, `orbstack`, `figma`, three fonts, `ghostty`, `kindavim`, `ngrok`, `obsidian`, `raycast`, `sf-symbols`, `spotify`, `superwhisper`, `tailscale-app`, `visual-studio-code` | `Brewfile.headless` installs exactly one cask: `tailscale-app`. The file's header comment explains why: "macOS Tailscale's auth/system-extension flow works best through the app (not the bare `tailscale` CLI/daemon), so it is installed even on headless workers." No other GUI app, font, or VS Code/Cursor extension is installed |
+| GUI casks | `Brewfile` installs 21 casks: `aerospace`, `android-platform-tools`, `arc`, `chromium`, `cursor`, `orbstack`, `figma`, three fonts, `ghostty`, `helium-browser`, `kindavim`, `ngrok`, `obsidian`, `raycast`, `sf-symbols`, `spotify`, `superwhisper`, `tailscale-app`, `visual-studio-code` | `Brewfile.headless` installs exactly one cask: `tailscale-app`. The file's header comment explains why: "macOS Tailscale's auth/system-extension flow works best through the app (not the bare `tailscale` CLI/daemon), so it is installed even on headless workers." No other GUI app, font, or VS Code/Cursor extension is installed |
 | Direct `~/.config` links | `CONFIG_PACKAGES := aerospace ghostty nvim sketchybar tmux` (Makefile) | `HEADLESS_CONFIG_PACKAGES := nvim tmux` (Makefile) — GUI-only packages (`aerospace`, `ghostty`, `sketchybar`) dropped |
-| Stow packages | `STOW_PACKAGES := claude codex eza git kindavim pi ssh vim zsh` (Makefile) | `HEADLESS_STOW_PACKAGES := claude codex eza git pi ssh vim zsh` (Makefile) — the only difference is `kindavim`, a macOS GUI keyboard-remapper preference plist, correctly excluded |
+| Stow packages | `STOW_PACKAGES := claude eza git kindavim pi ssh vim zsh` (Makefile) | `HEADLESS_STOW_PACKAGES := claude eza git pi ssh vim zsh` (Makefile) — the only difference is `kindavim`, a macOS GUI keyboard-remapper preference plist, correctly excluded |
 | macOS system preferences | `make macos` (`setup/macos.sh`) runs as part of the `setup` chain | Not run. No headless chain calls `macos` |
 | tmux durability mechanism | tmux-continuum's status-line `#()` autosave interpolation calls the shared verified wrapper; `prefix C-s` calls it immediately and updates the powerline only after both Resurrect and workspace sidecar validation | Headless macOS: a launchd job (`com.kalem.tmux-resurrect-save`) with an absolute Homebrew tmux path baked in as `TMUX_RESURRECT_SAVE_TMUX_BIN` (launchd's own PATH lacks Homebrew's bin dir). Headless Linux: a systemd `--user` timer (`tmux-resurrect-save.timer`, `OnUnitActiveSec=5min`) plus `loginctl enable-linger` so the user's systemd instance keeps running with no login session. Both timers use the same verified wrapper; an rw-focused `prefix C-s` also invokes it immediately on that worker. |
 | Provider auth | Interactive, done once on the local machine | Independent per worker — never copied from the focus machine or any other host. Each of `claude`, `codex`, and `pi` must be authenticated on the worker itself (manual step, see `docs/headless-workers.md`) |
@@ -104,26 +104,17 @@ Linux and macOS headless) still diverge, as of this writing.
      shell needs).
 
 2. **Provider config parity.** PARTLY FIXED. The three provider CLIs still
-   ship very different first-run experiences via their stowed dotfiles:
+   have different first-run experiences:
    - `claude`'s shipped `claude/.claude/settings.json` now includes a
      `"theme": "dark"` key, so theme selection is no longer a first-run
      prompt.
-   - `codex` ships no `config.toml` in its stowed package **by design** —
-     codex writes project-trust entries and other machine-specific cache
-     state straight into that exact file, so symlinking it via stow would
-     guarantee permanent working-tree dirt. `codex/.codex/` ships only
-     `hooks.json`. Instead, `setup/lib.sh`'s
-     `seed_codex_config()` copies `setup/templates/codex-config.toml` to
-     `~/.codex/config.toml` **only when that file does not already exist**
-     — it never overwrites an existing one. This is called from both
-     `make install` / `make install-headless` (the Makefile's `install`/
-     `install-headless` targets) and from `setup/linux-headless.sh`'s
-     `install_headless_dotfiles`. Net effect: a brand-new machine gets the
-     template's theme/model/status-line defaults and skips the first-run
-     wizard; an existing machine's `~/.codex/config.toml` (with its trust
-     entries and caches) is left completely alone by every rerun. Editing
-     the template therefore only ever affects machines that have never been
-     provisioned before.
+   - `codex` remains installed as a CLI, but has no repo-managed Stow
+     package, config, or hooks. Setup does not seed `~/.codex/config.toml`;
+     Codex's first-run setup and mutable configuration stay native.
+     `codexf` loads shared instructions directly from
+     `$DOTFILES/agents/communication.md`. tmux recovers live Codex session
+     IDs from the native process and its open rollout file, without a
+     Codex hook installation or trust step.
    - `pi` ships `pi/.pi/agent/settings.json` with `"theme": "personal"` plus
      the theme definition itself at `pi/.pi/agent/themes/personal.json`, so
      it applies instantly with no prompt.
@@ -244,14 +235,14 @@ exit. The allowlist's existing categories: macOS/Xcode-only tools correctly
 absent from Linux (`cocoapods`, `fastlane`, `swift`, `watchman`, `rbenv`);
 things installed by a mechanism other than the package arrays (`fnm`,
 `pyenv`, `tailscale`, `stripe-cli`, `yarn`, `docker`, `docker-compose`,
-`node`, `npm`, `pi`, `codex`, `claude`, `ob`); native-build-toolchain/
+`node`, `npm`, `pi`, `codex`, `claude`, `ob`, `go`); native-build-toolchain/
 trust-store packages that are required but not part of the interactive
 command contract (`ca-certificates`, `make`, `gcc`, `g++`, `pkg-config`,
 `base-devel`, `build-base`); things disabled everywhere (`zsh-autocomplete`);
 things not packaged by any mainstream distro (`zsh-vi-mode`); and
 known-accepted, deliberately-deferred Linux gaps kept visible as TODOs
 (`actionlint`, `ast-grep`, `atac`, `cmatrix`, `git-filter-repo`, `glow`,
-`go`, `lazydocker`, `prettyping`, `recall`, `sl`, `sshs`, `supabase`,
+`lazydocker`, `prettyping`, `recall`, `sl`, `sshs`, `supabase`,
 `trash-cli`, `uv`, `webp`, `httpd`).
 
 Run it with `make check-tool-parity`. **The rule going forward:** adding a

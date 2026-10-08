@@ -169,7 +169,6 @@ fi
 if command -v eza >/dev/null 2>&1; then
   alias ls="eza --no-user --icons=auto --group-directories-first --color-scale=age"
 fi
-alias mkcd='mkdir -p "$1" && cd "$1"'
 command -v eza >/dev/null 2>&1 && alias ll='eza -la --icons --git'
 command -v eza >/dev/null 2>&1 && alias lt='eza --tree --level=2 --icons'
 alias lsa="ls -a"
@@ -544,32 +543,71 @@ fi
 # Persist each tmux pane's last submitted command and current ZLE edit buffer.
 source_if_exists "$HOME/.zsh/tmux-workspace-resurrect.zsh"
 
-# Focus-mode agent launchers.
-#
-# Deliberately NOT named `claude`/`pi`. Automated agents (pi subagent tmux
-# panes, cron/AFK agents) invoke the bare binaries and must never inherit
-# this personal system prompt or --dangerously-skip-permissions. Opting in
-# under a distinct name makes bleed impossible by construction rather than
-# by detecting the caller. Prompt source: dotfiles/agents/communication.md.
-#
-# Both degrade to the plain binary when the prompt file isn't stowed yet
-# (fresh machine, headless worker mid-provision).
+# Focus-mode agent launchers. Keep the Claude function as a stable delegate so
+# launcher changes take effect from the tracked executable after one shell reload,
+# rather than remaining frozen in every long-lived tmux shell.
 claudef() {
-  local p="$HOME/.claude/communication.md"
-  if [[ -r $p ]]; then
-    command claude --dangerously-skip-permissions \
-      --append-system-prompt-file "$p" \
-      --append-subagent-system-prompt "$(<"$p")" "$@"
-  else
-    command claude --dangerously-skip-permissions "$@"
-  fi
+  command "$HOME/.local/bin/claudef" "$@"
 }
 
 pif() {
-  local p="$HOME/.pi/agent/communication.md"
-  if [[ -r $p ]]; then
-    command pi --append-system-prompt "$p" "$@"
+  local profile="$HOME/.config/pif"
+  local native="$HOME/.pi/agent"
+  local prompt_link="$profile/communication.md"
+  local agents_dir=""
+  mkdir -p "$profile" "$native/sessions" "$native/npm" "$native/git"
+
+  if [[ -r "$prompt_link" ]]; then
+    agents_dir="$(dirname "$(realpath "$prompt_link")")"
+  fi
+
+  # Pi couples configuration and runtime state under PI_CODING_AGENT_DIR.
+  # Keep focus configuration in pif while redirecting mutable state to native Pi.
+  local name
+  for name in auth.json models-store.json trust.json pi-debug.log; do
+    if [[ -L "$profile/$name" ]]; then
+      ln -sfn "$native/$name" "$profile/$name"
+    elif [[ ! -e "$profile/$name" ]]; then
+      ln -s "$native/$name" "$profile/$name"
+    fi
+  done
+  for name in npm git; do
+    if [[ -L "$profile/$name" ]]; then
+      ln -sfn "$native/$name" "$profile/$name"
+    elif [[ ! -e "$profile/$name" ]]; then
+      ln -s "$native/$name" "$profile/$name"
+    fi
+  done
+
+  local prompt_args=()
+  if [[ -r "$agents_dir/communication.md" ]]; then
+    prompt_args+=(--append-system-prompt "$agents_dir/communication.md")
+  fi
+
+  PI_CODING_AGENT_DIR="$profile" \
+    PI_CODING_AGENT_SESSION_DIR="$native/sessions" \
+    command pi "${prompt_args[@]}" "$@"
+}
+
+# Run Codex with unrestricted execution and the same canonical agent rules
+# as claudef and pif. JSON strings are valid TOML basic strings, so this keeps
+# arbitrary Markdown newlines and quotes intact in the config override.
+codexf() {
+  local prompt_file="${DOTFILES:-}/agents/communication.md"
+  local instructions=""
+  local instructions_toml=""
+
+  if [[ -n "${DOTFILES:-}" && -r "$prompt_file" ]]; then
+    instructions="$(<"$prompt_file")"$'\n'
+  fi
+
+  if [[ -n "$instructions" ]]; then
+    instructions_toml="$(printf '%s' "$instructions" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')" || return
+    command codex \
+      --dangerously-bypass-approvals-and-sandbox \
+      -c "developer_instructions=$instructions_toml" \
+      "$@"
   else
-    command pi "$@"
+    command codex --dangerously-bypass-approvals-and-sandbox "$@"
   fi
 }

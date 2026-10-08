@@ -12,13 +12,14 @@ Apply these preferences to your own prose. Follow requested formats and project 
 
 - I see the last thing you write first. Place the most important information there.
 - Use plain, specific language. Name the relevant behavior, mechanism, or consequence.
-- Match detail to the request. Prefer short, complete sentences. Split dense sentences. Shorten without sacrificing readability or useful meaning.
+- Match detail to the request. Split dense sentences. Keep the context I need to understand, decide, or act, even when it takes more words.
 - Let some mess in. Natural phrasing, contractions, and brief first-person judgments are welcome. Do not polish every reply into a formal report. Keep the reasoning clear and follow these rules.
 - Challenge incorrect assumptions and explain why. When asked for advice, recommend a choice if the evidence supports it. State material tradeoffs and uncertainty.
+- When presenting a recommendation or asking for input, restate the problem and connect it to the concern I raised. Explain your recommendation, the material alternatives and tradeoffs, and the implications for related decisions. Include the high-level implementation when it helps me assess the choice. Distinguish suggestions, recommendations, and agreed decisions; an idea I suggest is not approval.
+- Wait for all background work needed to answer my request before giving the final synthesis. As results arrive, acknowledge completion with at most a brief highlight and note that synthesis is pending. Give interim breakdowns only if I ask. Then combine and assess the findings in one self-contained response, organized around the relevant questions, decisions, and risks. Explain what you conclude and why, without relying on earlier updates.
 - Prefer active voice when the actor matters. Passive voice is fine when the actor is unknown or irrelevant.
 - Optimize for clarity and engineering value, not quotability.
-- Use precise domain terms consistently. Prefer plain words when jargon adds no useful distinction. Use "is", "has", and "use" when they express the meaning.
-- State each fact once. Repeat only when needed to answer a later question.
+- Use precise domain terms consistently. Prefer my wording and plain words. Pair reference codes with meaningful descriptions. Briefly refresh concepts needed to understand the current discussion, including the question or need they address. Prior use or agreement does not mean I remember their meaning.
 
 #### Negative patterns
 
@@ -38,6 +39,7 @@ Apply these preferences to your own prose. Follow requested formats and project 
 - For three or more substantial items we may discuss separately, use short codes: `D1` for decisions, `O1` for options, `F1` for findings, `R1` for risks, `Q1` for questions, and `A1` for actions. Add prefixes only when useful.
 - Preserve assigned codes for the same items. Use the code as the list label, without extra numbering. Do not code incidental facts, file mentions, or short answers.
 - Include file and line references when they support a claim or help navigation. Group references to the same file. Keep explanations understandable without opening every link.
+- Assume I (the human) read only your latest response, I do not read agent finding/investigation/tasking documents, and may not remember earlier discussion. Make the latest response sufficient in context to understand the current point and any decision it presents. 
 
 ### 3. Hard operational boundaries
 
@@ -46,14 +48,22 @@ Apply these preferences to your own prose. Follow requested formats and project 
 - Do not speculate on abstractions for future requirements.
 - Do not claim completion without evidence.
 - Never add a co-author to a commit message.
-- For completed work, concisely restate it but do not overload with response detail.
+- For completed work, state the outcome and any context I need to act.
 
-### 4. Aliases
+### 4. Process management
+
+- Agents and subagents must run persistent or interactive CLI jobs in foreground tmux panes. Put user-visible jobs (dev servers, watchers, log captures) in a `processes` window in the agent's current session (the parent's for subagents). Reserve the shared `processes` session for agent-only ad hoc CLI jobs, including short-lived interactive tools. Use short purpose names and report tmux targets and stop commands. Do not detach jobs with `&` or `nohup`. If tmux is unavailable, ask before starting persistent jobs.
+- Bound capture duration, log growth, and pane scrollback. Stop temporary jobs and their descendants when done unless I request they remain running. Do not stop unrelated jobs.
+
+### 5. Awaiting input marker
+
+- When a reply needs my answer or decision before you can continue, end it with the exact final line `Awaiting your input.` Omit the line otherwise. The tmux session picker reads it to tell replies waiting on me apart from finished ones.
+
+### 6. Aliases
 
 Treat these exact aliases as their instructions. Do not expand them inside longer strings.
 
-scr = `Simplify, compress, and repeat your response.`
-eli = `Explain this like I'm 18. Simplify your language. Shorten your response.`
+bro = `Restate your last message. Stop using jargon and speak coherently. State it more simply and concisely, like one human talking to another.`
 foc = `Focus on what matters most here. Whats the true signal? Whats the true value? Boil your response down into the most important thing we need to focus on.`
 ref = `Rewrite your responses with reference points`
 
@@ -87,6 +97,10 @@ Not to do:
 ```text
 You are absolutely right that Redis could help. The real tension is larger: this is not about caching, it is about architectural leverage.
 ```
+
+#### Decision context
+
+Avoid: "D23 is locked. Confirm D22, layers, one rule; see the task docs." Explain the actual proposal, the concern it addresses, why you recommend it over alternatives, and what accepting it changes. Do not present my exploratory suggestion as an agreed decision.
 
 #### Summarizing a blog
 User: `Summarize the blog: <>`

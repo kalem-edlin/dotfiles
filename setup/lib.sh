@@ -38,22 +38,26 @@
 #     absolute symlinks (which stow refuses to adopt) and symlinks pointing
 #     elsewhere are removed, so stow can recreate them relative.
 #
+#   cleanup_focus_agent_links
+#     Removes obsolete Claude/Pi focus links and retired Codex config links
+#     when they point into this repository. Mutable runtime files remain.
+#
 #   stow_packages <package> [<package> ...]
 #     Runs `stow --no-folding --restow -d "$DOTFILES_DIR" -t "$HOME"` for
 #     each named package that exists in this repo. Fails (nonzero return)
 #     on the first stow error — never swallowed.
 #
 #   install_tmux_plugins
-#     Clones/updates TPM, then pins tmux-sessionx to commit
-#     $TMUX_SESSIONX_PIN and tmux-resurrect to commit $TMUX_RESURRECT_PIN
-#     (single authority for each pin) BEFORE running TPM's install_plugins
-#     — TPM's own clone helper runs `git clone -b <ref> --single-branch`,
-#     and -b never accepts a raw commit SHA, so on a fresh install TPM's
-#     attempt to clone either plugin always fails and install_plugins exits
-#     nonzero before ever reaching a fallback placed after it. Pre-cloning/
-#     checking out each pin first makes TPM's plugin_already_installed
-#     check short-circuit its own broken clone attempt for those two
-#     plugins, while every other plugin still goes through TPM normally and
+#     Clones/updates TPM, then pins tmux-resurrect to commit
+#     $TMUX_RESURRECT_PIN (single authority for the pin) BEFORE running
+#     TPM's install_plugins — TPM's own clone helper runs
+#     `git clone -b <ref> --single-branch`, and -b never accepts a raw
+#     commit SHA, so on a fresh install TPM's attempt to clone the plugin
+#     always fails and install_plugins exits nonzero before ever reaching a
+#     fallback placed after it. Pre-cloning/checking out the pin first makes
+#     TPM's plugin_already_installed check short-circuit its own broken
+#     clone attempt for that plugin, while every other plugin still goes
+#     through TPM normally and
 #     install_plugins FAILS (nonzero return) — same as before — if it exits
 #     nonzero for any genuine reason. Immediately after pinning
 #     tmux-resurrect, idempotently applies
@@ -73,8 +77,15 @@
 #     also FATAL on genuine apply failure. Afterwards asserts
 #     ~/.config/tmux/plugins/tmux-resurrect/scripts/save.sh exists and is
 #     executable, and that the repo-owned local-plugins entrypoints
-#     ($DOTFILES_DIR/tmux/local-plugins/*/*.tmux) are readable. Requires
-#     $HOME/.config/tmux to already be linked into the repo (call
+#     ($DOTFILES_DIR/tmux/local-plugins/*/*.tmux) are readable. On macOS
+#     with clang available, then builds the tmux-agent-sessions memory
+#     helper (src/pane-mem.c -> bin/pane-mem-darwin, `clang -O2`) when the
+#     binary is missing or older than its source; a compile failure only
+#     warns, since scripts/pane-mem falls back to ps. No build on Linux.
+#     Then, on macOS and Linux, builds the tmux-agent-sessions picker
+#     (picker/ -> bin/agent-picker, `go build`); a missing go or a failed
+#     build only warns.
+#     Requires $HOME/.config/tmux to already be linked into the repo (call
 #     link_config_package tmux first).
 #
 #   link_rw
@@ -82,16 +93,9 @@
 #     (tmux/local-plugins/tmux-remote-workspaces/scripts/rw) into
 #     ~/.local/bin/rw.
 #
-#   seed_codex_config
-#     Seed-if-missing: copies setup/templates/codex-config.toml to
-#     ~/.codex/config.toml ONLY if that file does not already exist. Never
-#     overwrites an existing config.toml. codex/.codex/ (the stowed package)
-#     deliberately ships no config.toml of its own — codex writes
-#     machine-specific state (project trust entries, model migration/
-#     availability caches, marketplace timestamps) straight into that exact
-#     file, so symlinking it would guarantee permanent working-tree dirt.
-#     This is the only way codex gets its default theme/model/status-line
-#     settings on a fresh machine instead of running its first-run wizard.
+#   install_tmux_resurrect_save_timer
+#     Installs and loads the macOS launchd timer after TPM has installed
+#     tmux-resurrect. Linux workers install their systemd timer separately.
 #
 #   ensure_ssh_dirs
 #     Creates ~/.ssh and ~/.ssh/sockets (mkdir -p, then chmod 700 each —
@@ -103,12 +107,6 @@ if [ -z "${DOTFILES_DIR:-}" ]; then
   # shellcheck disable=SC2317 # reachable when this file is executed directly instead of sourced
   return 1 2>/dev/null || exit 1
 fi
-
-# Single authority for the tmux-sessionx pin. TPM can install unpinned
-# plugins on a fresh machine but cannot clone a specific commit, so this repo
-# manages that one plugin's checkout manually. Keep in sync with the
-# `@plugin 'omerxx/tmux-sessionx#...'` line in tmux/tmux.conf.
-TMUX_SESSIONX_PIN="3a1911e"
 
 # Single authority for the tmux-resurrect pin and its local patch. tmux >=
 # 3.7 sanitizes C0 control characters — including the literal tab
@@ -149,6 +147,18 @@ TMUX_RESURRECT_VALIDITY_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-save-v
 # String unique to the applied patch (the gate function it adds to
 # save.sh). Same idempotency rationale as TMUX_RESURRECT_PATCH_MARKER above.
 TMUX_RESURRECT_VALIDITY_PATCH_MARKER="resurrect_file_looks_sane"
+
+# Allows the verified wrapper to direct one save into a private staging
+# directory without mutating the live @resurrect-dir option.
+TMUX_RESURRECT_STAGING_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-staging-overrides.patch"
+TMUX_RESURRECT_STAGING_PATCH_MARKER="TMUX_RESURRECT_OVERRIDE_DIR"
+
+# Third save.sh patch, applied after the delimiter and validity patches. When
+# @resurrect-processes is false, restore never reads pane full commands, yet
+# upstream still invokes its global ps strategy once per pane. This patch
+# reads the option once and leaves field 11 empty in that mode.
+TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH="$DOTFILES_DIR/setup/patches/tmux-resurrect-skip-process-capture.patch"
+TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH_MARKER="configured_processes"
 
 # Third local patch against the same pin, independent of the two save.sh
 # patches above (it touches scripts/restore.sh only, so apply order against
@@ -277,6 +287,44 @@ backup_conflicts() {
 $(find "$DOTFILES_DIR/$package" -type f 2>/dev/null)
 EOF
   done
+  return 0
+}
+
+# The ~/.claude/ccline links are not listed: the claudef launcher creates
+# them at the same paths on purpose.
+cleanup_focus_agent_links() {
+  old_targets="
+$HOME/.claude/settings.json
+$HOME/.claude/communication.md
+$HOME/.pi/agent/settings.json
+$HOME/.pi/agent/communication.md
+$HOME/.pi/agent/themes/personal.json
+$HOME/.pi/agent/extensions/statusline.ts
+$HOME/.pi/agent/extensions/tmux-workspace-resurrect.ts
+$HOME/.codex/skills/unslop
+$HOME/.codex/hooks.json
+$HOME/.codex/communication.md
+$HOME/.codex/config.toml
+$HOME/.codex
+"
+
+  printf '%s\n' "$old_targets" | while IFS= read -r target; do
+    [ -n "$target" ] || continue
+    [ -L "$target" ] || continue
+    resolved="$(cd "$(dirname "$target")" 2>/dev/null && realpath "$(basename "$target")" 2>/dev/null || true)"
+    link_text="$(readlink "$target")"
+    case "$resolved:$link_text" in
+      "$DOTFILES_DIR"/*:*|*:*/claude/.claude/*|*:*/pi/.pi/agent/*|*:*/codex/.codex/*|*:*/codex/.codex)
+        echo "  -> removing obsolete focus link ${target#"$HOME/"}"
+        rm "$target"
+        ;;
+    esac
+  done
+
+  rmdir "$HOME/.claude/commands" "$HOME/.claude/ccline/themes" \
+    "$HOME/.pi/agent/extensions" "$HOME/.pi/agent/themes" \
+    "$HOME/.codex/skills/unslop" "$HOME/.codex/skills" \
+    "$HOME/.codex" 2>/dev/null || true
 }
 
 stow_packages() {
@@ -290,7 +338,6 @@ stow_packages() {
 
 install_tmux_plugins() {
   tpm_dir="$HOME/.config/tmux/plugins/tpm"
-  sessionx_dir="$HOME/.config/tmux/plugins/tmux-sessionx"
   resurrect_dir="$HOME/.config/tmux/plugins/tmux-resurrect"
   resurrect_save="$resurrect_dir/scripts/save.sh"
 
@@ -303,53 +350,12 @@ install_tmux_plugins() {
 
   # TPM can't clone commit-pinned plugins on a fresh install (its clone
   # helper does `git clone -b <ref> --single-branch`, and -b never accepts a
-  # raw SHA) — handle tmux-sessionx's pin manually, and do it BEFORE calling
-  # TPM's install_plugins below so TPM's plugin_already_installed check sees
-  # the directory already present and skips its own (always-failing) clone
-  # attempt for this plugin. Every other plugin still goes through TPM
-  # untouched.
-  if [ ! -d "$sessionx_dir" ]; then
-    echo "  -> installing tmux-sessionx (pinned commit $TMUX_SESSIONX_PIN)"
-    if ! git clone https://github.com/omerxx/tmux-sessionx "$sessionx_dir"; then
-      echo "ERROR: failed to clone tmux-sessionx." >&2
-      return 1
-    fi
-    if ! (cd "$sessionx_dir" && git checkout "$TMUX_SESSIONX_PIN"); then
-      echo "ERROR: failed to check out tmux-sessionx pin $TMUX_SESSIONX_PIN." >&2
-      return 1
-    fi
-  else
-    # Idempotent re-pin: a prior run (or a manual/TPM update-all) may have
-    # left this checkout on a different commit or in a detached HEAD past
-    # the pin. Re-check-out the pin only if we're not already sitting on it
-    # — cheap on the common case, and detached HEAD is fine either way
-    # since we always check out a commit, never a branch.
-    current_rev="$(cd "$sessionx_dir" && git rev-parse HEAD 2>/dev/null)"
-    pinned_rev="$(cd "$sessionx_dir" && git rev-parse "$TMUX_SESSIONX_PIN" 2>/dev/null)"
-    if [ -z "$pinned_rev" ]; then
-      echo "  -> fetching tmux-sessionx (pin $TMUX_SESSIONX_PIN not present locally)"
-      if ! (cd "$sessionx_dir" && git fetch --quiet origin "$TMUX_SESSIONX_PIN"); then
-        echo "ERROR: failed to fetch tmux-sessionx pin $TMUX_SESSIONX_PIN." >&2
-        return 1
-      fi
-      pinned_rev="$(cd "$sessionx_dir" && git rev-parse "$TMUX_SESSIONX_PIN" 2>/dev/null)"
-    fi
-    if [ "$current_rev" != "$pinned_rev" ] || [ -z "$current_rev" ]; then
-      echo "  -> checking out tmux-sessionx pin $TMUX_SESSIONX_PIN (was $current_rev)"
-      if ! (cd "$sessionx_dir" && git checkout "$TMUX_SESSIONX_PIN"); then
-        echo "ERROR: failed to check out tmux-sessionx pin $TMUX_SESSIONX_PIN." >&2
-        return 1
-      fi
-    else
-      echo "  -> tmux-sessionx already at pin $TMUX_SESSIONX_PIN"
-    fi
-  fi
-
-  # Same TPM limitation, same workaround, for tmux-resurrect: pin it to the
-  # exact commit setup/patches/tmux-resurrect-tmux37-delimiter.patch was
-  # generated against, BEFORE calling TPM's install_plugins below, so TPM's
-  # plugin_already_installed check skips its own (always-failing) clone
-  # attempt for this plugin too.
+  # raw SHA) — so pin tmux-resurrect manually to the exact commit
+  # setup/patches/tmux-resurrect-tmux37-delimiter.patch was generated
+  # against, and do it BEFORE calling TPM's install_plugins below so TPM's
+  # plugin_already_installed check sees the directory already present and
+  # skips its own (always-failing) clone attempt for this plugin. Every
+  # other plugin still goes through TPM untouched.
   if [ ! -d "$resurrect_dir" ]; then
     echo "  -> installing tmux-resurrect (pinned commit $TMUX_RESURRECT_PIN)"
     if ! git clone https://github.com/tmux-plugins/tmux-resurrect "$resurrect_dir"; then
@@ -361,8 +367,11 @@ install_tmux_plugins() {
       return 1
     fi
   else
-    # Idempotent re-pin — see the identical tmux-sessionx comment above for
-    # rationale (detached HEAD is fine; we always check out a commit).
+    # Idempotent re-pin: a prior run (or a manual/TPM update-all) may have
+    # left this checkout on a different commit or in a detached HEAD past
+    # the pin. Re-check-out the pin only if we're not already sitting on it
+    # — cheap on the common case, and detached HEAD is fine either way
+    # since we always check out a commit, never a branch.
     current_rev="$(cd "$resurrect_dir" && git rev-parse HEAD 2>/dev/null)"
     pinned_rev="$(cd "$resurrect_dir" && git rev-parse "$TMUX_RESURRECT_PIN" 2>/dev/null)"
     if [ -z "$pinned_rev" ]; then
@@ -439,6 +448,41 @@ install_tmux_plugins() {
     echo "  -> tmux-resurrect save-validity gate patch applied"
   fi
 
+  resurrect_helpers="$resurrect_dir/scripts/helpers.sh"
+  if grep -q "$TMUX_RESURRECT_STAGING_PATCH_MARKER" "$resurrect_helpers" 2>/dev/null; then
+    echo "  -> tmux-resurrect staging override patch already applied"
+  else
+    if [ ! -f "$TMUX_RESURRECT_STAGING_PATCH" ] ||
+      ! (cd "$resurrect_dir" && git apply --check "$TMUX_RESURRECT_STAGING_PATCH") 2>/dev/null ||
+      ! (cd "$resurrect_dir" && git apply "$TMUX_RESURRECT_STAGING_PATCH"); then
+      echo "ERROR: tmux-resurrect staging override patch could not be applied against pin $TMUX_RESURRECT_PIN." >&2
+      return 1
+    fi
+    echo "  -> tmux-resurrect staging override patch applied"
+  fi
+
+  if grep -q "$TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH_MARKER" "$resurrect_save" 2>/dev/null; then
+    echo "  -> tmux-resurrect process-capture bypass patch already applied"
+  else
+    if [ ! -f "$TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH" ]; then
+      echo "ERROR: tmux-resurrect process-capture bypass patch not found: $TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH" >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply --check "$TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH") 2>/dev/null; then
+      echo "ERROR: tmux-resurrect process-capture bypass patch does not apply cleanly against pin $TMUX_RESURRECT_PIN (checked out at $resurrect_dir). Refusing to continue with the costly per-pane process scan." >&2
+      return 1
+    fi
+    if ! (cd "$resurrect_dir" && git apply "$TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH"); then
+      echo "ERROR: tmux-resurrect process-capture bypass patch check passed but apply failed." >&2
+      return 1
+    fi
+    if ! grep -q "$TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH_MARKER" "$resurrect_save" 2>/dev/null; then
+      echo "ERROR: tmux-resurrect process-capture bypass patch applied but marker '$TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH_MARKER' not found in $resurrect_save afterwards." >&2
+      return 1
+    fi
+    echo "  -> tmux-resurrect process-capture bypass patch applied"
+  fi
+
   # Apply the rw client-guard patch (restore.sh only; order-independent of
   # the two save.sh patches). A worker without it can steal the very client
   # whose attach started the server (continuum auto-restore switch-client),
@@ -473,6 +517,23 @@ install_tmux_plugins() {
     return 1
   fi
 
+  # Keep hidden Treemux sidebars quiet; reject upstream drift rather than
+  # silently reinstalling the broken polling implementation.
+  local treemux_dir="$HOME/.config/tmux/plugins/treemux"
+  local treemux_patch="$DOTFILES_DIR/setup/patches/treemux-polling.patch"
+  if git -C "$treemux_dir" apply --reverse --check "$treemux_patch" 2>/dev/null; then
+    echo "  -> Treemux polling patch already applied"
+  elif git -C "$treemux_dir" apply --check "$treemux_patch"; then
+    if ! git -C "$treemux_dir" apply "$treemux_patch"; then
+      echo "ERROR: Treemux polling patch could not be applied." >&2
+      return 1
+    fi
+    echo "  -> Treemux polling patch applied"
+  else
+    echo "ERROR: Treemux polling patch does not match the installed checkout; review upstream changes." >&2
+    return 1
+  fi
+
   if [ ! -x "$resurrect_save" ]; then
     echo "ERROR: tmux-resurrect save entrypoint missing or not executable: $resurrect_save" >&2
     return 1
@@ -492,6 +553,41 @@ install_tmux_plugins() {
     return 1
   fi
 
+  # tmux-agent-sessions memory helper (macOS only; Linux uses the ps
+  # fallback in scripts/pane-mem). Rebuild only when the binary is missing
+  # or older than its source. A failed build is not fatal: pane-mem falls
+  # back to ps when bin/pane-mem-darwin is absent.
+  local pane_mem_src pane_mem_bin
+  pane_mem_src="$DOTFILES_DIR/tmux/local-plugins/tmux-agent-sessions/src/pane-mem.c"
+  pane_mem_bin="$DOTFILES_DIR/tmux/local-plugins/tmux-agent-sessions/bin/pane-mem-darwin"
+  if [ "$(uname -s)" = "Darwin" ] && command -v clang >/dev/null 2>&1 && [ -f "$pane_mem_src" ]; then
+    if [ ! -x "$pane_mem_bin" ] || [ "$pane_mem_src" -nt "$pane_mem_bin" ]; then
+      if mkdir -p "$(dirname "$pane_mem_bin")" &&
+        clang -O2 -o "$pane_mem_bin" "$pane_mem_src"; then
+        echo "  -> pane-mem helper built"
+      else
+        echo "WARNING: pane-mem helper build failed; tmux-agent-sessions will use the ps fallback." >&2
+      fi
+    else
+      echo "  -> pane-mem helper up to date"
+    fi
+  fi
+
+  # tmux-agent-sessions picker (Go module in picker/ -> bin/agent-picker),
+  # macOS and Linux. Always rebuilt: Go's build cache makes re-runs cheap.
+  # A missing go or a failed build is not fatal, only the picker is absent.
+  local picker_dir
+  picker_dir="$DOTFILES_DIR/tmux/local-plugins/tmux-agent-sessions/picker"
+  if [ -f "$picker_dir/go.mod" ]; then
+    if ! command -v go >/dev/null 2>&1; then
+      echo "WARNING: go not found; tmux-agent-sessions picker (bin/agent-picker) not built." >&2
+    elif go -C "$picker_dir" build -trimpath -ldflags='-s -w' -o ../bin/agent-picker .; then
+      echo "  -> agent-picker built"
+    else
+      echo "WARNING: agent-picker build failed; tmux-agent-sessions picker unavailable." >&2
+    fi
+  fi
+
   echo "  -> tmux plugins OK (TPM, tmux-resurrect save entrypoint, local-plugins entrypoints)"
 }
 
@@ -501,23 +597,56 @@ link_rw() {
   echo "  -> linked rw -> ~/.local/bin/rw"
 }
 
-seed_codex_config() {
-  template="$DOTFILES_DIR/setup/templates/codex-config.toml"
-  target="$HOME/.codex/config.toml"
+install_tmux_resurrect_save_timer() {
+  local templates_dir wrapper label launch_agents destination state_dir
+  local tmux_bin save_script rendered
+  [ "$(uname -s)" = "Darwin" ] || return 0
 
-  if [ ! -f "$template" ]; then
-    echo "  (warn) codex config template not found: $template (skipping seed)"
-    return 0
+  templates_dir="$DOTFILES_DIR/setup/templates"
+  wrapper="$templates_dir/tmux-resurrect-save.sh"
+  label="com.kalem.tmux-resurrect-save"
+  launch_agents="$HOME/Library/LaunchAgents"
+  destination="$launch_agents/$label.plist"
+  state_dir="$HOME/.local/state/tmux-workspace-resurrect"
+  tmux_bin="$(command -v tmux 2>/dev/null || true)"
+  save_script="$HOME/.config/tmux/plugins/tmux-resurrect/scripts/save.sh"
+
+  [ -x "$tmux_bin" ] || {
+    echo "ERROR: tmux is unavailable; cannot install the verified save timer" >&2
+    return 1
+  }
+  [ -x "$wrapper" ] || {
+    echo "ERROR: timer wrapper is not executable: $wrapper" >&2
+    return 1
+  }
+  [ -x "$save_script" ] || {
+    echo "ERROR: tmux-resurrect save entrypoint is unavailable: $save_script" >&2
+    return 1
+  }
+
+  mkdir -p "$launch_agents" "$state_dir"
+  rendered="$(mktemp "$launch_agents/.tmux-resurrect-save.XXXXXX")"
+  sed \
+    -e "s#__WRAPPER_PATH__#$wrapper#g" \
+    -e "s#__LOG_PATH__#$state_dir/launchd-save.log#g" \
+    -e "s#__TMUX_BIN__#$tmux_bin#g" \
+    "$templates_dir/$label.plist" >"$rendered"
+  if ! plutil -lint "$rendered" >/dev/null; then
+    rm -f "$rendered"
+    echo "ERROR: rendered tmux save timer plist is invalid" >&2
+    return 1
   fi
+  mv "$rendered" "$destination"
+  chmod 0644 "$destination"
 
-  mkdir -p "$HOME/.codex"
+  launchctl bootout "gui/$(id -u)" "$destination" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$destination"
+  launchctl print "gui/$(id -u)/$label" >/dev/null
 
-  if [ -e "$target" ]; then
-    echo "  -> ~/.codex/config.toml already exists, leaving it alone"
-  else
-    cp "$template" "$target"
-    echo "  -> seeded ~/.codex/config.toml from template (codex owns this file from now on)"
-  fi
+  env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    TMUX_RESURRECT_SAVE_TMUX_BIN="$tmux_bin" \
+    "$wrapper" --check >/dev/null
+  echo "  -> loaded $label (verified save every 5 minutes)"
 }
 
 ensure_ssh_dirs() {

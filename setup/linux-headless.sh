@@ -537,14 +537,9 @@ install_headless_dotfiles() {
 
   ensure_ssh_dirs
 
-  backup_conflicts claude codex eza git pi ssh vim zsh
-  stow_packages claude codex eza git pi ssh vim zsh
-
-  # codex ships no config.toml in the stowed package (codex writes project
-  # trust entries straight into that file, so symlinking it would dirty the
-  # repo on every run); seed a starter one only if none exists yet. See
-  # setup/lib.sh's seed_codex_config.
-  seed_codex_config
+  cleanup_focus_agent_links
+  backup_conflicts claude eza git pi ssh vim zsh
+  stow_packages claude eza git pi ssh vim zsh
 
   link_rw
 
@@ -565,8 +560,7 @@ install_tmux_resurrect_save_timer() {
   # autosave is a status-line `#()` interpolation that only fires while a
   # client renders it — a fully detached worker tmux server never
   # autosaves otherwise. See setup/templates/tmux-resurrect-save.sh and
-  # docs/tasks/tmux-remote-workspaces/initial-plan.md, "Remote-side tmux
-  # durability".
+  # docs/tmux-remote-workspaces.md, "Persistence and reconciliation".
   echo "Configuring tmux-resurrect save timer (systemd --user)..."
 
   # check_systemd_support already ran (and would have exited) before any
@@ -653,7 +647,7 @@ verify_commands() {
   local nvim_version nvim_major nvim_minor
   local required_commands=(
     zsh git git-lfs stow tmux nvim jq curl rsync tar
-    node npm pi codex claude ob
+    node npm pi codex claude ob go
   )
 
   if [[ "${INSTALL_TAILSCALE:-1}" = "1" ]]; then
@@ -708,7 +702,7 @@ verify_commands() {
 # child-process PATH boundary — fnm/Node changes made inside a child process
 # do not propagate back to this script) -> Stripe CLI (npm fallback now
 # has a working, activated fnm) -> python.sh / neovim.sh / obsidian.sh
-# (obsidian.sh activates its own fnm too, so it works standalone) ->
+# (obsidian.sh activates its own fnm too, so it works standalone) -> go.sh ->
 # dotfiles via lib.sh (stow, TPM, rw, ssh dirs) -> systemd save timer + fatal
 # linger verification -> internal verify_commands -> success banner (only
 # reachable if everything above succeeded).
@@ -749,6 +743,9 @@ install_stripe_cli || echo "warn: Stripe CLI installation failed (optional; not 
 "$DOTFILES_DIR/setup/python.sh"
 "$DOTFILES_DIR/setup/neovim.sh"
 "$DOTFILES_DIR/setup/obsidian.sh"
+# Before install_headless_dotfiles: install_tmux_plugins builds the
+# tmux-agent-sessions picker with go.
+"$DOTFILES_DIR/setup/go.sh"
 
 install_headless_dotfiles
 install_tmux_resurrect_save_timer

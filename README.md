@@ -40,15 +40,20 @@ shared CLI/dotfile/provider contract both consume.
 The Linux lane uses distro packages instead of Homebrew, then reuses the shared
 setup scripts and dotfiles for:
 
-- Stow-managed configs: `claude`, `codex`, `eza`, `git`, `pi`, `ssh`, `vim`,
-  `worktrees`, `zsh`
+- Stow-managed configs: `claude`, `eza`, `git`, `pi`, `ssh`, `vim`,
+  `zsh`
 - Direct `~/.config` links: `nvim`, `tmux`
 - CLI tooling: zsh, tmux, Neovim, Git/Git LFS, Stow, fd/ripgrep/bat/fzf/jq,
-  Python/pyenv/pipx, Node/fnm/npm globals, Stripe CLI, Claude Code, Pi tools,
-  and `ob`
+  Python/pyenv/pipx, Node/fnm/npm globals, Go (pinned upstream tarball, builds
+  the tmux-agent-sessions picker), Stripe CLI, Claude Code, Codex CLI, Pi
+  tools, and `ob`
 - Server connectivity/services: Docker and Tailscale by default. Set
   `INSTALL_TAILSCALE=0` only for a deliberately public/LAN-only worker;
   Tailscale authentication (`sudo tailscale up`) remains manual.
+
+Codex CLI remains installed, but this repo manages no Codex config or hooks
+and does not seed `~/.codex/config.toml`. The `codexf` launcher loads shared
+instructions directly from `$DOTFILES/agents/communication.md`.
 
 GUI/macOS-only packages are intentionally skipped on Linux: AeroSpace,
 SketchyBar, Ghostty, KindaVim, macOS defaults, fonts/casks, and login items.
@@ -62,6 +67,20 @@ plus a set of guarded conveniences that degrade silently when absent (eza,
 bat/batcat, fd/fdfind, zsh-autosuggestions), rather than every package listed
 in `Brewfile.headless`. Package selection lives in `setup/linux-headless.sh`,
 because package names differ across apt, dnf, pacman, zypper, and apk.
+
+## System documentation
+
+- [`docs/tasks/file-mentions.md`](docs/tasks/file-mentions.md) covers `@` file
+  completion in Neovim Markdown and text buffers, including the tool research.
+- [`docs/focus-agents.md`](docs/focus-agents.md) explains the isolated
+  `claudef` and `pif` profiles.
+- [`docs/tmux-remote-workspaces.md`](docs/tmux-remote-workspaces.md) records
+  the completed remote-workspace design and its implementation map.
+- [`docs/upstream-sources.md`](docs/upstream-sources.md) defines how local
+  adaptations track and review upstream changes.
+- [`docs/headless-vs-local.md`](docs/headless-vs-local.md) and
+  [`docs/headless-workers.md`](docs/headless-workers.md) cover installation
+  parity and worker operations.
 
 ## Commands
 

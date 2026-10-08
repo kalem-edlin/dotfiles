@@ -2,7 +2,7 @@
 	setup-linux-headless setup-linux-headless-run headless-doctor check-tool-parity \
 	install install-headless brew brew-headless brew-cleanup brew-cleanup-force \
 	brew-cleanup-headless brew-cleanup-headless-force \
-	neovim node python macos obsidian obsidian-cli misc misc-headless uninstall reload help
+	neovim node python macos helium obsidian obsidian-cli lucide-font misc misc-headless uninstall reload help
 
 # Dotfiles directory (absolute path). Resolved from this Makefile's own
 # location (not the caller's cwd) so `make -C somewhere/else -f
@@ -20,7 +20,7 @@ endif
 CONFIG_PACKAGES := aerospace ghostty nvim sketchybar tmux
 
 # Packages that use stow (contain dotfiles for ~) (full local install)
-STOW_PACKAGES := claude codex eza git kindavim pi ssh vim zsh
+STOW_PACKAGES := claude eza git kindavim pi ssh vim zsh
 
 # Headless variants: CLI-only subsets of the above (no aerospace, ghostty,
 # sketchybar, kindavim — GUI/local-specific). Kept as explicit lists rather
@@ -28,7 +28,7 @@ STOW_PACKAGES := claude codex eza git kindavim pi ssh vim zsh
 # between local and headless package sets stays visible here, not hidden in
 # logic. See docs/headless-vs-local.md for the shared-contract design.
 HEADLESS_CONFIG_PACKAGES := nvim tmux
-HEADLESS_STOW_PACKAGES := claude codex eza git pi ssh vim zsh
+HEADLESS_STOW_PACKAGES := claude eza git pi ssh vim zsh
 
 # App settings paths
 CURSOR_USER_DIR := $(HOME)/Library/Application Support/Cursor/User
@@ -42,7 +42,7 @@ setup:
 	@echo "Requesting sudo access..."
 	@sudo -n true 2>/dev/null || sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew neovim node obsidian python macos install misc
+	@$(MAKE) brew lucide-font helium neovim node obsidian python macos install misc
 	@echo ""
 	@echo "✓ Setup complete!"
 	@echo ""
@@ -142,16 +142,14 @@ install:
 	@mkdir -p ~/.config
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; for pkg in $(CONFIG_PACKAGES); do link_config_package "$$pkg"; done'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; install_tmux_plugins'
+	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; install_tmux_resurrect_save_timer'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; ensure_ssh_dirs'
+	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; cleanup_focus_agent_links'
 	@# Back up and REMOVE any existing files that would conflict with stow.
 	@# This ensures dotfiles repo is authoritative; after stowing, app changes
 	@# will flow back to the repo as git unstaged changes via the symlinks.
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; backup_conflicts $(STOW_PACKAGES)'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; stow_packages $(STOW_PACKAGES)'
-	@# codex ships no config.toml in the stowed package (codex writes project
-	@# trust entries straight into that file, so symlinking it would dirty the
-	@# repo on every run); seed a starter one only if none exists yet.
-	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; seed_codex_config'
 	@# rw (tmux-remote-workspaces dispatcher) lives inside the tmux plugin;
 	@# expose it on PATH so it can be run outside tmux keybindings too
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; link_rw'
@@ -241,10 +239,11 @@ install-headless:
 	@mkdir -p ~/.config
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; for pkg in $(HEADLESS_CONFIG_PACKAGES); do link_config_package "$$pkg"; done'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; install_tmux_plugins'
+	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; install_tmux_resurrect_save_timer'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; ensure_ssh_dirs'
+	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; cleanup_focus_agent_links'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; backup_conflicts $(HEADLESS_STOW_PACKAGES)'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; stow_packages $(HEADLESS_STOW_PACKAGES)'
-	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; seed_codex_config'
 	@DOTFILES_DIR="$(DOTFILES)" bash -euo pipefail -c '. "$(DOTFILES)/setup/lib.sh"; link_rw'
 	@chmod 600 "$(DOTFILES)/ssh/.ssh/config" 2>/dev/null || true
 	@echo "✓ Headless dotfiles installed!"
@@ -401,6 +400,12 @@ macos:
 	@chmod +x setup/macos.sh
 	@./setup/macos.sh
 
+# Apply Helium browser settings (helium/settings.json) to its Local State/Preferences
+helium:
+	@echo "Configuring Helium..."
+	@chmod +x setup/helium.sh
+	@./setup/helium.sh
+
 # Configure Obsidian Headless tooling
 obsidian:
 	@echo "Configuring Obsidian Headless tooling..."
@@ -409,6 +414,12 @@ obsidian:
 
 # Backward-compatible alias
 obsidian-cli: obsidian
+
+# Install the pinned Lucide icon font (tmux-agent-sessions status chips)
+lucide-font:
+	@echo "Installing Lucide font..."
+	@chmod +x setup/lucide-font.sh
+	@./setup/lucide-font.sh
 
 # Miscellaneous setup (Xcode tools, npm config, GitHub CLI check)
 misc:
@@ -433,7 +444,6 @@ reload:
 	@echo "  → cursor (restart app manually)"
 	@echo "  → kindavim (restart app manually)"
 	@echo "  → claude (restart app/CLI manually)"
-	@echo "  → codex (restart CLI and review /hooks manually)"
 	@echo "  → zsh completions"; rm -f ~/.zcompdump* 2>/dev/null || true
 	@echo "✓ Configs reloaded!"
 
@@ -460,7 +470,9 @@ help:
 	@echo "  node         Install Node.js (fnm) and global npm packages"
 	@echo "  python       Install Python (pyenv)"
 	@echo "  macos        Configure macOS system preferences"
+	@echo "  helium       Apply Helium browser settings (quit Helium first)"
 	@echo "  obsidian     Configure Obsidian Headless (ob)"
+	@echo "  lucide-font  Install the pinned Lucide icon font into ~/Library/Fonts"
 	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
 	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux)"
 	@echo "  help         Show this help message"

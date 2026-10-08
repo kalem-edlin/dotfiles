@@ -329,7 +329,7 @@ if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- required commands (current environment) --"
 fi
 
-REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob gh delta"
+REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob gh delta go"
 for cmd in $REQUIRED_CMDS; do
   if has_cmd "$cmd"; then
     c_pass "cmd:$cmd" "$(command -v "$cmd")"
@@ -475,33 +475,124 @@ check_stow_target() {
   fi
 }
 
-check_stow_target "stow:claude" "$TARGET_HOME/.claude/settings.json"
-check_stow_target "stow:codex" "$TARGET_HOME/.codex/hooks.json"
+check_stow_target "stow:claudef" "$TARGET_HOME/.local/bin/claudef" "$TARGET_HOME/.config/claudef/settings.json" "$TARGET_HOME/.config/claudef/communication.md" "$TARGET_HOME/.config/claudef/.claude-plugin/plugin.json"
+check_stow_target "stow:claude-global" "$TARGET_HOME/.claude/keybindings.json" "$TARGET_HOME/.claude/commands/plan.md"
 check_stow_target "stow:git" "$TARGET_HOME/.gitconfig"
-check_stow_target "stow:pi" "$TARGET_HOME/.pi/agent/settings.json"
+check_stow_target "stow:pif" "$TARGET_HOME/.config/pif/settings.json" "$TARGET_HOME/.config/pif/keybindings.json" "$TARGET_HOME/.config/pif/communication.md"
 check_stow_target "stow:ssh" "$TARGET_HOME/.ssh/config"
 check_stow_target "stow:vim" "$TARGET_HOME/.vimrc"
 check_stow_target "stow:zsh" "$TARGET_HOME/.zshrc" "$TARGET_HOME/.zshenv"
+
+check_native_profile_isolated() {
+  id="$1"
+  shift
+  leaked=""
+  for path in "$@"; do
+    if [ -L "$path" ]; then
+      link_text="$(readlink "$path")"
+      if under_dotfiles "$path"; then
+        leaked="$leaked $path"
+      else
+        case "$link_text" in
+          */claude/.claude/*|*/pi/.pi/agent/*) leaked="$leaked $path" ;;
+        esac
+      fi
+    fi
+  done
+  if [ -z "$leaked" ]; then
+    c_pass "$id" "native runtime paths contain no dotfiles-managed focus-only configuration"
+  else
+    c_fail "$id" "focus links remain in native runtime paths:$leaked" "$SETUP_REMEDIATION"
+  fi
+}
+
+check_native_profile_isolated "isolation:bare-claude" \
+  "$TARGET_HOME/.claude/settings.json" "$TARGET_HOME/.claude/communication.md"
+check_native_profile_isolated "isolation:bare-pi" \
+  "$TARGET_HOME/.pi/agent/settings.json" "$TARGET_HOME/.pi/agent/communication.md" \
+  "$TARGET_HOME/.pi/agent/extensions/statusline.ts" \
+  "$TARGET_HOME/.pi/agent/extensions/tmux-workspace-resurrect.ts"
+
+if [ -r "$TARGET_HOME/.pi/agent/auth.json" ]; then
+  if [ -L "$TARGET_HOME/.config/pif/auth.json" ]; then
+    c_optpass "auth:pif" "profile reads native Pi authentication through a runtime bridge"
+  else
+    c_optpass "auth:pif" "native Pi auth is available; pif creates runtime bridges on launch"
+  fi
+else
+  c_warn "auth:pif" "native Pi auth is unavailable" "run pi and authenticate, then launch pif"
+fi
+
+if has_cmd claude && claude auth status 2>/dev/null | grep -q '"loggedIn": true'; then
+  c_optpass "auth:claudef" "native Claude authentication is available to claudef"
+else
+  c_warn "auth:claudef" "native Claude authentication is unavailable" "run claude auth login"
+fi
+
+pif_bridge_missing=""
+for name in auth.json models-store.json trust.json pi-debug.log npm git; do
+  path="$TARGET_HOME/.config/pif/$name"
+  if [ ! -L "$path" ] || [ "$(readlink "$path" 2>/dev/null || true)" != "$TARGET_HOME/.pi/agent/$name" ]; then
+    pif_bridge_missing="$pif_bridge_missing $name"
+  fi
+done
+if [ -z "$pif_bridge_missing" ]; then
+  c_optpass "runtime:pif" "mutable profile paths point to native Pi runtime state"
+else
+  c_warn "runtime:pif" "runtime bridges are absent or stale:$pif_bridge_missing" "launch pif once"
+fi
+
+claude_plugin_missing=""
+for name in pyright-lsp typescript-lsp swift-lsp; do
+  cache="$TARGET_HOME/.claude/plugins/cache/claude-plugins-official/$name"
+  if [ ! -d "$cache" ] || ! find "$cache" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | grep -q .; then
+    claude_plugin_missing="$claude_plugin_missing $name"
+  fi
+done
+if [ -z "$claude_plugin_missing" ]; then
+  c_optpass "plugins:claudef" "focus LSP plugins are available in Claude's native marketplace cache"
+else
+  c_warn "plugins:claudef" "focus LSP plugin caches are unavailable:$claude_plugin_missing" "install the plugins from claude-plugins-official at user scope, then disable them for bare Claude"
+fi
+
+ccline_missing=""
+for name in config.toml models.toml themes/personal.toml; do
+  path="$TARGET_HOME/.claude/ccline/$name"
+  [ -L "$path" ] && under_dotfiles "$path" || ccline_missing="$ccline_missing $name"
+done
+if [ -z "$ccline_missing" ]; then
+  c_optpass "runtime:claudef-ccline" "focus ccline configuration is linked while ccline runtime state remains native"
+else
+  c_warn "runtime:claudef-ccline" "focus ccline links are absent or stale:$ccline_missing" "launch claudef once"
+fi
 # ===========================================================================
 # 5. Executables: rw
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
-  printf '%s\n' "-- rw / worktree executables --"
+  printf '%s\n' "-- remote workspace executable --"
 fi
 
 check_executable() {
-  # check_executable <id> <path>
+  # check_executable <id> <path> [warn]
+  # With "warn", a missing or non-executable path is WARN (optional), not FAIL.
   id="$1"
   path="$2"
+  if [ "${3:-}" = "warn" ]; then
+    exe_ok=c_optpass
+    exe_bad=c_warn
+  else
+    exe_ok=c_pass
+    exe_bad=c_fail
+  fi
   if [ -e "$path" ] || [ -L "$path" ]; then
     if [ -x "$path" ]; then
-      c_pass "$id" "$path exists and is executable"
+      "$exe_ok" "$id" "$path exists and is executable"
     else
-      c_fail "$id" "$path exists but is not executable" "chmod +x $path, or $SETUP_REMEDIATION"
+      "$exe_bad" "$id" "$path exists but is not executable" "chmod +x $path, or $SETUP_REMEDIATION"
     fi
   else
-    c_fail "$id" "$path does not exist" "$SETUP_REMEDIATION"
+    "$exe_bad" "$id" "$path does not exist" "$SETUP_REMEDIATION"
   fi
 }
 
@@ -633,18 +724,20 @@ else
   c_fail "tmux:remote-workspaces-entrypoint" "no *.tmux file found under $TMUX_CFG_DIR/local-plugins/tmux-remote-workspaces/" "$SETUP_REMEDIATION"
 fi
 
+# Built by install_tmux_plugins with go; a missing go or a failed build only
+# warns there, so a missing picker is WARN here too.
+check_executable "tmux:agent-picker" "$TMUX_CFG_DIR/local-plugins/tmux-agent-sessions/bin/agent-picker" warn
+
 # ===========================================================================
-# 7. Durability timer (headless profiles only; local relies on the laptop's
-#    rendering client + Continuum instead - a deliberate platform alternative)
+# 7. Durability timer. Local and headless machines both use an operating-
+#    system timer; status rendering never schedules persistence.
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- durability timer --"
 fi
 
-if [ "$PROFILE" = "local" ]; then
-  c_info "timer" "skipped for profile=local (laptop rendering client + Continuum covers this instead)"
-elif [ "$PROFILE" = "headless-macos" ]; then
+if [ "$PROFILE" = "local" ] || [ "$PROFILE" = "headless-macos" ]; then
   PLIST_PATH="$TARGET_HOME/Library/LaunchAgents/com.kalem.tmux-resurrect-save.plist"
 
   if launchctl print "gui/$(id -u)/com.kalem.tmux-resurrect-save" >/dev/null 2>&1; then
@@ -828,8 +921,8 @@ fi
 # 11. Provider settings write-back drift (informational / non-fatal)
 # ===========================================================================
 #
-# claude and pi stow their settings files straight into $HOME, so each
-# CLI's own runtime writes (theme changes, defaultModel updates, etc.) go
+# claudef and pif stow their settings files into isolated profile directories,
+# so each CLI's own runtime writes (theme changes, defaultModel updates, etc.) go
 # THROUGH the symlink and land back in this tracked repo as uncommitted
 # changes. That is expected CLI behavior, not a broken install, so this
 # check is a WARN via c_warn (optional_warned), never a c_fail — a worker
@@ -842,7 +935,7 @@ if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- provider settings write-back drift --"
 fi
 
-PROVIDER_SETTINGS_PATHS="claude/.claude/settings.json pi/.pi/agent/settings.json"
+PROVIDER_SETTINGS_PATHS="claude/.config/claudef/settings.json pi/.config/pif/settings.json"
 PROVIDER_SETTINGS_REMEDIATION="git -C $DOTFILES_DIR checkout -- $PROVIDER_SETTINGS_PATHS"
 
 if ! has_cmd git; then
