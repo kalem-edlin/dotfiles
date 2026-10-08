@@ -62,6 +62,24 @@ if colorscheme_count ~= 1 then
   error("Could not replace treemux colorscheme")
 end
 
+-- A sidebar should browse files, not keep a second Git client and a build
+-- directory watcher running in every detached workspace.
+local nvim_tree_git_count
+source, nvim_tree_git_count = source:gsub(
+  'nvim_tree%.setup%({',
+  'nvim_tree.setup({ git = { enable = false }, filesystem_watchers = { enable = false },',
+  1
+)
+assert(nvim_tree_git_count == 1, "Could not disable treemux nvim-tree Git/watchers")
+
+local neo_tree_git_count
+source, neo_tree_git_count = source:gsub(
+  'require%("neo%-tree"%)%.setup%({',
+  'require("neo-tree").setup({ enable_git_status = false, sources = { "filesystem", "buffers" },',
+  1
+)
+assert(neo_tree_git_count == 1, "Could not disable treemux neo-tree Git")
+
 local nvim_tree_filter_count
 source, nvim_tree_filter_count = source:gsub(
   'filters = {%s*\n%s*custom = { "%.git" },%s*\n%s*},',
@@ -72,6 +90,8 @@ source, nvim_tree_filter_count = source:gsub(
             ".git",
             ".DS_Store",
             "node_modules",
+            "Pods",
+            "DerivedData",
             "dist",
             "build",
             "out",
@@ -103,11 +123,11 @@ source, neo_tree_filter_count = source:gsub(
   'filesystem = {%s*\n%s*hijack_netrw_behavior = "disabled",',
   [[filesystem = {
           hijack_netrw_behavior = "disabled",
-          use_libuv_file_watcher = true,
+          use_libuv_file_watcher = false,
           filtered_items = {
             visible = true,
             hide_dotfiles = false,
-            hide_gitignored = true,
+            hide_gitignored = false,
             hide_ignored = false,
             always_show = {
               ".env",
@@ -129,6 +149,8 @@ source, neo_tree_filter_count = source:gsub(
               ".git",
               ".DS_Store",
               "node_modules",
+              "Pods",
+              "DerivedData",
               "dist",
               "build",
               "out",
@@ -155,8 +177,8 @@ if neo_tree_filter_count ~= 1 then
   error("Could not patch treemux neo-tree filters")
 end
 
-local neo_tree_git_mapping_count
-source, neo_tree_git_mapping_count = source:gsub(
+local neo_tree_mapping_count
+source, neo_tree_mapping_count = source:gsub(
   '%["q"%] = "noop",',
   [[["q"] = "noop",
               ["R"] = "refresh",
@@ -164,7 +186,9 @@ source, neo_tree_git_mapping_count = source:gsub(
               ["zz"] = { function() vim.cmd("normal! zz") end, desc = "center row" },
               ["zt"] = { function() vim.cmd("normal! zt") end, desc = "row to top" },
               ["zb"] = { function() vim.cmd("normal! zb") end, desc = "row to bottom" },
-              ["g"] = { "show_help", nowait = false, config = { title = "Git", prefix_key = "g" } },
+              ["[g"] = "noop",
+              ["]g"] = "noop",
+              ["og"] = "noop",
               ["gy"] = {
                 function(state)
                   local node = state.tree and state.tree:get_node()
@@ -200,15 +224,11 @@ source, neo_tree_git_mapping_count = source:gsub(
                   vim.notify("Copied root-relative path: " .. relative_path)
                 end,
                 desc = "copy root-relative path",
-              },
-              ["ga"] = { "git_add_file", desc = "stage" },
-              ["gu"] = { "git_unstage_file", desc = "unstage" },
-              ["gt"] = { "git_toggle_file_stage", desc = "toggle stage" },
-              ["gr"] = { "git_revert_file", desc = "revert" },]],
+              },]],
   1
 )
-if neo_tree_git_mapping_count ~= 1 then
-  error("Could not patch treemux neo-tree git mappings")
+if neo_tree_mapping_count ~= 1 then
+  error("Could not patch treemux neo-tree navigation mappings")
 end
 
 local chunk, err = load(source, "@treemux_init_with_catppuccin")
@@ -225,30 +245,6 @@ chunk()
 dofile(vim.fn.expand("~/.config/tmux/treemux_safe_open.lua"))
 
 local neo_tree_events = require("neo-tree.events")
-
-neo_tree_events.subscribe({
-  event = neo_tree_events.GIT_EVENT,
-  id = "treemux_force_filesystem_git_refresh",
-  handler = function()
-    vim.defer_fn(function()
-      local ok_manager, manager = pcall(require, "neo-tree.sources.manager")
-      local ok_git, git = pcall(require, "neo-tree.git")
-      if not ok_manager or not ok_git then
-        return
-      end
-
-      manager._for_each_state("filesystem", function(state)
-        if state.path then
-          pcall(git.status, state.path, state.git_base_by_worktree, false)
-        end
-      end)
-      pcall(manager.refresh, "filesystem")
-      vim.defer_fn(function()
-        pcall(manager.redraw, "filesystem")
-      end, 100)
-    end, 20)
-  end,
-})
 
 require("nvim-web-devicons").setup({
   color_icons = true,

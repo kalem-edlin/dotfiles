@@ -16,4 +16,5 @@ esac
 
 tmux set -g @catppuccin_host_color "$color"
 tmux set -g @catppuccin_host_icon "󰒋"
-tmux set -g @catppuccin_host_text "$hostname"
+# Keep the host chip to 8 display cells (7 plus an ellipsis when cut).
+tmux set -g @catppuccin_host_text "#{=/7/…:#{l:$hostname}}"

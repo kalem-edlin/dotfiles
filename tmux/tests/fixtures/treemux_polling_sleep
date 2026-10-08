@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+printf 'sleep %s\n' "$1" >>"$TREEMUX_TEST_LOG"

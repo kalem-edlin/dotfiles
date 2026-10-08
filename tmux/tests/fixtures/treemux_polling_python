@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+printf 'python %s\n' "${1##*/}" >>"$TREEMUX_TEST_LOG"
+case "${1##*/}" in
+  wait_treeinit.py) printf 'nvim-tree\n' ;;
+  go_random_within_rootdir.py) printf '/project\n' ;;
+  change_root.py) ;;
+  *) exit 1 ;;
+esac

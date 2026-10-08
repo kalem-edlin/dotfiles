@@ -18,4 +18,5 @@ if [ -n "$session_id" ] && tmux "$command_name" -t "$session_id" 2>/dev/null; th
   exit 0
 fi
 
-"$SCRIPT_DIR/dialog.sh" --pane "$pane_id" --title "Tmux navigation" -- "$message"
+"$SCRIPT_DIR/dialog.sh" --pane "$pane_id" --title "Tmux navigation" -- "$message" || true
+exit 0

@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+log() {
+  printf '%s\n' "$*" >>"$TREEMUX_TEST_LOG"
+}
+
+case "$1" in
+  -V)
+    log 'version'
+    printf 'tmux 3.5\n'
+    ;;
+  list-panes)
+    count_file="$TREEMUX_TEST_STATE/list-panes-count"
+    count=0
+    [ -f "$count_file" ] && count="$(<"$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_file"
+    log "list-panes $*"
+    cycles="${TREEMUX_TEST_CYCLES:-1}"
+    [ "$count" -le $((cycles * 2)) ]
+    ;;
+  display-message)
+    format="${!#}"
+    log "display-message $format"
+    case "$format" in
+      '#{session_id} #{window_id}') printf '$1 @1\n' ;;
+      '#{pane_current_path}')
+        count_file="$TREEMUX_TEST_STATE/cwd-query-count"
+        count=0
+        [ -f "$count_file" ] && count="$(<"$count_file")"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$count_file"
+        cwd_sequence="${TREEMUX_TEST_CWD_SEQUENCE:-/project}"
+        IFS=, read -r -a cwd_values <<<"$cwd_sequence"
+        cwd="${cwd_values[count - 1]:-${cwd_values[${#cwd_values[@]} - 1]}}"
+        log "cwd-query $cwd"
+        printf '%s\n' "$cwd"
+        ;;
+      '#{pane_active}') printf '%s\n' "${TREEMUX_TEST_PANE_ACTIVE:-1}" ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list-clients)
+    log 'list-clients'
+    count_file="$TREEMUX_TEST_STATE/list-clients-count"
+    count=0
+    [ -f "$count_file" ] && count="$(<"$count_file")"
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$count_file"
+    visibility_sequence="${TREEMUX_TEST_VISIBILITY_SEQUENCE:-${TREEMUX_TEST_ATTACHED:-0}}"
+    IFS=, read -r -a visibility_values <<<"$visibility_sequence"
+    visible="${visibility_values[count - 1]:-${visibility_values[${#visibility_values[@]} - 1]}}"
+    if [ "$visible" = 1 ]; then
+      printf '%s %s\n' "${TREEMUX_TEST_CLIENT_SESSION:-\$1}" "${TREEMUX_TEST_CLIENT_WINDOW:-@1}"
+    fi
+    ;;
+  *)
+    log "unexpected $*"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,267 @@
+diff --git a/scripts/tree/watch_and_update.sh b/scripts/tree/watch_and_update.sh
+index b52452a..60db9f0 100755
+--- a/scripts/tree/watch_and_update.sh
++++ b/scripts/tree/watch_and_update.sh
+@@ -10,9 +10,7 @@ if [[ $# -ne 9 ]]; then
+ 	exit 100
+ fi
+ 
+-CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+-
+-source "$CURRENT_DIR"/awk_helper.sh
++CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ 
+ MAIN_PANE_ID="$1"
+ SIDE_PANE_ID="$2"
+@@ -26,72 +24,129 @@ PYTHON_COMMAND="$9"
+ 
+ echo "$NVIM_COMMAND"
+ 
++is_positive_interval() {
++	local interval="$1"
++	local digits
++
++	[[ "$interval" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 1
++	digits="${interval//[^0-9]/}"
++	[[ "$digits" =~ [1-9] ]]
++}
++
++for interval_name in REFRESH_INTERVAL REFRESH_INTERVAL_INACTIVE_PANE REFRESH_INTERVAL_INACTIVE_WINDOW; do
++	interval="${!interval_name}"
++	if ! is_positive_interval "$interval"; then
++		echo "Invalid $interval_name: $interval. Expected a positive number." >&2
++		exit 107
++	fi
++done
++
++main_window_has_attached_client() {
++	local main_session main_window client_session client_window
++
++	IFS=' ' read -r main_session main_window < <(
++		tmux display-message -p -t "$MAIN_PANE_ID" '#{session_id} #{window_id}' 2>/dev/null
++	)
++	[[ -n "$main_session" && -n "$main_window" ]] || return 1
++
++	while IFS=' ' read -r client_session client_window; do
++		if [[ "$client_window" == "$main_window" ]]; then
++			return 0
++		fi
++	done < <(tmux list-clients -F '#{session_id} #{window_id}' 2>/dev/null)
++
++	return 1
++}
++
++main_pane_cwd() {
++	tmux display-message -p -t "$MAIN_PANE_ID" '#{pane_current_path}' 2>/dev/null
++}
++
++set_poll_state() {
++	local main_pane_active side_pane_active
++
++	WINDOW_VISIBLE=0
++	POLL_INTERVAL="$REFRESH_INTERVAL_INACTIVE_WINDOW"
++	if ! main_window_has_attached_client; then
++		return
++	fi
++
++	WINDOW_VISIBLE=1
++	main_pane_active=$(tmux display-message -p -t "$MAIN_PANE_ID" '#{pane_active}' 2>/dev/null)
++	side_pane_active=$(tmux display-message -p -t "$SIDE_PANE_ID" '#{pane_active}' 2>/dev/null)
++	if [[ "$main_pane_active" == 1 || "$side_pane_active" == 1 ]]; then
++		POLL_INTERVAL="$REFRESH_INTERVAL"
++	else
++		POLL_INTERVAL="$REFRESH_INTERVAL_INACTIVE_PANE"
++	fi
++}
++
++initialise_tree() {
++	local tree_filetype tree_root_dir exit_code
++
++	echo "Waiting for the nvim-tree/neo-tree.."
++	tree_filetype=$("$PYTHON_COMMAND" "$CURRENT_DIR/wait_treeinit.py" "$NVIM_ADDR")
++	exit_code=$?
++	if [[ $exit_code -ne 0 ]]; then
++		echo "$CURRENT_DIR/wait_treeinit.py exited with code $exit_code."
++		if [[ $exit_code -eq 50 ]]; then
++			echo "pynvim not installed. Exiting.."
++			exit 106
++		elif [[ $exit_code -eq 51 ]]; then
++			echo "Nvim is not installed or could not be loaded. Exiting.."
++			exit 103
++		elif [[ $exit_code -eq 52 ]]; then
++			echo "Nvim-Tree/Neo-Tree is not installed or could not be loaded. Exiting.."
++			exit 104
++		else
++			echo "Unknown error. Exiting.."
++			exit 105
++		fi
++	fi
++
++	tree_root_dir=$("$PYTHON_COMMAND" "$CURRENT_DIR/go_random_within_rootdir.py" "$NVIM_ADDR" "$main_pane_prevcwd" "$SIDE_PANE_ROOT")
++	echo "$tree_filetype detected!"
++	echo "Detected side pane root: $tree_root_dir"
++	side_pane_root="$tree_root_dir"
++}
++
+ echo "$0 $@"
+ echo "OSTYPE: $OSTYPE"	# log OS type
+ tmux -V					# log tmux version
+ 
+ main_pane_exists=1
+ side_pane_exists=1
+-tmux list-panes -t "$MAIN_PANE_ID" &> /dev/null
+-[ "$?" -ne 0 ] && main_pane_exists=0
+-tmux list-panes -t "$SIDE_PANE_ID" &> /dev/null
+-[ "$?" -ne 0 ] && side_pane_exists=0
+-
+-# `tmux display` doesn't match strictly and it will give you any pane if not found.
+-main_pane_pid=$(tmux display -pt "$MAIN_PANE_ID" '#{pane_pid}')
+-if [[ -z $main_pane_pid ]]
+-then
++if ! tmux list-panes -t "$MAIN_PANE_ID" &> /dev/null; then
+ 	echo "Main pane $MAIN_PANE_ID does not exist."
+ 	exit 101
+ fi
+-
+-echo "Watching main pane (pid = $main_pane_pid)"
+-main_pane_prevcwd=$(lsof -a -d cwd -p "$main_pane_pid" 2> /dev/null | awk_by_name '{print $(f["NAME"])}' | tail -n +2)
+-# This does not work on MacOS.
+-#main_pane_prevcwd=$(readlink -f "/proc/$main_pane_pid/cwd")
+-side_pane_root="$main_pane_prevcwd"
+-
+-# `tmux display` doesn't match strictly and it will give you any pane if not found.
+-side_pane_pid=$(tmux display -pt "$SIDE_PANE_ID" '#{pane_pid}')
+-if [[ -z $side_pane_pid ]]
+-then
++if ! tmux list-panes -t "$SIDE_PANE_ID" &> /dev/null; then
+ 	echo "Side pane $SIDE_PANE_ID not found. Exiting."
+ 	exit 102
+ fi
+ 
+-echo "Updating side pane (Nvim-Tree/Neo-Tree, pid = $side_pane_pid)"
+-
+-echo "Initial main pane cwd: $main_pane_prevcwd"
++echo "Watching main pane $MAIN_PANE_ID"
++echo "Updating side pane (Nvim-Tree/Neo-Tree) $SIDE_PANE_ID"
+ echo "Initial nvim-tree/neo-tree pane root: $SIDE_PANE_ROOT"
+-echo "Waiting for the nvim-tree/neo-tree.."
+-tree_filetype=$("$PYTHON_COMMAND" "$CURRENT_DIR/wait_treeinit.py" "$NVIM_ADDR")
+-exit_code=$?
+-if [[ $exit_code -ne 0 ]]
+-then
+-	echo "$CURRENT_DIR/wait_treeinit.py exited with code $exit_code."
+-	if [[ $exit_code -eq 50 ]]
+-	then
+-		echo "pynvim not installed. Exiting.."
+-        exit 106
+-	elif [[ $exit_code -eq 51 ]]
+-	then
+-		echo "Nvim is not installed or could not be loaded. Exiting.."
+-		exit 103
+-	elif [[ $exit_code -eq 52 ]]
+-	then
+-		echo "Nvim-Tree/Neo-Tree is not installed or could not be loaded. Exiting.."
+-		exit 104
+-	else
+-		echo "Unknown error. Exiting.."
+-		exit 105
+-	fi
+-fi
+-tree_root_dir=$("$PYTHON_COMMAND" "$CURRENT_DIR/go_random_within_rootdir.py" "$NVIM_ADDR" "$main_pane_prevcwd" "$SIDE_PANE_ROOT")
+-echo "$tree_filetype detected!"
+-echo "Detected side pane root: $tree_root_dir"
+-side_pane_root="$tree_root_dir"
++main_pane_prevcwd=""
++side_pane_root="$SIDE_PANE_ROOT"
++tree_initialised=0
+ 
+ while [[ $main_pane_exists -eq 1 ]] && [[ $side_pane_exists -eq 1 ]]; do
++	set_poll_state
++	if [[ $WINDOW_VISIBLE -eq 1 ]]; then
++		main_pane_cwd=$(main_pane_cwd)
++		if [[ -z "$main_pane_cwd" ]]; then
++			echo "Can't find main pane's cwd. Exiting.."
++			break
++		fi
++
++		if [[ $tree_initialised -eq 0 ]]; then
++			main_pane_prevcwd="$main_pane_cwd"
++			echo "Initial main pane cwd: $main_pane_prevcwd"
++			initialise_tree
++			tree_initialised=1
++		fi
+ 	# optional: check if sidebar is running `nvim .`
+ 	# This does not work well in Mac..
+ 	# command_pid=$(ps -el | awk "\$5==$side_pane_pid" | awk '{print $4}')
+@@ -108,17 +163,6 @@ while [[ $main_pane_exists -eq 1 ]] && [[ $side_pane_exists -eq 1 ]]; do
+ 	# 	fi
+ 	# fi
+ 
+-	main_pane_cwd=$(lsof -a -d cwd -p "$main_pane_pid" 2> /dev/null | awk_by_name '{print $(f["NAME"])}' | tail -n +2)
+-	# This does not work on MacOS.
+-	#main_pane_cwd=$(readlink -f "/proc/$main_pane_pid/cwd")
+-	echo $main_pane_cwd
+-
+-	if [[ -z "$main_pane_cwd" ]]
+-	then
+-		echo "Can't find main pane's cwd. Exiting.."
+-		break
+-	fi
+-
+ 	# Dir changed?
+ 	if [[ "$main_pane_cwd" != "$main_pane_prevcwd" ]]
+ 	then
+@@ -177,20 +221,10 @@ while [[ $main_pane_exists -eq 1 ]] && [[ $side_pane_exists -eq 1 ]]; do
+ 		main_pane_prevcwd="$main_pane_cwd"
+ 	fi
+ 
+-	main_pane_active=$(tmux display -pt "$MAIN_PANE_ID" '#{pane_active}')
+-	side_pane_active=$(tmux display -pt "$SIDE_PANE_ID" '#{pane_active}')
+-	window_active=$(tmux display -pt "$MAIN_PANE_ID" '#{window_active}')
+-
+-	if [[ "$main_pane_active" -eq 1 || "$side_pane_active" -eq 1 ]]; then
+-		sleep "$REFRESH_INTERVAL"
+-	elif [[ "$window_active" -eq 1 ]]; then
+-		# Pane inactive but still in the same window
+-		sleep "$REFRESH_INTERVAL_INACTIVE_PANE"
+-	else
+-		# Window inactive
+-		sleep "$REFRESH_INTERVAL_INACTIVE_WINDOW"
+ 	fi
+ 
++	sleep "$POLL_INTERVAL"
++
+ 	tmux list-panes -t "$MAIN_PANE_ID" &> /dev/null
+ 	[ "$?" -ne 0 ] && main_pane_exists=0
+ 	tmux list-panes -t "$SIDE_PANE_ID" &> /dev/null
+diff --git a/scripts/tree_helpers.sh b/scripts/tree_helpers.sh
+index 6c60edf..482b39a 100644
+--- a/scripts/tree_helpers.sh
++++ b/scripts/tree_helpers.sh
+@@ -10,11 +10,11 @@ refresh_interval() {
+ }
+ 
+ refresh_interval_inactive_pane() {
+-	get_tmux_option "$REFRESH_INTERVAL_INACTIVE_PANE" "$REFRESH_INTERVAL_INACTIVE_PANE"
++	get_tmux_option "$REFRESH_INTERVAL_INACTIVE_PANE_OPTION" "$REFRESH_INTERVAL_INACTIVE_PANE"
+ }
+ 
+ refresh_interval_inactive_window() {
+-	get_tmux_option "$REFRESH_INTERVAL_INACTIVE_WINDOW" "$REFRESH_INTERVAL_INACTIVE_WINDOW"
++	get_tmux_option "$REFRESH_INTERVAL_INACTIVE_WINDOW_OPTION" "$REFRESH_INTERVAL_INACTIVE_WINDOW"
+ }
+ 
+ nvim_command() {
+diff --git a/scripts/variables.sh b/scripts/variables.sh
+index 7a6a68e..616f95b 100644
+--- a/scripts/variables.sh
++++ b/scripts/variables.sh
+@@ -16,7 +16,7 @@ REFRESH_INTERVAL_INACTIVE_PANE="2"
+ REFRESH_INTERVAL_INACTIVE_PANE_OPTION="@treemux-refresh-interval-inactive-pane"
+ 
+ REFRESH_INTERVAL_INACTIVE_WINDOW="5"
+-REFRESH_INTERVAL_INACTIVE_WINDOW="@treemux-refresh-interval-inactive-window"
++REFRESH_INTERVAL_INACTIVE_WINDOW_OPTION="@treemux-refresh-interval-inactive-window"
+ 
+ NVIM_COMMAND="nvim"
+ NVIM_COMMAND_OPTION="@treemux-nvim-command"
