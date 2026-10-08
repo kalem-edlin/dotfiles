@@ -47,6 +47,12 @@
 #     each named package that exists in this repo. Fails (nonzero return)
 #     on the first stow error — never swallowed.
 #
+#   refuse_local_only_files <package> [<package> ...]
+#     Fails (nonzero return) when a named package contains a credential or
+#     runtime file that must exist only locally (auth.json, ssh keys, ...).
+#     backup_conflicts and stow_packages call it first, so such a file is
+#     never linked into $HOME and $HOME's real copy is never moved aside.
+#
 #   install_tmux_plugins
 #     Clones/updates TPM, then pins tmux-resurrect to commit
 #     $TMUX_RESURRECT_PIN (single authority for the pin) BEFORE running
@@ -231,7 +237,26 @@ link_config_package() {
   fi
 }
 
+refuse_local_only_files() {
+  found=""
+  for package in "$@"; do
+    [ -d "$DOTFILES_DIR/$package" ] || continue
+    found="$found
+$(find "$DOTFILES_DIR/$package" \( -type f -o -type l \) \( \
+      -name auth.json -o -name models-store.json -o -name trust.json \
+      -o -name '*.log' -o -name authorized_keys -o -name 'known_hosts*' \
+      -o -name 'id_rsa*' -o -name 'id_ed25519*' -o -name 'id_ecdsa*' \
+      -o -name '*.pem' -o -name '.env' -o -name 'config.local' \) 2>/dev/null)"
+  done
+  found="$(printf '%s\n' "$found" | sed '/^$/d')"
+  [ -z "$found" ] && return 0
+  echo "ERROR: local-only files found in stow packages (move them out of the repo):" >&2
+  echo "$found" >&2
+  return 1
+}
+
 backup_conflicts() {
+  refuse_local_only_files "$@" || return 1
   for package in "$@"; do
     [ -d "$DOTFILES_DIR/$package" ] || continue
 
@@ -328,6 +353,7 @@ $HOME/.codex
 }
 
 stow_packages() {
+  refuse_local_only_files "$@" || return 1
   for package in "$@"; do
     if [ -d "$DOTFILES_DIR/$package" ]; then
       echo "  -> stowing $package"

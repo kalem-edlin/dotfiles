@@ -7,3 +7,16 @@ history.txt
 */**/*.bak
 __pycache__/
 *.pyc
+
+# Credentials and runtime state live only in $HOME, never in this repo.
+# setup/lib.sh refuse_local_only_files also blocks stowing them.
+**/auth.json
+pi/.config/pif/models-store.json
+pi/.config/pif/trust.json
+pi/.config/pif/*.log
+ssh/.ssh/authorized_keys
+ssh/.ssh/known_hosts*
+ssh/.ssh/id_*
+ssh/.ssh/*.pem
+ssh/.ssh/config.local
+.env
