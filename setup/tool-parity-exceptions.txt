@@ -38,6 +38,7 @@ pi               installed as an npm global by setup/node.sh, not a package-mana
 codex            installed as an npm global by setup/node.sh, not a package-manager array entry
 claude           installed by setup/misc-headless.sh (Anthropic's own installer), not a package-manager array entry
 ob               Obsidian CLI installed by setup/obsidian.sh, not a package-manager array entry
+go               pinned upstream tarball installed by setup/go.sh (distro golang-go is too old for the tmux-agent-sessions picker), not a package-manager array entry
 
 # --- Not packaged by any mainstream Linux distro's default repos ---
 zsh-vi-mode   jeffreytse/zsh-vi-mode has no apt/dnf/pacman/zypper/apk package; confirmed absent from Ubuntu 24.04 via both `apt-cache policy zsh-vi-mode` and `apt-cache search zsh-vi-mode` on agents-roll, 2026-08-02. zsh/.zshrc's source_if_exists fallback paths (incl. ~/.zsh/zsh-vi-mode/) remain for a manual/future install and degrade silently when absent.
@@ -58,7 +59,6 @@ atac             accepted TODO: not yet added to any Linux package list
 cmatrix          accepted TODO: not yet added to any Linux package list
 git-filter-repo  accepted TODO: not yet added to any Linux package list
 glow             accepted TODO: not yet added to any Linux package list
-go               accepted TODO: not yet added to any Linux package list
 lazydocker       accepted TODO: not yet added to any Linux package list (also requires the jesseduffield/lazydocker tap on macOS, no direct Linux distro package)
 prettyping       accepted TODO: not yet added to any Linux package list
 recall           accepted TODO: not yet added to any Linux package list (zippoxer/tap/recall on macOS, no Linux distro package known)

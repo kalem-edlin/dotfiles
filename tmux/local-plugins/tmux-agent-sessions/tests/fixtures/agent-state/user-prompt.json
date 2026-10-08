@@ -1,0 +1,1 @@
+{"session_id":"s","transcript_path":"/nonexistent/t.jsonl","cwd":"/tmp","hook_event_name":"UserPromptSubmit","prompt":"  Fix\tthe\nbroken \u0001  #{pane_id}; it's \"quoted\" and this prompt keeps going well past forty characters"}

@@ -1,0 +1,313 @@
+#!/usr/bin/env bash
+# Publish an agent's state to tmux pane options (@agent_*), see
+# docs/notes/tmux-agent-sessions.md "Agent state contract".
+#
+#   agent-state claude <HookEvent>     hook JSON on stdin
+#
+# Hook context: always exits 0 and prints nothing, because Claude Code reads
+# hook stdout. Every write for one event is a single tmux invocation.
+
+# shellcheck disable=SC2016 # jq programs are single-quoted on purpose
+set -u
+exec >/dev/null 2>&1
+
+agent="${1:-}"
+event="${2:-}"
+[ "$agent" = claude ] || exit 0
+
+pane="${TMUX_PANE:-}"
+case "$pane" in
+  %[0-9]*) ;;
+  *) exit 0 ;;
+esac
+command -v tmux >/dev/null || exit 0
+
+# Stale-$TMUX guard (record-agent-session.sh pattern). An orphaned agent can
+# still carry the previous server's $TMUX, and pane ids restart at %0 on a new
+# server. Events that read from tmux anyway compare the inherited server pid
+# with #{pid}; the others only check that the inherited server is still alive,
+# which keeps them to one tmux invocation.
+server_pid="${TMUX:-}"
+server_pid="${server_pid#*,}"
+server_pid="${server_pid%%,*}"
+case "$server_pid" in
+  '' | *[!0-9]*) exit 0 ;;
+esac
+kill -0 "$server_pid" 2>/dev/null || exit 0
+
+JQ="$(command -v jq || true)"
+[ -n "$JQ" ] || [ ! -x /usr/bin/jq ] || JQ=/usr/bin/jq
+
+input="$(cat)"
+now="$(date +%s)"
+
+# Reads "#{pane_id} #{pid} <extra>" and validates pane and server identity.
+# Sets REPLY to the expansion of <extra>.
+pane_read() {
+  local out rest
+  out="$(tmux display-message -p -t "$pane" "#{pane_id} #{pid} $1")" || return 1
+  rest="${out#"$pane "}"
+  [ "$rest" != "$out" ] || return 1
+  [ "${rest%% *}" = "$server_pid" ] || return 1
+  rest="${rest#"$server_pid"}"
+  REPLY="${rest# }"
+}
+
+# jq helper: sanitized text (control chars to space, runs collapsed, trimmed).
+JQ_DEFS='def clean: tostring | gsub("[[:cntrl:]\u2028\u2029]"; " ") | gsub(" +"; " ") | sub("^ "; "") | sub(" $"; "");
+def cut($n): clean | .[0:$n] | sub("[ ;\\\\]+$"; "");'
+
+jq_get() {
+  [ -n "$JQ" ] || return 1
+  printf '%s' "$input" | "$JQ" -r "$JQ_DEFS $1" 2>/dev/null
+}
+
+# Session title from the transcript JSONL: the last custom-title (/rename),
+# else the last ai-title (Claude's auto title). Claude re-appends both through
+# the file, so the last 256 KiB usually holds them; otherwise one scan of the
+# whole file finds titles a long session pushed out. That scan prefers rg: an
+# untitled 45 MB transcript costs ~15 ms there against ~260 ms in macOS grep.
+# Malformed lines (and the line the tail cuts) are skipped. Sets REPLY to the
+# title (60 chars), or ''.
+TITLE_RE='"type":"(custom|ai)-title"'
+transcript_title() {
+  local file="$1" lines
+  REPLY=""
+  [ -n "$JQ" ] && [ -n "$file" ] && [ -f "$file" ] || return 1
+  lines="$(tail -c 262144 "$file" | LC_ALL=C grep -E "$TITLE_RE")"
+  [ -z "$lines" ] || REPLY="$(titles_pick "$lines")"
+  if [ -z "$REPLY" ]; then
+    if command -v rg >/dev/null; then
+      lines="$(rg --no-config -N -e "$TITLE_RE" -- "$file")"
+    else
+      lines="$(LC_ALL=C grep -E "$TITLE_RE" -- "$file")"
+    fi
+    [ -z "$lines" ] || REPLY="$(titles_pick "$lines")"
+  fi
+  [ -n "$REPLY" ]
+}
+titles_pick() {
+  printf '%s\n' "$1" | "$JQ" -Rrn "$JQ_DEFS"'
+    reduce (inputs | fromjson? | objects) as $e ({};
+      if $e.type == "custom-title" then .c = ($e.customTitle // "" | cut(60))
+      elif $e.type == "ai-title" then .a = ($e.aiTitle // "" | cut(60))
+      else . end)
+    | [.c, .a] | map(select(. != null and . != "")) | first // ""' 2>/dev/null
+}
+
+cmd=()
+add() {
+  [ "${#cmd[@]}" -eq 0 ] || cmd+=(";")
+  cmd+=("$@")
+}
+run() {
+  [ "${#cmd[@]}" -gt 0 ] || exit 0
+  tmux "${cmd[@]}"
+  exit 0
+}
+
+# Value format for @agent_state_at: keeps the stamp while the state is
+# unchanged, else now. set -F expands it in the pane before @agent_state is
+# overwritten, so the age needs no read round trip.
+state_at_fmt() {
+  printf '#{?#{&&:#{==:#{@agent_state},%s},#{@agent_state_at}},#{@agent_state_at},%s}' "$1" "$now"
+}
+
+# Set state, @agent_state_at and @agent_at as top-level commands.
+add_state() {
+  add set -pF -t "$pane" @agent_state_at "$(state_at_fmt "$1")"
+  add set -p -t "$pane" @agent_state "$1"
+  add set -p -t "$pane" @agent_at "$now"
+}
+
+# The same as a command string for if-shell -F branches (no user text here).
+# Double quotes keep the format one token inside single-quoted nested branches.
+state_str() {
+  printf 'set -pF -t %s @agent_state_at "%s" ; set -p -t %s @agent_state %s ; set -p -t %s @agent_at %s' \
+    "$pane" "$(state_at_fmt "$1")" "$pane" "$1" "$pane" "$now"
+}
+
+VISIBLE='#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}'
+SUBS_GT0='#{e|>|:#{@agent_subs},0}'
+
+# Walks up from our parent to the process whose parent is the pane shell.
+find_agent_pid() {
+  local pane_pid="$1" cur="$PPID" parent depth=0 comm
+  while [ "$depth" -lt 32 ]; do
+    case "$cur" in '' | *[!0-9]* | 0 | 1) return 1 ;; esac
+    if [ "$cur" = "$pane_pid" ]; then
+      # The agent is the pane's own process and spawned us directly.
+      REPLY="$cur"
+      return 0
+    fi
+    parent="$(ps -o ppid= -p "$cur" 2>/dev/null)"
+    parent="${parent//[[:space:]]/}"
+    if [ "$parent" = "$pane_pid" ]; then
+      if [ "$cur" = "$PPID" ]; then
+        # A hook wrapper shell directly under the pane process means the agent
+        # is the pane process itself.
+        comm="$(ps -o comm= -p "$cur" 2>/dev/null)"
+        comm="${comm##*/}"
+        comm="${comm#-}"
+        case "$comm" in
+          sh | bash | dash | zsh) cur="$pane_pid" ;;
+        esac
+      fi
+      REPLY="$cur"
+      return 0
+    fi
+    cur="$parent"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# Succeeds while the agent process has a background shell: a direct child
+# running a Claude Bash-tool command (its command line sources a
+# .claude/shell-snapshots file). Called when no foreground tool runs (Stop,
+# idle_prompt), so any such child is background work. Neither hook counts it:
+# SubagentStop fires for a subagent waiting on its background shell, and a
+# main-agent run_in_background shell has no hook at all. One ps; the tmux read
+# for the agent pid happens only if some shell-snapshots process exists at all.
+bg_shells() {
+  local ppids agent pane_pid
+  ppids="$(ps -A -o ppid=,command= 2>/dev/null | awk '/\/\.claude\/shell-snapshots\// { print $1 }')"
+  [ -n "$ppids" ] || return 1
+  pane_read '#{@agent_pid} #{pane_pid}' || return 1
+  agent="${REPLY%% *}"
+  pane_pid="${REPLY#* }"
+  case "$agent" in
+    '' | *[!0-9]*) find_agent_pid "$pane_pid" && agent="$REPLY" || return 1 ;;
+  esac
+  printf '%s\n' "$ppids" | grep -qx "$agent"
+}
+
+case "$event" in
+  SessionStart)
+    fields="$(jq_get '(.source // "" | clean), (.transcript_path // "" | tostring)')" || exit 0
+    src="${fields%%$'\n'*}"
+    transcript="${fields#*$'\n'}"
+    [ "$transcript" != "$fields" ] || transcript=""
+    pane_read '#{pane_pid}' || exit 0
+    pane_pid="$REPLY"
+    add set -p -t "$pane" @agent_kind claude
+    if find_agent_pid "$pane_pid"; then
+      add set -p -t "$pane" @agent_pid "$REPLY"
+    fi
+    # startup and clear begin a new transcript with no title yet (clear gets
+    # the new session's path; the old file's title would be stale), so only
+    # resume and compact read one. Compaction restarts the session mid-turn:
+    # keep state, subs and name, refreshing the name if a title exists.
+    title=""
+    case "$src" in
+      resume | compact) transcript_title "$transcript" && title="$REPLY" ;;
+    esac
+    if [ "$src" = compact ]; then
+      [ -z "$title" ] || add set -p -t "$pane" @agent_name "$title"
+      add set -pu -t "$pane" @agent_empty
+    else
+      if [ -n "$title" ]; then
+        add set -p -t "$pane" @agent_name "$title"
+      else
+        add set -pu -t "$pane" @agent_name
+      fi
+      # @agent_empty marks a chat with no messages yet (startup, clear); a
+      # resumed session already has some.
+      case "$src" in
+        startup | clear) add set -p -t "$pane" @agent_empty 1 ;;
+        *) add set -pu -t "$pane" @agent_empty ;;
+      esac
+      add set -p -t "$pane" @agent_subs 0
+      add_state idle
+    fi
+    run
+    ;;
+  UserPromptSubmit)
+    fields="$(jq_get '(.prompt // "" | cut(40)), (.transcript_path // "" | tostring)')" || exit 0
+    name="${fields%%$'\n'*}"
+    transcript="${fields#*$'\n'}"
+    [ "$transcript" != "$fields" ] || transcript=""
+    pane_read '#{@agent_name}' || exit 0
+    current="$REPLY"
+    add_state working
+    add set -pu -t "$pane" @agent_empty # the first prompt ends emptiness
+    # The transcript title wins; until one exists the first prompt stands in.
+    if transcript_title "$transcript"; then
+      add set -p -t "$pane" @agent_name "$REPLY"
+    elif [ -z "$current" ] && [ -n "$name" ]; then
+      add set -p -t "$pane" @agent_name "$name"
+    fi
+    run
+    ;;
+  PreToolUse)
+    add_state awaiting
+    run
+    ;;
+  PostToolUse)
+    add_state working
+    run
+    ;;
+  Notification)
+    ntype="$(jq_get '.notification_type // "" | clean')" || exit 0
+    case "$ntype" in
+      elicitation_dialog | elicitation_url_dialog)
+        add_state awaiting
+        ;;
+      idle_prompt)
+        # Recovers from an Esc interrupt, which fires no Stop. Fires 60s
+        # after any idle prompt, so running subagents and background shells
+        # keep Working.
+        bg_shells && exit 0
+        add if -F -t "$pane" "#{&&:#{==:#{@agent_state},working},#{==:$SUBS_GT0,0}}" "$(state_str idle)"
+        ;;
+    esac
+    run
+    ;;
+  SubagentStart)
+    add set -pF -t "$pane" @agent_subs '#{e|+|:#{@agent_subs},1}'
+    run
+    ;;
+  SubagentStop)
+    add set -pF -t "$pane" @agent_subs '#{?#{e|>|:#{@agent_subs},0},#{e|-|:#{@agent_subs},1},0}'
+    run
+    ;;
+  Stop)
+    fields="$(jq_get '
+      (.last_assistant_message // "" | tostring | split("\n")
+        | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | last // "")
+        as $last
+      | (if $last == "Awaiting your input." then "1" else "0" end),
+        (.transcript_path // "" | tostring)')" || exit 0
+    marker="${fields%%$'\n'*}"
+    transcript="${fields#*$'\n'}"
+    [ "$transcript" != "$fields" ] || transcript=""
+
+    # Name only, from the transcript title; without one the name is kept.
+    if transcript_title "$transcript"; then
+      add set -p -t "$pane" @agent_name "$REPLY"
+    fi
+
+    if bg_shells; then
+      add_state working # like subs>0: Working wins over the marker
+    elif [ "$marker" = 1 ]; then
+      add if -F -t "$pane" "$SUBS_GT0" "$(state_str working)" "$(state_str awaiting)"
+    else
+      add if -F -t "$pane" "$SUBS_GT0" "$(state_str working)" \
+        "if -F -t $pane '$VISIBLE' '$(state_str idle)' '$(state_str finished)'"
+    fi
+    run
+    ;;
+  SessionEnd)
+    reason="$(jq_get '.reason // "" | clean')" || reason=""
+    case "$reason" in
+      # /clear and /resume keep the same agent process; SessionStart follows.
+      clear | resume) exit 0 ;;
+    esac
+    for option in kind pid state state_at at name subs empty; do
+      add set -pu -t "$pane" "@agent_$option"
+    done
+    run
+    ;;
+esac
+
+exit 0

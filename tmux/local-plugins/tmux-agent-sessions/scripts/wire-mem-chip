@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Idempotently PREPENDS the current-pane memory chip to status-right.
+#
+# Run from tmux.conf right after wire_autosave_indicator.sh (both after TPM,
+# once catppuccin has rewritten status-right), so the memory chip renders to
+# the LEFT of the autosave chip.
+#
+# Modelled on tmux/scripts/wire_autosave_indicator.sh: any existing copy is
+# stripped before prepending rather than short-circuiting on "already
+# present", so repeated `source-file` calls never stack duplicates and the
+# chip moves back to the front after the autosave wire re-prepends itself.
+
+set -u
+
+# tmux expands #{pane_pid} (active pane) before running the job.
+interp="#(~/.config/tmux/local-plugins/tmux-agent-sessions/scripts/pane-mem-chip #{pane_pid})"
+current="$(tmux show-option -gqv status-right 2>/dev/null)" || exit 0
+
+# Strip every existing occurrence (bash 3.2-safe: no ${var//find/replace}
+# with a variable pattern containing glob metacharacters).
+stripped="$current"
+while :; do
+  case "$stripped" in
+    *"$interp"*)
+      stripped="${stripped%%"$interp"*}${stripped#*"$interp"}"
+      ;;
+    *) break ;;
+  esac
+done
+
+tmux set-option -gq status-right "${interp}${stripped}"

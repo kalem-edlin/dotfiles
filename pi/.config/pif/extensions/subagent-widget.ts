@@ -154,7 +154,18 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Widget rendering ──────────────────────────────────────────────────────
 
+	// agent-state.ts publishes the running count as @agent_subs, so the parent
+	// pane stays Working while its subagents run.
+	let lastRunning = 0;
+	function emitRunning() {
+		const running = Array.from(agents.values()).filter((s) => s.status === "running").length;
+		if (running === lastRunning) return;
+		lastRunning = running;
+		pi.events.emit("pif:subagents", { running });
+	}
+
 	function updateWidgets() {
+		emitRunning();
 		if (!widgetCtx) return;
 
 		for (const [id, state] of Array.from(agents.entries())) {

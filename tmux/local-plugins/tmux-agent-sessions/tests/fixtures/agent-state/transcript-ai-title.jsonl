@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"hello"},"sessionId":"s"}
+{"type":"ai-title","aiTitle":"Early auto title","sessionId":"s"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"sessionId":"s"}
+{"type":"ai-title","aiTitle":"Auto\ttitle: wire session titles into the agent picker card row","sessionId":"s"}
+{"type":"user","message":{"role":"user","content":"next"},"sessionId":"s"}

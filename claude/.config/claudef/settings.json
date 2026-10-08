@@ -1,5 +1,6 @@
 {
   "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
     "ENABLE_LSP_TOOL": "1",
     "ENABLE_TOOL_SEARCH": "true"
   },
@@ -24,6 +25,117 @@
             "timeout": 3
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude SessionStart",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude UserPromptSubmit",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude PreToolUse",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude PostToolUse",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "elicitation_dialog|elicitation_url_dialog|idle_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude Notification",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude SubagentStart",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude SubagentStop",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude Stop",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude SessionEnd",
+            "timeout": 3
+          }
+        ]
       }
     ]
   },
@@ -38,6 +150,7 @@
   },
   "tui": "default",
   "skipDangerousModePermissionPrompt": true,
+  "bashEditDiffEnabled": false,
   "theme": "dark",
   "editorMode": "vim",
   "verbose": false,

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Prints the current pane's memory chip for tmux status-right.
+#
+# Usage: pane-mem-chip PANE_PID
+#        pane-mem-chip --fmt KIB     (prints just the value text; for tests)
+#
+# Wired by wire-mem-chip as `#(.../pane-mem-chip #{pane_pid})`; tmux expands
+# #{pane_pid} for the active pane before running it and caches the job per
+# distinct command string, at most once per status-interval.
+#
+# The value is the pane's whole process tree (scripts/pane-mem): whole MiB
+# below 1 GiB (`640M`, rounded down, at least `1M` when nonzero), one decimal
+# GiB from there (`2.4G`). On macOS that is phys_footprint, which overcounts
+# shared/graphics memory: good for ranking panes, not for system totals.
+#
+# Styling mirrors tmux/scripts/autosave_indicator.sh, which reproduces
+# catppuccin's build_status_module() for status_fill="icon" and
+# status_connect_separator="no" (tmux/tmux.conf):
+#
+#   #[fg=COLOR,bg=BG,...]LSEP  #[fg=BG,bg=COLOR,...]ICON<sp>
+#   #[fg=FG,bg=GRAY]<sp>TEXT   #[fg=GRAY,bg=BG,...]RSEP
+#
+# Unlike the autosave chip, the separators are NOT read from tmux: this job
+# runs per pane per interval and a `tmux show-options` client spawn would
+# cost more than the measurement. They are copied from
+# @catppuccin_status_{left,right}_separator in tmux/tmux.conf; keep the two
+# in sync if those change.
+#
+# Dead or empty pid, or any failure: prints nothing, exits 0.
+
+set -u
+
+THM_BG="#1e1e2e"
+THM_FG="#cdd6f4"
+THM_GRAY="#313244"
+MEM_COLOR="#cba6f7" # thm_magenta (mauve): distinct from autosave/dir pink and host blue
+ICON=$'\xf3\xb0\x8d\x9b' # nf-md-memory U+F035B
+LSEP=$' \xee\x82\xb6'    # " " + U+E0B6 (rounded left)
+RSEP=$'\xee\x82\xb4 '    # U+E0B4 (rounded right) + " "
+
+# KiB -> display text, pure bash arithmetic (no fork).
+fmt_kib() {
+  local kib="$1" tenths
+  if [ "$kib" -lt 1048576 ]; then
+    kib=$((kib / 1024))
+    [ "$kib" -eq 0 ] && [ "$1" -gt 0 ] && kib=1
+    printf '%dM' "$kib"
+  else
+    tenths=$(((kib * 10 + 524288) / 1048576))
+    printf '%d.%dG' $((tenths / 10)) $((tenths % 10))
+  fi
+}
+
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+if [ "${1:-}" = "--fmt" ]; then
+  is_uint "${2:-}" || exit 0
+  fmt_kib "$2"
+  exit 0
+fi
+
+pid="${1:-}"
+is_uint "$pid" || exit 0
+
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")" || break
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="${self%/*}/$link" ;;
+  esac
+done
+case "$self" in
+  */*) script_dir="${self%/*}" ;;
+  *) script_dir="." ;;
+esac
+
+# Run the compiled helper directly when present (saves one bash startup per
+# status refresh); otherwise the entry point with its ps fallback.
+mem_cmd="$script_dir/../bin/pane-mem-darwin"
+[ -x "$mem_cmd" ] || mem_cmd="$script_dir/pane-mem"
+out="$("$mem_cmd" "$pid" 2>/dev/null)" || exit 0
+kib="${out#* }"
+kib="${kib%%[!0-9]*}"
+[ "${out%% *}" = "$pid" ] && is_uint "$kib" || exit 0
+
+printf '#[fg=%s,bg=%s,nobold,nounderscore,noitalics]%s#[fg=%s,bg=%s,nobold,nounderscore,noitalics]%s #[fg=%s,bg=%s] %s#[fg=%s,bg=%s,nobold,nounderscore,noitalics]%s' \
+  "$MEM_COLOR" "$THM_BG" "$LSEP" \
+  "$THM_BG" "$MEM_COLOR" "$ICON" \
+  "$THM_FG" "$THM_GRAY" "$(fmt_kib "$kib")" \
+  "$THM_GRAY" "$THM_BG" "$RSEP"

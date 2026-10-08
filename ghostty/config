@@ -2,5 +2,9 @@ theme = catppuccin-mocha.conf
 background-opacity = 0.9
 font-family = JetBrains Mono NL
 font-family = Hack Nerd Font Mono
+# Lucide status and agent icons for the tmux-agent-sessions picker, rescaled to the cell (setup/lucide-font.sh).
+font-codepoint-map = U+E1C0,U+E4B0,U+E082,U+E07E,U+E1BB=Lucide Picker
 font-size = 22
 keybind = shift+enter=text:\x1b\r
+# Keep Ctrl+[ distinct from Escape so pi-vim can enter visual mode.
+keybind = ctrl+bracket_left=text:\x1b[91;5u

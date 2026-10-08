@@ -1,0 +1,1 @@
+{"session_id":"s","transcript_path":"/nonexistent/t.jsonl","cwd":"/tmp","hook_event_name":"SubagentStop","stop_hook_active":false,"agent_id":"a1","agent_transcript_path":"/nonexistent/a.jsonl","agent_type":"general-purpose","last_assistant_message":"done"}

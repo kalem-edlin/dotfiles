@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"hello"},"sessionId":"s"}
+{"type":"custom-title","customTitle":"old title","sessionId":"s"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"mentions \"type\":\"custom-title\" only inside text"}]},"sessionId":"s"}
+{"type":"custom-title","customTitle":"Renamed\tsession: refactor the agent-state publisher for tmux panes, part two","sessionId":"s"}
+{"type":"ai-title","aiTitle":"ignored ai title","sessionId":"s"}

@@ -1,0 +1,4 @@
+{"type":"ai-title","aiTitle":"Valid auto title","sessionId":"s"}
+{"type":"custom-title","customTitle":"truncated
+"type":"custom-title" not json at all
+{"wrapped":{"type":"custom-title","customTitle":"nested, not an entry"}}

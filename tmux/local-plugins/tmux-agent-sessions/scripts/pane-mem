@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Memory entry point for tmux-agent-sessions.
+#
+# Usage: pane-mem PID...
+#
+# Prints "PID KIB" (one line per live root, space separated), where KIB is
+# the memory of the root's whole process tree. Roots that are not alive print
+# nothing; the picker uses that as its liveness check for @agent_pid.
+# Always exits 0.
+#
+# macOS: execs bin/pane-mem-darwin (built from src/pane-mem.c by setup) when
+# it is executable. It sums phys_footprint, which counts compressed pages.
+# Fallback (and Linux): one `ps -axo pid=,ppid=,rss=` snapshot summed with
+# awk. RSS undercounts idle processes on macOS (compressed pages excluded),
+# so the fallback numbers are lower there.
+
+set -u
+
+[ "$#" -gt 0 ] || exit 0
+
+# Deployed by stow as per-file symlinks: resolve our real path before
+# locating siblings (bash 3.2 safe; no readlink -f on older macOS).
+# Parameter expansion instead of dirname/cd: this runs per pane per
+# status-interval, so every avoided fork counts.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")" || break
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="${self%/*}/$link" ;;
+  esac
+done
+case "$self" in
+  */*) script_dir="${self%/*}" ;;
+  *) script_dir="." ;;
+esac
+
+helper="$script_dir/../bin/pane-mem-darwin"
+if [ -x "$helper" ]; then
+  exec "$helper" "$@"
+fi
+
+ps -axo pid=,ppid=,rss= 2>/dev/null | awk -v roots="$*" '
+  {
+    pid = $1; ppid = $2
+    kib[pid] = $3 + 0
+    alive[pid] = 1
+    if (ppid != pid) kids[ppid] = kids[ppid] " " pid
+  }
+  END {
+    n = split(roots, r, " ")
+    for (i = 1; i <= n; i++) {
+      root = r[i]
+      if (root !~ /^[0-9]+$/ || !(root in alive)) continue
+      # Iterative DFS; "seen" guards against ppid cycles (pid 0 on macOS).
+      split("", seen)
+      sp = 1; stack[1] = root; seen[root] = 1; sum = 0
+      while (sp > 0) {
+        cur = stack[sp--]
+        sum += kib[cur]
+        if (cur in kids) {
+          m = split(kids[cur], c, " ")
+          for (j = 1; j <= m; j++)
+            if (!(c[j] in seen)) { seen[c[j]] = 1; stack[++sp] = c[j] }
+        }
+      }
+      printf "%s %d\n", root, sum
+    }
+  }'
+exit 0
