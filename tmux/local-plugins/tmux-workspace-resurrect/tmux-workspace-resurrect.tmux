@@ -13,11 +13,22 @@ fi
 autosave_interval="$(jq -er '.autosave_interval_minutes | numbers' "$CONFIG_FILE" 2>/dev/null || echo 5)"
 restore_mode="$(jq -er '.restore_mode | strings' "$CONFIG_FILE" 2>/dev/null || echo queue)"
 
-tmux set-option -gq @continuum-save-interval "$autosave_interval"
+# Continuum remains installed for startup restore, but its status-line save
+# scheduler is deliberately disabled. A launchd/systemd timer calls the
+# verified wrapper without depending on an attached client or a redraw.
+tmux set-option -gq @continuum-save-interval 0
+tmux set-option -gq @workspace-autosave-interval "$autosave_interval"
 tmux set-option -gq @continuum-restore "on"
 tmux set-option -gq @resurrect-processes "false"
 tmux set-option -gq @workspace-resurrect-config "$CONFIG_FILE"
 tmux set-option -gq @workspace-resurrect-restore-mode "$restore_mode"
+
+# TPM overwrites this option when tmux-resurrect loads. The post-TPM wiring
+# script sets it again; this early value also covers callers during startup.
+tmux set-option -gq @resurrect-restore-script-path "$PLUGIN_DIR/../../scripts/resurrect_restore.sh"
+tmux bind-key C-M-r confirm-before -p "Restore last tmux snapshot over the LIVE landscape? (y/n)" \
+  "run-shell 'TMUX_RESTORE_DIALOG=1 bash $PLUGIN_DIR/../../scripts/resurrect_restore.sh || true'"
+tmux bind-key M-F11 run-shell "TMUX_RESTORE_DIALOG=1 bash '$PLUGIN_DIR/../../scripts/resurrect_restore.sh' || true"
 
 append_resurrect_hook() {
   local hook_name="$1"

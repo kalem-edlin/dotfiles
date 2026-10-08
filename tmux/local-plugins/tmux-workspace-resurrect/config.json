@@ -1,6 +1,18 @@
 {
   "autosave_interval_minutes": 5,
-  "restore_mode": "queue",
+  "save_timeout_seconds": 120,
+  "neovim_rpc_timeout_seconds": 3,
+  "restore_timeout_seconds": 30,
+  "restore_pane_timeout_seconds": 2,
+  "restore_mode": "whitelist",
+  "restore_whitelist": {
+    "names": [
+      "claudef",
+      "pif",
+      "nvim"
+    ],
+    "delay_ms": 500
+  },
   "capture": {
     "shell_buffers": true,
     "agent_sessions": true,
@@ -9,7 +21,6 @@
   },
   "agents": [
     "claude",
-    "codex",
     "pi"
   ],
   "redact_patterns": []

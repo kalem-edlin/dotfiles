@@ -2,6 +2,682 @@
 
 Status: reopened September 17, 2026. The earlier fixes did not establish reliable operation under load.
 
+## September 29, verified save repair and retention
+
+No user process, pane, session, or server was restarted or relaunched.
+
+The two missing Codex IDs were recovered by following each pane's process
+descendants to native Codex and reading only the metadata header of its open
+rollout. The save-time check now validates the root conversation ID, cwd, and
+main CLI source. It understands an optional `_attemptUUID` filename suffix,
+ignores subagent rollouts, and rejects ambiguous roots. Live verified identity
+takes precedence over a stale hook. Process queries have two-second bounds and
+metadata reads are limited to 1 MiB. No transcript search or cwd-based ID guess
+is used. The precise original reason the startup hooks did not record these
+IDs remains unproven. Hook trust was not bypassed or altered; the official
+[Codex hook documentation](https://learn.chatgpt.com/docs/hooks) requires review
+of non-managed hooks, so this repair does not silently approve them.
+
+The save wrapper now writes into a private staging directory. Only a validated
+layout, matching sidecar, full pane coverage, and exact agent IDs are published.
+Each successful layout has its own immutable `.workspace_state.json` companion.
+`last` is the commit pointer; the restore helper follows it to the matching
+companion. The old `workspace_state.json` name is retained as a compatibility
+symlink. Filenames include a unique suffix to avoid same-second collisions.
+Rejected saves preserve the previous checkpoint and report affected pane names.
+The required upstream path-override patch is installed and wired into setup.
+
+Validation included 36 Python tests, transaction/retention regressions, the
+existing agent-resume/multiline/restore-guard integrations, ShellCheck, syntax,
+and whitespace checks. A first live attempt exposed the newer Codex root
+filename and subagent distinction; it rejected the attempt while preserving
+the old pointer, metadata, and marker. After adding regression coverage, a real
+verified save at September 29, 19:33:54 CDT completed in **2.50 seconds** with
+**68 panes, 38 agent records, 10 Neovim sessions, and zero agent capture errors**.
+All 68 saved logical panes match the live server. Snapshot:
+`tmux_resurrect_20260929T193352_47908_10775.txt`.
+
+Retention remains age-based: 30 days by default, always retaining the newest
+five and the current selected snapshot. Companions are removed with expired
+layouts. Cleanup uses one directory scan, not one subprocess per file. Manual
+and periodic saves use the same path. A continuously active five-minute timer
+produces 288 saves per day; there is no fixed count cap. Periodic autosave is
+still paused. The separately created emergency recovery bundle is not copied
+on each save and has no automatic expiry.
+
+Before live verification, the entire prior save directory was preserved at
+`~/.local/state/tmux-workspace-resurrect/pre-transaction-save-Btj7Sj/resurrect/`.
+The existing age policy then pruned three expired layouts dated August 28–29;
+all three remain recoverable in that copy. There are now 668 ordinary layout
+snapshots. Older historical layouts do not retroactively acquire matching
+sidecars; per-snapshot metadata history starts with this repair.
+
+## September 26, whitelisted automatic resumption
+
+Approved behavior is now configured as `restore_mode: "whitelist"`, with
+`claudef`, `pif`, `codexf`, and `nvim` allowed and a 500 ms launch delay.
+Automatic execution requires a recognized saved application record, running
+process evidence, and an exact recorded agent ID or existing Neovim session
+file. Shell-at-save, unknown commands, unsupported records, and pending shell
+input remain queue-only. Pending input wins over application metadata even
+when an old Neovim registration is still present.
+
+Unsubmitted scripts retain their literal multiline text, trailing blank lines,
+and cursor position. A private ZLE widget assigns the cursor directly in
+Emacs and vi insert modes. Live draft input and running foreground processes
+are left alone. Repeating restoration does not duplicate launch attempts or
+queued text. These changes apply to future restorations; no current user
+tools were relaunched to activate the policy.
+
+The local manual restore bindings and Continuum restore path now use a guarded
+wrapper. It shares a lock with the verified save wrapper and requires explicit
+completion from the workspace restore hook. Saves fail closed while restoring
+or after an incomplete attempt on that server. The guard is server-PID scoped,
+not cross-restart recovery protection. The remote worker attach-loop's direct
+upstream restore path is outside this local wiring. Periodic autosave remains
+paused from the preceding incident.
+
+Validation: 27 Python unit tests; isolated tmux/ZLE integration with harmless
+tool stubs (exact IDs, 500 ms spacing, byte-exact draft/cursor, live-pane skips,
+repeat idempotence); existing agent-resume and multiline capture integrations;
+restore/save lifecycle guard regressions; ShellCheck and shell syntax checks.
+An early test fixture inherited the user's Neovim path and launched Neovim in
+its disposable pane. That fixture was cleaned up. The final test isolates
+ZDOTDIR/XDG paths and verifies all four stub resolutions before restoration.
+
+## September 26, 21:25 crash recovery
+
+Recovered all 57 logical panes from the protected 20:08 checkpoint. All 36
+nonempty queued commands were verified against pane captures, including 24
+recorded agent sessions. Eight editor commands now reference independently
+preserved newer generation files with inline buffer text, not the old empty
+legacy sessions. Agents/editors remain queued for Enter rather than auto-run.
+
+Automatic startup restoration was blocked by three leaked isolated Neovim test
+servers. Continuum suppresses startup restore when other tmux servers exist.
+Verified and terminated only `workspace-nvim-test-68900`,
+`workspace-nvim-test-80560`, and `workspace-nvim-test-81090`. Added exit cleanup
+to the Neovim test; Python syntax validation passed. A new manual save after
+the earlier restoration was not required. Saves through 21:16 existed.
+
+At 21:21 the launchd timer replaced `last` and the companion sidecar with the
+new one-pane workspace, despite the success marker remaining at 21:16. The
+timer was unloaded during recovery and remains paused. Manual saving is still
+available. Prevention of partial-workspace overwrite remains unresolved.
+
+Original backup: `~/.local/state/tmux-workspace-resurrect/recovery-bundles/recovery-20260927T012140Z-dd66df99/`.
+All 892 payload hashes passed. Incident preservation and recovery staging:
+`~/.local/state/tmux-workspace-resurrect/recovery-incident-20260926-AJhzIs/`.
+This includes pre-recovery artifacts and newer Neovim files. The original
+backup was not modified. The normal restore pointer and sidecar now reference
+the recovered checkpoint again.
+
+An isolated tmux 3.7b test reproduced `select-layout` accepting a 118-column
+layout while window width remained 113. All 45 staged layouts were normalized
+in an isolated server to 113x33 before live restoration. All recovered live
+pane bounds fit their windows. This establishes the clipping mechanism, not
+the cause of the reported server crash. No September 26 tmux crash report was
+found, and a persistent resize/restore fix has not been implemented.
+
+## September 26, 20:59 Neovim text restoration and Codex command repair
+
+### Why `pane-_64.vim` reopened empty
+
+The frozen 20:21 recovery copy contains a meaningful 1,437-byte session for
+`roll-5-carousels:3.0`: cwd `content-engine-5`, editing
+`/private/tmp/recovered-caption-scene-pairing.md`, with cursor line 17.
+The live file was rewritten at **20:43:58** into a 1,090-byte session with cwd
+`dotfiles`, `enew`, and no file to edit. This overwrite is directly observed.
+
+The old module used only the tmux pane ID in its filename and scheduled
+`mksession!` during initialization. Reused pane IDs and startup saves could
+overwrite the very `-S` file being restored. That is the likely mechanism;
+there is no per-write audit trail proving which process performed the overwrite.
+Separately, the original `/private/tmp` document is now missing. Ordinary
+`mksession` stores layout and file references, **not unsaved or unnamed buffer
+text**. The earlier existence-only artifact audit did not establish text recovery.
+
+### Audit of all eight previously saved editors
+
+| Saved editor | Current finding |
+| --- | --- |
+| roll-11-gestures:3.1 | Recovered unnamed buffer open, modified, 5 lines; preserved |
+| roll-5-carousels:3.0 | Caption file missing; recovered separately from `.swo` |
+| roll-5-carousels:10.1 | Recovered unnamed buffer open, modified, 43 lines; preserved |
+| roll-6-agentic-engineering:1.1 | Missing named target, recovered text open, modified, 27 lines; preserved |
+| roll-6-agentic-engineering:2.1 | Missing named target, recovered text open, modified, 79 lines; preserved |
+| roll-6-agentic-engineering:3.1 | Unopened unnamed buffer; separately recovered uncertain directory-swap candidate |
+| roll-9-broll-classification | Missing temporary prompt file, recovered text open, modified, 9 lines; preserved |
+| roll-hiring:1.1 | Empty unnamed buffer both in saved references and current editor; no evidence of missing text |
+
+Before activation, all six live editors' ordinary loaded buffers were copied
+using read-only RPC to a private safety file:
+`~/.local/state/tmux-workspace-resurrect/recovered-buffers/20260926T204936/live-buffer-capture.json`.
+
+Old swap files were copied first, then recovered using isolated, config-free,
+headless Neovim into separate private files under the same directory. No
+original swap, source document, or live buffer was overwritten/deleted:
+
+- `caption-from-swo.md`: **8,565 bytes / 50 lines**, from the 19:50 swap; no
+  reported recovery errors or missing-line markers. This is the substantial
+  caption recovery. Other generations are retained separately: newer `.swn`
+  recovered only four bytes; older `.swp` recovered 22 lines. Mtime alone was
+  therefore not a safe basis for choosing content.
+- `UNCERTAIN-roll-6-agentic-engineering-3.1-from-directory-swf.txt`:
+  **10,049 bytes / 40 lines**, recovered without reported errors. Attribution
+  to the old unnamed pane is not proven, so it was not injected automatically.
+
+### Implemented and activated
+
+- Editor generation filenames include process ID, time and a high-resolution
+  nonce retained across module reload. Initial persistence waits for startup
+  restoration; it cannot replace its own `-S` source.
+- One atomically published, private `.vim` artifact embeds loaded ordinary
+  buffer text alongside layout, including modified and unnamed buffers. There
+  is no separate companion-text dependency or new background service.
+- Text changes (including insert/completion edits) update this artifact on a
+  750ms coalesced timer, independent of tmux's save cadence, without per-keystroke
+  tmux calls or mksession generation. Explicit saves and topology changes refresh
+  the layout too. Edits newer than the last completed snapshot can still be lost
+  in an abrupt crash; this is not a zero-loss transactional editor journal.
+- Restoring applies text to buffers in memory, preserves window associations,
+  cursors, modified state and relevant buffer options, and never overwrites the
+  underlying source documents. A temporary, path-scoped swap guard avoids the
+  routine recovery prompt for backed-up buffers; normal swap settings resume.
+- The tmux save hook now checks Neovim's actual boolean acknowledgement, fails
+  an explicit refusal without publishing a new sidecar, and bulk-refreshes the
+  registered paths after RPC. An acknowledged session must be a nonempty file.
+- Removed the redundant approval-bypass flag from generated Codex resumes.
+  Restore also normalizes already-saved Codex commands, retaining exact IDs.
+  Pending shell input is not rewritten. The wrapper remains responsible for
+  the flag; the recorded command is `codexf resume <recorded-ID>`.
+
+Activated by reloading the module in all six current registered editors and
+calling `save()`. Before/after hashes of loaded text, names, buffer IDs and
+modified flags matched in every editor; no editor was restarted. The subsequent
+verified save at **20:59:44 CDT** took **1.79 seconds**, covered **54/54 current
+panes**, had zero agent capture errors, and contained six private inline-text
+Neovim session files plus the corrected exact-ID Codex command.
+
+Tests include real isolated Neovim restart with stale swaps and reused tmux pane
+ID, modified named text versus changed disk content, two visible unnamed splits,
+live module reload, failed-mksession preservation of the prior artifact; 19 Python
+tests; recorder/save/restore integration including old redundant Codex flags;
+Neovim timeout and false acknowledgement; multiline/68-pane capture; ShellCheck,
+syntax and whitespace checks. A separate test edits text after the explicit
+save, waits only for the debounce, SIGKILLs the disposable editor (no exit save),
+and confirms the newer text restores while the source session stays unchanged.
+Legacy frozen sessions remain unchanged and still
+require their separate recovery candidates; their missing text cannot be created
+retroactively by the new implementation.
+
+## September 26, 20:21 manual recovery copy
+
+At the user's request, made one private, reboot-persistent recovery copy at:
+
+`~/.local/state/tmux-workspace-resurrect/recovery-bundles/recovery-20260927T012140Z-dd66df99/`
+
+- Preserves the verified 20:08 layout/sidecar/marker: 57 panes, 24 exact agent
+  resumes, and eight Neovim sessions.
+- Includes actual native conversation histories plus Claude's session-specific
+  subagent/tool-result directories and Codex child histories, not merely IDs
+  or paths. Histories/editor sessions reflect their state at copy time.
+- 892 independently copied payload files, 474,387,396 bytes (about 452 MiB),
+  with SHA-256 verification of every copied file. Source layout/sidecar/marker
+  and the `last` target were checked unchanged throughout creation.
+- Private directories/files (0700/0600), outside Git and outside OS temporary
+  directories. `manifest.json` records original paths, bundle paths, sizes and
+  hashes; `RECOVERY.md` explains careful manual restoration.
+
+The user explicitly rejected a separate maintenance script/service. Removed
+the newly drafted bundle CLI, installer and tests; no LaunchAgent was installed,
+no automatic backup/cleanup hook was added, and normal save performance is
+unchanged. This copy is managed manually for now. If age-based cleanup is later
+implemented, keep it in the existing verified-save lifecycle: only recognized
+bundles older than three days, retaining the newest verified recovery copy.
+
+## September 26 reboot-readiness audit of the 20:08 manual save
+
+Read-only inspection of the user's new manual save; no save, live restore,
+restart, or configuration change was performed during this audit.
+
+- `last` points to `tmux_resurrect_20260926T200849.txt`; companion metadata is
+  dated 20:08:51 CDT and the successful-save marker 20:08:52 CDT.
+- Exact snapshot/sidecar agreement: 57/57 unique pane logical IDs, all 57 cwd
+  directories present, zero agent capture errors.
+- 24 exact-ID focus resumes: 21 Claude, two Pi, one Codex. Native session
+  history files for all 24 exist, located by explicit session-file path or
+  exact-ID filename under native session roots; transcript contents were not
+  read. All eight referenced Neovim session files also exist.
+- Three valid Treemux mappings. Twenty-one ordinary shell panes have an empty
+  selected command: their layout and cwd are saved, but no command is queued.
+- Installed configuration enables `@continuum-restore on`, loads the workspace
+  post-restore hook, and configures queue mode. The actual loaded config list
+  includes both `~/.tmux.conf` and `~/.config/tmux/tmux.conf`; the smaller former
+  file is not shadowing the latter. `~/tmux_no_auto_restore` is absent.
+
+### Expected behavior and limitations
+
+After reboot, restoration is configured to run when the first tmux server
+starts. This is not a promise that merely booting macOS starts tmux: Continuum
+boot integration is not enabled. Restored agent/editor commands are pasted
+into the relevant shells without Enter. The user must execute them. This
+audit did not perform a full reboot or an actual production restore.
+
+Automatic restore can be skipped by Continuum if another server is already
+running, or individual commands can be skipped if shells are not ready within
+the configured per-pane/global budgets. Those failures do not inherently
+destroy the saved commands or native histories; they remain usable for manual
+reconstruction. Neovim session files preserve editor setup and file references,
+not a guarantee of every unsaved buffer byte; normal swap recovery is separate.
+
+### Manual recovery reference
+
+If startup restoration fails, **do not take a new save over the recovery source**.
+Preserve the current `last` target, `workspace_state.json`, and the referenced
+Neovim session files before another attempt. Native Claude/Pi/Codex histories
+are also required for exact conversation resumes and must remain on disk.
+
+The live configured restore binding is **prefix + Ctrl-Alt-r**, with confirmation.
+**Prefix + Ctrl-r reloads configuration; it is not the restore binding.** Only
+invoke restore after inspecting the current landscape: it can alter existing
+panes, especially Treemux sidebars. The upstream layout restore chains the
+workspace post-restore hook. If necessary, manual reconstruction can instead
+use each sidecar pane's `logical_id`, `cwd`, and `selected_command` to rebuild
+the layout and queue its exact command, without requiring old pane process IDs.
+
+Redundancy gap: historical layout snapshots exist, but `workspace_state.json`
+and the referenced per-pane Neovim session files are mutable latest-state
+files. The present save is recoverable; it is not an immutable multi-generation
+backup. Recommended next step before reboot is a timestamped recovery bundle
+containing the matching layout, sidecar, and Neovim sessions, with a manifest
+of required native agent history files. No bundle was created in this read-only
+audit. Autosave remains paused; the verified checkpoint is a manual save.
+
+## September 26, 19:13 save-performance repair
+
+Manual saves now complete in **1.89–1.92 seconds** on the current live workspace,
+versus **13.345 seconds** measured at the start of this investigation. The earlier
+25–30-second observation was on a larger workspace and different machine load;
+these measurements are not a guarantee under arbitrary build pressure.
+
+Two GPT-5.6 Sol agents handled upstream auditing/repair and custom-hook batching;
+the main agent profiled the real save, reviewed correctness, and verified artifacts.
+
+### Measured cause and changes
+
+| Live measurement | Complete verified save | Upstream before custom hook | Custom hook |
+| --- | ---: | ---: | ---: |
+| Before changes | 13.345s | 8.884s | 4.325s |
+| Process-scan bypass only | 4.870s | 0.501s | 4.236s |
+| Bypass plus batching | 1.919s | 0.493s | 1.195s |
+
+Phase times are approximate boundaries from Bash tracing; totals include the
+verified wrapper. An independent untraced final save took 1.89s. The user was
+actively using/changing the workspace (56–57 panes during this profiling run).
+
+- Upstream Resurrect invoked its `ps` strategy separately for every pane,
+  scanning the whole system process list despite `@resurrect-processes=false`.
+  The existing setup bypass patch had not been applied to the installed plugin.
+  Applied it now: disabled process replay no longer pays for unused command
+  capture. Normal/default process-capture behavior and the 11-field layout
+  schema remain intact. Existing setup patch installation makes this durable.
+- The custom hook launched Python inference for each pane, another Python
+  process for each agent resume, and repeated jq decoding/assembly. Replaced
+  this with one `assemble_panes.py` process importing the canonical command
+  builder and validating all hook records directly. Shell-traced custom-hook
+  Python/jq invocations fell from 236 to 11. This count excludes child tmux
+  calls within Python; it is not a claim of only 11 total save subprocesses.
+- Pane metadata remains one lossless bulk capture. Treemux registrations now
+  use bounded batches of eight pane-option expansions; sidebar identities are
+  resolved from the captured pane set rather than per-sidebar tmux calls.
+- A first all-in-one Treemux query hit tmux's large-format limit at 57 panes
+  (9,483-character format returned only a newline). The verification gate
+  rejected those candidate saves without advancing the success marker. Bounded
+  batches fixed this; a new 68-pane regression prevents repeating it.
+- Neovim RPCs remain serial and bounded by the existing timeout. No completeness,
+  provenance, exact-ID, atomic publication, or successful-save validation was
+  removed for speed. Busy/unresponsive editors can still increase save time.
+
+### Final live acceptance
+
+The verified wrapper completed successfully at **19:13:59 CDT**:
+
+- 57/57 panes, exact layout/sidecar coverage, zero capture errors.
+- 21 Claude, two Pi, and one Codex record. All 24 agent objects and generated
+  resume commands hash-identical to the pre-optimization baseline; commands
+  were also parsed and checked against their exact saved session IDs.
+- Eight Neovim sessions and all three valid Treemux sidebar mappings retained.
+  Two previously emitted stale Treemux entries with sidebar logical ID `:.`
+  are correctly excluded by resolving against actual captured panes.
+- Success timestamp advanced. No user client/build was restarted or stopped,
+  no live restoration was performed, and autosave remains paused.
+
+Tests pass: 18 Python tests (including malformed/non-UTF8 hook data, identity
+edge cases, legacy timestamps, pending-buffer priority and batched exact IDs);
+real recorder/save/queued-restore integration; multiline and lossless Treemux
+argument round trips; 68-pane capture; Neovim timeout; upstream process bypass,
+enabled/default strategy and invalid-strategy fallback; syntax/ShellCheck and
+whitespace checks. The Neovim robustness fixture now seeds isolated environment
+paths before starting its test server.
+
+Normal usage remains **prefix + Ctrl-S**; no reload is needed. To measure again:
+`/usr/bin/time -p bash ~/.config/tmux/scripts/resurrect_save.sh` (writes a save).
+
+## September 26, 18:06 verified repair
+
+This is the current result, superseding the incomplete-save warnings below.
+Two GPT-5.6 Sol agents implemented capture/coverage and record/test isolation;
+the main agent recovered affected metadata and verified the live save.
+
+### Live acceptance result
+
+The same verified wrapper used by manual prefix+Ctrl-S completed successfully
+at **18:06:45 CDT**, in 25 seconds:
+
+- **68/68 panes** captured, with unique logical locations and exact coverage
+  of the authoritative tmux-resurrect layout.
+- **21 Claude, three Pi, and one Codex session** recorded with nonempty IDs.
+- Every generated command was parsed and checked against its saved ID:
+  `claudef --resume <id>`, `pif --session <id>`, `codexf resume <id>`.
+- **Zero agent_capture_errors**. The success marker advanced and the status
+  indicator rendered `0m` immediately afterward.
+
+No live agent was restarted and no production restore was run. Autosave
+remains paused as requested; this verifies manual saving, not periodic saving.
+
+### Repairs and recovery
+
+- Replaced independently line-aligned pane-field queries with a single bulk
+  query using random field markers decoded into JSON. Commands and edit
+  buffers retain embedded newlines instead of shifting later pane rows.
+- Refuse incomplete/duplicate/drifting pane capture. The verified wrapper
+  compares the sidecar's logical pane set against the actual layout file,
+  not just its claimed count or a later live view.
+- Hook records now write under
+  `agents/server-<server-pid>-<server-start>/pane-N.json`. Different tmux
+  servers cannot overwrite same-numbered panes' records. Legacy records are
+  read-only fallback and still undergo identity/timestamp validation.
+- Test servers receive temporary state/config/resurrection directories before
+  any panes exist. Hook lookup can recover the state path from server
+  environment if a child loses the variable. Tests cover cross-server pane-ID
+  reuse and missing propagated environment without production writes.
+- Recovered **all seven** test-contaminated legacy records from the preserved
+  pre-test copy. Archived the synthetic versions under
+  `~/.local/state/tmux-workspace-resurrect/agents/recovery-20260926-test-contamination/`.
+  No native agent conversation history was deleted or rewritten.
+- Verified the preserved Codex ID against the current `CODEX_THREAD_ID`.
+  Verified Pi's preserved ID/cwd against its native session-file header.
+- Verified the disputed Claude ID against its native live-process registry
+  `~/.claude/sessions/20586.json`, including PID 20586 being a child of the
+  current pane process and the matching tmux pane. The ID was correct; the
+  legacy cwd check was a false rejection. Refreshed its scoped registration
+  from this authoritative native record, without restarting Claude. Codex's
+  scoped registration was similarly refreshed from its verified identity.
+
+The previous layout/sidecar/marker were backed up before the live save under
+`/private/tmp/tmux-before-verified-repair.bNLca5`.
+
+### Regression verification
+
+All pass: 15 command/wrapper unit tests; multiline command/edit-buffer capture;
+real recorder-to-save-to-queued-restore tests on isolated tmux servers;
+cross-server metadata isolation and lost-environment protection; actual
+verified-wrapper positive and agent-error cases; Neovim timeout robustness;
+syntax and whitespace checks. No real agent command was executed by restore
+tests. Future full-restore testing should still use an isolated server rather
+than interrupt this live workspace.
+
+## September 26, 17:55 screenshot and manual-save audit
+
+The newest Desktop screenshot, `Shot 2026-09-26 at 5.54.49 PM.png`, shows
+"Layout saved, but 3 agent session(s) lack verified resume IDs." This is a
+partial save, not evidence that nothing was written. The production sidecar
+was written at 17:54:33 CDT and references
+`tmux_resurrect_20260926T175130.txt`. The success marker remains at 12:54:36.
+
+The three explicitly rejected entries are:
+
+- `dotfiles:1.0`, pane `%3`, expected Codex. Its live hook file instead holds
+  a synthetic Pi record from test server 59702 and temporary test directory
+  `/private/tmp/workspace-agent-resume-test.jIp7Su`, recorded at 20:00:12 UTC.
+- `dotfiles:2.0`, pane `%4`, expected Pi. Its live hook file instead holds a
+  synthetic Codex record from the same test server/time.
+- `roll-11-gestures:2.0`, pane `%214`, the previously identified legacy Claude
+  record with mismatched cwd and no process identity.
+
+The first two are contamination from this investigation's tests. Earlier
+claims that all testing left production hook metadata untouched were wrong.
+The current integration script explicitly passes its temporary state directory,
+but an earlier test run wrote records into the shared production agent
+directory. Files are keyed only by pane number, so a different tmux server
+can overwrite same-numbered production files. Identity validation rejects
+those records during save but does not prevent the overwrite itself.
+
+The original `%3` Codex and `%4` Pi records are preserved under
+`/private/tmp/tmux-agent-preview.gOPB2i/state/agents/`. Their tools, pane IDs,
+timestamps and cwd match the earlier live preview. This audit did not yet
+replace the contaminated files or claim that a new save has verified recovery.
+Native agent session histories were not deleted by this metadata overwrite.
+
+A separate capture defect is confirmed: the saved layout has 67 pane records,
+but its companion sidecar has only 50. Logs show "skipping unstable pane row"
+for the omitted rows. Fresh read-only queries found three extra physical
+lines in `@workspace-last-command` output, while title/path/buffer queries
+had one line per pane. The save script joins independently formatted fields
+by line position using `paste`; multiline commands therefore misalign later
+rows. Its mismatch guard avoids mixing different panes' data but silently
+drops application state. Structural validation currently does not compare
+layout and sidecar pane coverage.
+
+The sidecar does contain 14 Claude and two Pi records with nonempty IDs and
+focus resume commands. That is partial success, not a fully recoverable
+workspace. The three-agent warning is not an exhaustive account of the
+17 omitted pane records.
+
+Required repairs: recover the two preserved production registrations after
+checking current identity; isolate hook-record filenames by tmux server and
+harden tests against production writes; encode multiline fields safely and
+gate successful-save reporting on full pane coverage; resolve the legacy
+Claude registration; then take and inspect a fresh manual save. This turn
+performed diagnosis and documentation only, not these repairs.
+
+## September 26, focus-agent resume repair
+
+Scope: repair exact-ID restoration through `claudef`, `pif`, and `codexf`.
+Automatic saving stays paused at the user's request. No live restore or
+production save was invoked by this investigation. Luna 6 agents audited
+profile hooks/artifacts and implemented helper tests and isolated integration
+tests; the main agent reviewed and integrated the repair.
+
+### Hook audit and changes
+
+The hooks are installed in the actual focus configurations: claudef's explicit
+settings file, pif's extension directory, and the normal Codex hooks file used
+by codexf. The suffix/profile split was not a missing-hook issue on this Mac.
+The confirmed failure was provider inference ignoring the suffixes, followed
+by the broken jq join dropping all otherwise eligible session metadata.
+
+Changes now active through the `~/.config/tmux` repository symlink:
+
+- Parse normal and focus launcher names, including executable paths and
+  simple `env`/assignment/command prefixes. Ignore mentions inside unrelated
+  commands. Support a literal `cd <path> && <launcher>` prefix.
+- Always generate `claudef --resume <id>`, `pif --session <id>`, or
+  `codexf resume <id>`. In a follow-up request the user chose explicit resume
+  syntax, so codexf now forwards its arguments without inserting `resume`.
+  Replace old selectors; do not preserve an old
+  session ID. Preserve supported simple options and safely quote arguments.
+- Serialize agent metadata before jq joins it. Save the recorded ID in both
+  the agent object and the generated selected command.
+- Bind new hook records to server PID/start time and pane PID. Reject hooks
+  still carrying an old server's TMUX environment. Legacy records require
+  matching tool/pane/cwd and a timestamp after server startup. That legacy
+  check is intentionally conservative but weaker than new identity binding.
+- Missing, malformed or stale records now produce explicit per-pane errors
+  and no bare picker/fresh launch. The verified manual-save wrapper refuses
+  to advance its success marker when these errors exist. Valid layout and
+  other pane data can still be saved; a partial save is no longer reported
+  as fully verified agent recovery.
+- Preserve pending shell edits and Neovim restoration precedence. Disabled
+  Neovim capture no longer performs an RPC anyway.
+
+### Live preview, not a production save
+
+A temporary agent-only capture at 19:56 UTC generated exact-ID commands for
+13 Claude, three Pi, and one Codex pane. This preceded the additional literal
+`cd ... && claude` support. Production `last`, sidecar and success marker were
+not changed. Preview directory: `/private/tmp/tmux-agent-preview.gOPB2i`.
+
+One live legacy record was rejected at `roll-11-gestures:2.0`, pane `%214`.
+Its recorded cwd is `content-engine-11/apps/expo`; the pane and current Claude
+process cwd are `content-engine-11`. The record lacks the newly added process
+identity. The audit did not relabel or overwrite that record to make it pass.
+A fresh native SessionStart from the correct client can establish identity;
+until then, its exact-resume readiness remains unverified.
+
+The next acceptance step is the user's manual prefix+Ctrl-S, followed by
+read-only comparison of generated commands against their recorded IDs and
+inspection of `agent_capture_errors`. The user was asked to report any save
+warning. A real user-profile resume was not launched as a test.
+
+Verification completed in this turn: 14 command-helper unit tests; the
+isolated real-recorder/save/restore test for normal and focus launchers,
+including stale/missing metadata and pending shell buffers; the real verified
+save wrapper rejecting partial agent capture without advancing its marker;
+and the existing Neovim robustness test. All pass. The main agent reran the
+integration suite after reviewing the changes. At the final check, the
+production sidecar was still the pre-repair 12:54:36 CDT save, so verification
+of a new user-triggered manual save remains pending.
+
+Reference: [official OpenAI CLI documentation](https://developers.openai.com/codex/cli/reference/)
+confirms interactive Codex resume by ID. The user-requested explicit wrapper
+syntax is now covered by 15 unit/wrapper tests and the isolated restore test.
+The wrapper test executes its actual zsh function with a fake Codex executable
+and checks both instruction-loading branches, including no-argument startup.
+Historical launch metadata using `codexf <id>` remains readable; new generated
+commands always include `resume`. Existing shells need to reload `.zshrc` or
+open a new shell before using the new syntax. Previously saved artifacts are
+not rewritten; take a new manual save to capture the updated commands.
+
+## September 23, 23:56 audit after another crash
+
+Read-only runtime audit. No save or restore was invoked, and no commands were
+manually inserted into user panes during this investigation.
+
+- The latest verified save is now **23:46:30 CDT**, not the September 21 save
+  described in the earlier audit. `last` points to
+  `tmux_resurrect_20260923T234612.txt`; the success marker is 1790225190.
+- The custom restore log records execution at **23:47:55–57**, ending with
+  `restore complete: queued=33 skipped=0 dry_run=false`. The pane input
+  buffers were populated by this restore code, not by manual intervention
+  from this investigation. Whether startup or a manual restore action invoked
+  that code is not established by this log.
+- Of the 33 queued commands, **27 are last-command replays and six are
+  neovim-session restores**. The sidecar has 57 panes, 33 nonempty selected
+  commands and **zero agent records or generated agent-session commands**.
+- Exact bare commands in the saved data include nine `claudef --resume`
+  entries and one `pif --resume` entry. Additional focus-launcher records
+  include other arguments. Their source is `last-command`, not a generated
+  session resume. The missing IDs were not stripped by paste/restore: they
+  were never added during save. The launcher-inference and metadata-parser
+  defects below remain present in the deployed code.
+- Neovim's successful restoration follows its separate saved-session path.
+  The user's observed Codex recovery does not establish correctness of agent
+  metadata capture; its replay source is still last-command, not codex-session.
+- `launchctl print gui/501/com.kalem.tmux-resurrect-save` still reports no
+  service, and Continuum's interval is zero. Periodic saving remains off.
+  The client-detached save hook and manual save path remain available, but
+  the current log does not identify which triggered the 23:46 save.
+- The screenshot's seven-minute chip is consistent with elapsed time since
+  that 23:46 successful save. It is an age display, not a countdown or proof
+  of scheduler health. The runtime check, rather than the seven-minute value
+  alone, confirms the scheduler is missing.
+
+The timer was paused during the September 17 investigation of slow/failed
+saves. Historical logs include sidecar-refresh failures, malformed-save
+rejections and write errors. Leaving that pause unresolved after restoring
+the status display left durability dependent on nonperiodic saves. This is
+an unfinished repair, not a reason normal operation should lack autosave.
+
+## September 23, missing autosaves and agent resume diagnosis
+
+Requested scope: explain the failed save/restore behavior and implement window
+naming. Save/restore checks were read-only. No save, restore, agent launch,
+timer activation or server restart was performed during this audit.
+
+### Confirmed causes
+
+1. **The five-minute scheduler is absent.**
+   `launchctl print gui/501/com.kalem.tmux-resurrect-save` reports no service.
+   The plist exists and specifies 300 seconds, but is not loaded. Continuum's
+   interval is deliberately zero, so there is no fallback periodic scheduler.
+   We paused launchd on September 17 and never completed reactivation. The
+   September 18 status restoration changed display only. The live tmux option
+   advertising five minutes describes intended cadence, not scheduler health.
+2. **The latest verified save is old.** `last` points to
+   `tmux_resurrect_20260921T132208.txt`; `.last-successful-save` is epoch
+   1790014954, September 21 at 13:22:34 CDT. The launchd log still ends
+   September 17, so that save did not come from the periodic launchd job.
+   The current tmux server started September 23 at approximately 13:37.
+3. **Focus launcher detection is incomplete.** `workspace_infer_agent` in
+   `scripts/common.sh` recognizes claude/codex/pi but not claudef/pif. The
+   shell records the actual submitted launcher, so those focus commands
+   never enter the agent-session resume branch despite their recorder hooks.
+4. **Eligible agent metadata fails parsing, silently.** At `scripts/save.sh`
+   around line 219, the jq expression joins two strings and an object using
+   `join("\u001c")`. A synthetic valid Codex record reproducibly fails with
+   exit 5, "string ... and object ... cannot be added". The script suppresses
+   stderr and uses `|| true`, leaving all parsed fields empty. Consequently
+   even recognized Codex launches retain a raw launch command instead of a
+   session-specific resume command. This is a current confirmed code defect;
+   the old successful August logs do not validate the current implementation.
+
+The September 21 sidecar contains **69 panes, 60 nonempty selected commands,
+9 empty commands, and zero agent records**. Its sources are 65 last-command
+and four neovim-session records. It is incorrect to characterize all selected
+commands as empty. Current live panes have shell command metadata, so the
+absence of agent records cannot be dismissed as a universally missing shell
+integration. Replaying the sidecar may queue ordinary launch commands, but
+cannot recover session-specific resumes from agent records it never saved.
+
+The current post-restore hook is installed. Logs have no restore/queue
+completion entries for September 18–23, so invocation during the crash
+recovery remains unproven. The sidecar is a single mutable file rather than a
+versioned companion to each layout snapshot; the September 17 sidecar was
+overwritten, preventing retrospective proof of exactly what that recovery
+could have restored. Queue mode intentionally pastes commands for the user
+to review and press Enter; it does not automatically execute them.
+
+### Naming change implemented and tested
+
+- New auto-named shell windows start as `[empty]`.
+- The first submitted command names the window immediately and retains that
+  name after exit. Focus wrappers remain `pif`/`claudef`, not `node`.
+- Basic leading environment assignments and `env`, `command`, `exec`, and
+  `noglob` wrappers are skipped. Arguments do not become part of the label.
+- Manual window names are preserved. Only the first eligible naming attempt
+  contacts tmux; there is no polling or per-keystroke naming work.
+- The global format is applied live. The hook is in the existing symlinked
+  zsh integration file, so new shells receive it. Existing interactive shells
+  can load it with `source ~/.zsh/tmux-workspace-resurrect.zsh`; no commands
+  were injected into running editors or agents to force a reload.
+- `bash tmux/tests/window_naming_test.sh` passes on a dedicated isolated tmux
+  server, including the actual `[empty]` initial window name, sticky command
+  name, all three requested launchers, assignments, and manual-name protection.
+  Zsh syntax and changed-file whitespace checks pass.
+
+### Repair required next
+
+Recognize the focus launchers, correctly serialize agent metadata and report
+capture errors; add regressions for their exact session resume commands.
+Version sidecars with layout snapshots. Verify a real save contains current
+agent session IDs and test queued restoration in an isolated server, then
+reload the five-minute launchd scheduler and observe scheduled success.
+Re-enabling the timer alone would only save the currently broken agent data
+more frequently. Status should also distinguish a stopped scheduler from a
+merely old save. None of these save/restore repairs was applied by this audit.
+
 ## September 18, original status restored
 
 At the user's request, removed the temporary plain status-format override and

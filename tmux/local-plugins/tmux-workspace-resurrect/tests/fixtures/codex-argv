@@ -1,0 +1,3 @@
+#!/bin/sh
+# Test double. Never invoke a real agent or access the network.
+printf '%s\n' "$@"

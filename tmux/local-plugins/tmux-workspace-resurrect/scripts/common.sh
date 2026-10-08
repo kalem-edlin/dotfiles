@@ -4,7 +4,13 @@ WORKSPACE_PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE_CONFIG_FILE="${TMUX_WORKSPACE_RESURRECT_CONFIG:-$WORKSPACE_PLUGIN_DIR/config.json}"
 
 workspace_state_dir() {
-  printf '%s\n' "${TMUX_WORKSPACE_RESURRECT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-workspace-resurrect}"
+  local configured="${TMUX_WORKSPACE_RESURRECT_STATE_DIR:-}"
+  if [ -z "$configured" ] && [ -n "${TMUX:-}" ]; then
+    configured="$(tmux show-environment -g TMUX_WORKSPACE_RESURRECT_STATE_DIR 2>/dev/null || true)"
+    configured="${configured#TMUX_WORKSPACE_RESURRECT_STATE_DIR=}"
+    case "$configured" in -TMUX_WORKSPACE_RESURRECT_STATE_DIR | '') configured="" ;; esac
+  fi
+  printf '%s\n' "${configured:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-workspace-resurrect}"
 }
 
 workspace_resurrect_dir() {
@@ -29,7 +35,17 @@ workspace_resurrect_dir() {
 }
 
 workspace_sidecar_file() {
-  printf '%s/workspace_state.json\n' "$(workspace_resurrect_dir)"
+  local resurrect_dir snapshot companion
+  resurrect_dir="$(workspace_resurrect_dir)"
+  snapshot="$(readlink "$resurrect_dir/last" 2>/dev/null || true)"
+  companion="$resurrect_dir/$snapshot.workspace_state.json"
+  if [ -n "$snapshot" ] && [ -f "$companion" ]; then
+    printf '%s\n' "$companion"
+  else
+    # Backwards compatibility for older snapshots and for the save hook's
+    # private staging directory before its companion has been published.
+    printf '%s/workspace_state.json\n' "$resurrect_dir"
+  fi
 }
 
 workspace_log_file() {
@@ -63,12 +79,7 @@ workspace_shell_quote() {
 }
 
 workspace_infer_agent() {
-  local command="$1"
-  case " $command " in
-    *" claude "* | *"/claude "*) printf 'claude\n' ;;
-    *" codex "* | *"/codex "*) printf 'codex\n' ;;
-    *" pi "* | *"/pi "*) printf 'pi\n' ;;
-  esac
+  python3 "$WORKSPACE_PLUGIN_DIR/scripts/agent_command.py" infer "$1"
 }
 
 workspace_command_is_shell() {
@@ -79,66 +90,27 @@ workspace_command_is_shell() {
 }
 
 workspace_resume_command() {
-  local tool="$1"
-  local session_id="$2"
-  local launch_command="$3"
-
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$tool" "$session_id" "$launch_command" <<'PY'
-import shlex
-import sys
-
-tool, session_id, command = sys.argv[1:4]
-try:
-    argv = shlex.split(command)
-except ValueError:
-    argv = []
-
-if not argv:
-    argv = [tool]
-
-result = []
-i = 0
-while i < len(argv):
-    arg = argv[i]
-    if tool == "claude" and arg in {"--resume", "-r", "--session-id"}:
-        i += 2
-        continue
-    if tool == "claude" and arg in {"--continue", "-c"}:
-        i += 1
-        continue
-    if tool == "pi" and arg in {"--session", "--resume", "-r"}:
-        i += 2
-        continue
-    if tool == "pi" and arg in {"--continue", "-c"}:
-        i += 1
-        continue
-    if tool == "codex" and arg == "resume":
-        i += 2
-        continue
-    result.append(arg)
-    i += 1
-
-if tool == "claude":
-    result.extend(["--resume", session_id])
-elif tool == "codex":
-    result.extend(["resume", session_id])
-elif tool == "pi":
-    result.extend(["--session", session_id])
-
-print(shlex.join(result))
-PY
-    return
-  fi
-
-  case "$tool" in
-    claude) printf 'claude --resume %s\n' "$(workspace_shell_quote "$session_id")" ;;
-    codex) printf 'codex resume %s\n' "$(workspace_shell_quote "$session_id")" ;;
-    pi) printf 'pi --session %s\n' "$(workspace_shell_quote "$session_id")" ;;
-  esac
+  python3 "$WORKSPACE_PLUGIN_DIR/scripts/agent_command.py" resume "$1" "$2" "$3"
 }
 
 workspace_pane_state_file() {
-  local pane_id="${1#%}"
-  printf '%s/agents/pane-%s.json\n' "$(workspace_state_dir)" "$pane_id"
+  local pane_id="${1#%}" access="${2:-read}" server_identity="${3:-}" scoped legacy
+  if [ -z "$server_identity" ]; then
+    server_identity="$(tmux display-message -p '#{pid}:#{start_time}' 2>/dev/null || true)"
+  fi
+  [[ "$server_identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  scoped="$(workspace_state_dir)/agents/server-${server_identity/:/-}/pane-$pane_id.json"
+  legacy="$(workspace_state_dir)/agents/pane-$pane_id.json"
+
+  case "$access" in
+    write) printf '%s\n' "$scoped" ;;
+    read)
+      if [ -f "$scoped" ]; then
+        printf '%s\n' "$scoped"
+      else
+        printf '%s\n' "$legacy"
+      fi
+      ;;
+    *) return 2 ;;
+  esac
 }

@@ -1,0 +1,10 @@
+{
+  "capture": {
+    "agent_sessions": true,
+    "neovim_sessions": false,
+    "treemux": false
+  },
+  "neovim_rpc_timeout_seconds": 1,
+  "restore_timeout_seconds": 15,
+  "restore_pane_timeout_seconds": 1
+}
