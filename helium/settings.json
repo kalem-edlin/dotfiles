@@ -1,0 +1,12 @@
+{
+  "local_state": {
+    "enabled_labs_experiments": ["helium-native-frame-materials@1"]
+  },
+  "preferences": {
+    "helium": {
+      "browser": {
+        "native_frame_materials": true
+      }
+    }
+  }
+}
