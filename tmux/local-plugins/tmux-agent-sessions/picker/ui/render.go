@@ -299,6 +299,7 @@ type listRow struct {
 	repo       string // badge text left of the name: the repo's code, or its full name
 	repoFg     string
 	repoBg     string
+	repoHit    bool // the query matched the repo name: badge text in matchFg (D82)
 	statusOnly bool // full-repo mode: no agents section on the right
 }
 
@@ -312,11 +313,12 @@ func newSessionRow(s *state.Session, pos []int) listRow {
 // newWorktreeRow labels the row with its branch, or its commit id dimmed
 // when detached, behind the repo badge b (D76). fullW above zero is
 // full-repo mode (D78): the badge shows the repo name padded or truncated
-// to fullW, and the row drops its agents section.
-func newWorktreeRow(t *state.Worktree, pos []int, b repoBadge, fullW int) listRow {
+// to fullW, and the row drops its agents section. repoHit paints the badge
+// text as a query match.
+func newWorktreeRow(t *state.Worktree, pos []int, repoHit bool, b repoBadge, fullW int) listRow {
 	n, at := agentSummary(t.Panes)
 	r := listRow{pos: pos, chips: aggregate(t.Panes, rowOrder), agents: n, agentsAt: at,
-		repo: b.code, repoFg: b.fg, repoBg: b.bg}
+		repo: b.code, repoFg: b.fg, repoBg: b.bg, repoHit: repoHit}
 	if fullW > 0 {
 		r.repo, r.statusOnly = padRight(truncate(oneLine(t.Repo), fullW), fullW), true
 	}
@@ -421,7 +423,11 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	}
 	line := gutter + paint(" ", "", bg, false)
 	if r.repo != "" {
-		line += paint(r.repo, r.repoFg, r.repoBg, true) + paint(" ", "", bg, false)
+		badgeFg := r.repoFg
+		if r.repoHit {
+			badgeFg = matchFg
+		}
+		line += paint(r.repo, badgeFg, r.repoBg, true) + paint(" ", "", bg, false)
 	}
 	line += highlightName(name, r.pos, nameFg, bg, selected)
 	right := ""

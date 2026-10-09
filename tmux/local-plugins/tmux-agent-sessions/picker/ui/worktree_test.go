@@ -103,7 +103,7 @@ func wtRows(w int, full bool) []string {
 	var lines []string
 	for i, wt := range snap.Worktrees {
 		_, pos := mm.match("ain", rowLabel(wt))
-		lines = append(lines, renderRow(newWorktreeRow(wt, pos, m.badges[wt.Repo], fullW), 0, w, i == 3, now))
+		lines = append(lines, renderRow(newWorktreeRow(wt, pos, false, m.badges[wt.Repo], fullW), 0, w, i == 3, now))
 	}
 	return lines
 }
@@ -167,7 +167,7 @@ func TestWorktreeRowBadges(t *testing.T) {
 	}
 	// The full badge is truncated at repoFullMaxW.
 	long := wtree("/dev/x", "a-repository-name-longer-than-the-cap", "main", "")
-	r := newWorktreeRow(long, nil, repoBadge{code: "ar", fg: cText, bg: cSurface2}, repoFullMaxW)
+	r := newWorktreeRow(long, nil, false, repoBadge{code: "ar", fg: cText, bg: cSurface2}, repoFullMaxW)
 	if r.repo != "a-repository-name-longe…" || width(r.repo) != repoFullMaxW {
 		t.Errorf("long repo badge = %q", r.repo)
 	}
@@ -443,10 +443,10 @@ func TestWorktreeSearch(t *testing.T) {
 	if !strings.Contains(list, fg(matchFg)) || !strings.Contains(ansi.Strip(list), "content-engine-1 main") {
 		t.Errorf("full-repo mode: %q", ansi.Strip(list))
 	}
-	// Neither a directory nor a repo name is searched.
-	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "y", "a", "p", "-")
+	// A directory is not searched.
+	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "/", "d", "e", "v")
 	if len(m.matches) != 0 {
-		t.Errorf("repo name matched: %v", matchRoots(m))
+		t.Errorf("directory matched: %v", matchRoots(m))
 	}
 	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "1", "a", "2", "b")
 	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"/dev/content-engine-5"}) {
@@ -523,7 +523,7 @@ func TestWorktreeModeKeepsFilterAndQuery(t *testing.T) {
 		t.Errorf("session count %s, input %q", m.countText(), ansi.Strip(m.renderInput()))
 	}
 	m = send(t, m, "ctrl+w")
-	if m.query.Value() != "i" || m.repo != "content-engine-1" || m.countText() != "2/3" {
+	if m.query.Value() != "i" || m.repo != "content-engine-1" || m.countText() != "3/3" { // the repo name matches "i" too
 		t.Errorf("back: query=%q repo=%q count=%s", m.query.Value(), m.repo, m.countText())
 	}
 	// With a query the cursor is the bottom match.
@@ -626,5 +626,165 @@ func TestOpenMode(t *testing.T) {
 	snap.Worktrees = nil
 	if m := newModel(&fakeActions{}, snap, nil); m.mode != modeSessions {
 		t.Errorf("no worktrees: opened in mode %d, want sessions", m.mode)
+	}
+}
+
+// refilter in worktree mode: a row matches on its branch or its repo name,
+// the repo filter applies first, and rows keep their order (D82).
+func TestRefilterRepoMatch(t *testing.T) {
+	m, _ := newWTTest(t)
+	type hit struct {
+		root string
+		repo bool
+		pos  []int
+	}
+	run := func(m model) []hit {
+		var out []hit
+		for i, idx := range m.matches {
+			out = append(out, hit{m.rows[idx].RowID(), m.repoHit[i], m.pos[i]})
+		}
+		return out
+	}
+	set := func(m model, q string) model {
+		m.query.SetValue(q)
+		m.refilter()
+		return m
+	}
+
+	// Repo only: "yap" is in yap-trial and in no branch.
+	got := run(set(m, "yap"))
+	if want := []hit{{"/dev/yap-trial", true, nil}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("repo only: %+v", got)
+	}
+	// Branch only: "exp/" is in no repo name.
+	got = run(set(m, "exp/"))
+	if want := []hit{{"/dev/roll-hiring", false, []int{0, 1, 2, 3}}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("branch only: %+v", got)
+	}
+	// Both: "e" is in the roll-hiring branch and in three repo names.
+	got = run(set(m, "e"))
+	if len(got) != 4 {
+		t.Fatalf("both: %+v", got)
+	}
+	for _, h := range got {
+		if !h.repo || (h.root == "/dev/roll-hiring") != (h.pos != nil) {
+			t.Errorf("both: %+v", h)
+		}
+	}
+	if got := run(set(m, "main")); len(got) != 3 || got[0].repo || got[1].repo || got[2].repo {
+		t.Errorf("main: %+v", got)
+	}
+	if got := run(set(m, "qqq")); len(got) != 0 {
+		t.Errorf("neither: %+v", got)
+	}
+	// An empty query highlights nothing.
+	for _, h := range run(set(m, "")) {
+		if h.repo || h.pos != nil {
+			t.Errorf("empty query: %+v", h)
+		}
+	}
+	// The repo filter applies first.
+	m.repo = "dotfiles"
+	m = set(m, "content")
+	if len(m.matches) != 0 || m.total != 1 {
+		t.Errorf("filtered: %v total %d", matchRoots(m), m.total)
+	}
+}
+
+// A repo-matched badge is painted in matchFg on its own background, in
+// the compact and the full-repo form, and a plain one is not (D82).
+func TestRepoHitBadge(t *testing.T) {
+	snap := wtFixture()
+	m := newModel(&fakeActions{}, snap, nil)
+	wt := snap.Worktrees[0]
+	b := m.badges[wt.Repo]
+	for _, fullW := range []int{0, m.repoW} {
+		hit := renderRow(newWorktreeRow(wt, nil, true, b, fullW), 0, 120, false, now)
+		plainRow := renderRow(newWorktreeRow(wt, nil, false, b, fullW), 0, 120, false, now)
+		text := b.code
+		if fullW > 0 {
+			text = padRight(wt.Repo, fullW)
+		}
+		if want := paint(text, matchFg, b.bg, true); !strings.Contains(hit, want) {
+			t.Errorf("fullW %d: hit badge not in matchFg: %q", fullW, hit)
+		}
+		if want := paint(text, b.fg, b.bg, true); !strings.Contains(plainRow, want) || strings.Contains(plainRow, fg(matchFg)) {
+			t.Errorf("fullW %d: plain badge: %q", fullW, plainRow)
+		}
+	}
+}
+
+// A worktree row whose repo matched the query, with the branch unmatched.
+func TestGoldenWorktreeRepoMatch(t *testing.T) {
+	snap := wtFixture()
+	m := newModel(&fakeActions{}, snap, nil)
+	for _, full := range []bool{false, true} {
+		fullW := 0
+		if full {
+			fullW = m.repoW
+		}
+		name := "wt_repo_match"
+		if full {
+			name += "_full"
+		}
+		var lines []string
+		for _, wt := range snap.Worktrees {
+			if wt.Repo == "content-engine-1" {
+				lines = append(lines, renderRow(newWorktreeRow(wt, nil, true, m.badges[wt.Repo], fullW), 0, 120, false, now))
+			}
+		}
+		checkWidths(t, name, lines, 120)
+		golden(t, name, plain(lines))
+	}
+}
+
+// snapOf is a worktree-only snapshot of one pane per worktree, given as
+// repo and focus stamp pairs in row order; the repo named cur is current.
+func snapOf(cur string, rows ...[2]string) *state.Snapshot {
+	snap := &state.Snapshot{Now: now}
+	for i, r := range rows {
+		var at int64
+		fmt.Sscan(r[1], &at)
+		t := wtree(fmt.Sprintf("/dev/%s-%d", r[0], i), r[0], "main", "", &state.Pane{ID: fmt.Sprintf("%%%d", i), FocusAt: at})
+		t.Current = r[0] == cur
+		snap.Worktrees = append(snap.Worktrees, t)
+	}
+	return snap
+}
+
+// The tab order is the repos by last access, the current one first,
+// fixed at open and carried over reloads (D83).
+func TestRepoOrder(t *testing.T) {
+	rows := [][2]string{{"b", "50"}, {"a", "10"}, {"c", "30"}, {"b", "5"}}
+	// Row order read bottom up would give b, c, a.
+	m := newModel(&fakeActions{}, snapOf("", rows...), nil)
+	if want := []string{"b", "c", "a"}; !reflect.DeepEqual(m.repoOrder, want) {
+		t.Errorf("by recency: %v", m.repoOrder)
+	}
+	m = newModel(&fakeActions{}, snapOf("a", rows...), nil)
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(m.repoOrder, want) {
+		t.Errorf("current first: %v", m.repoOrder)
+	}
+	// Without stamps the order is first appearance from the bottom.
+	m = newModel(&fakeActions{}, snapOf("", [2]string{"x", "0"}, [2]string{"y", "0"}, [2]string{"z", "0"}), nil)
+	if want := []string{"z", "y", "x"}; !reflect.DeepEqual(m.repoOrder, want) {
+		t.Errorf("no stamps: %v", m.repoOrder)
+	}
+
+	// Reload with the recencies turned around, one repo gone and one new.
+	m = newModel(&fakeActions{}, snapOf("a", rows...), nil)
+	m.repo = "c"
+	m.applyReload(actionMsg{snap: snapOf("a", [2]string{"a", "1"}, [2]string{"b", "2"}, [2]string{"c", "99"})})
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(m.repoOrder, want) {
+		t.Errorf("survives reload: %v", m.repoOrder)
+	}
+	m.applyReload(actionMsg{snap: snapOf("a", [2]string{"a", "1"}, [2]string{"d", "5"}, [2]string{"e", "7"}, [2]string{"c", "9"})})
+	if want := []string{"a", "c", "e", "d"}; !reflect.DeepEqual(m.repoOrder, want) {
+		t.Errorf("new appended, b dropped: %v", m.repoOrder)
+	}
+	m.repo = "c"
+	m.applyReload(actionMsg{snap: snapOf("a", [2]string{"a", "1"}, [2]string{"d", "5"})})
+	if want := []string{"a", "d"}; !reflect.DeepEqual(m.repoOrder, want) || m.repo != "" {
+		t.Errorf("vanished: %v repo %q", m.repoOrder, m.repo)
 	}
 }

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -69,16 +70,18 @@ type model struct {
 	query  textinput.Model
 	prompt textinput.Model
 
-	mode     listMode
-	rows     []state.Row          // the mode's rows: snap.Sessions or snap.Worktrees
-	repo     string               // worktree repo filter, "" for All; kept across modes
-	fullRepo bool                 // worktree rows show full repo names, kept across modes
-	badges   map[string]repoBadge // per repo name, from the snapshot's worktrees
-	repoW    int                  // full-repo badge width
+	mode      listMode
+	rows      []state.Row          // the mode's rows: snap.Sessions or snap.Worktrees
+	repo      string               // worktree repo filter, "" for All; kept across modes
+	fullRepo  bool                 // worktree rows show full repo names, kept across modes
+	badges    map[string]repoBadge // per repo name, from the snapshot's worktrees
+	repoW     int                  // full-repo badge width
+	repoOrder []string             // repos in the order tab steps through them, fixed at open (D83)
 
 	matches []int   // indexes into rows, display order
 	total   int     // rows that pass the repo filter
 	pos     [][]int // highlight positions per match
+	repoHit []bool  // per match: the query matched the worktree's repo name (D82)
 	cur     int     // cursor in matches
 	top     int     // first visible match when more match than the list shows
 
@@ -114,6 +117,7 @@ func newModel(a state.Actions, snap *state.Snapshot, err error) model {
 		m.mode = modeWorktrees
 	}
 	m.indexRepos()
+	m.repoOrder = openRepoOrder(snap)
 	m.setRows()
 	m.resetList()
 	return m
@@ -236,9 +240,11 @@ func (m model) card() (card, bool) {
 }
 
 // refilter recomputes matches for the repo filter, then the query. Matches
-// keep the rows' order: a match never re-ranks.
+// keep the rows' order: a match never re-ranks. A worktree row also matches
+// when the query matches its repo name (D82); repoHit records that, and pos
+// stays nil when only the repo matched.
 func (m *model) refilter() {
-	m.matches, m.pos = m.matches[:0], m.pos[:0]
+	m.matches, m.pos, m.repoHit = m.matches[:0], m.pos[:0], m.repoHit[:0]
 	m.total = 0
 	q := m.query.Value()
 	for i, r := range m.rows {
@@ -246,9 +252,15 @@ func (m *model) refilter() {
 			continue
 		}
 		m.total++
-		if ok, pos := m.m.match(q, rowLabel(r)); ok {
+		ok, pos := m.m.match(q, rowLabel(r))
+		hit := false
+		if t, isWT := r.(*state.Worktree); isWT && q != "" {
+			hit, _ = m.m.match(q, t.Repo)
+		}
+		if ok || hit {
 			m.matches = append(m.matches, i)
 			m.pos = append(m.pos, pos)
+			m.repoHit = append(m.repoHit, hit)
 		}
 	}
 	m.cur = len(m.matches) - 1
@@ -275,12 +287,51 @@ func (m model) inFilter(r state.Row) bool {
 	return !ok || m.repo == "" || t.Repo == m.repo
 }
 
-// repos are the filter's repos in the order tab steps through them: first
-// appearance from the bottom worktree row (the most recently accessed) up.
-func (m model) repos() []string {
+// repoRecency lists the snapshot's repos by last access, newest first. A
+// repo's access is the newest Recency of its worktrees; ties keep first
+// appearance scanning the worktree rows from the bottom up.
+func repoRecency(snap *state.Snapshot) []string {
 	var out []string
-	for i := len(m.snap.Worktrees) - 1; i >= 0; i-- {
-		if r := m.snap.Worktrees[i].Repo; !slices.Contains(out, r) {
+	at := map[string]int64{}
+	for i := len(snap.Worktrees) - 1; i >= 0; i-- {
+		t := snap.Worktrees[i]
+		if _, seen := at[t.Repo]; !seen {
+			out = append(out, t.Repo)
+		}
+		at[t.Repo] = max(at[t.Repo], t.Recency())
+	}
+	slices.SortStableFunc(out, func(a, b string) int { return cmp.Compare(at[b], at[a]) })
+	return out
+}
+
+// openRepoOrder is the tab order at open (D83): the current worktree's
+// repo first, then the others by last access.
+func openRepoOrder(snap *state.Snapshot) []string {
+	out := repoRecency(snap)
+	for _, t := range snap.Worktrees {
+		if t.IsCurrent() {
+			i := slices.Index(out, t.Repo)
+			copy(out[1:i+1], out[:i])
+			out[0] = t.Repo
+			break
+		}
+	}
+	return out
+}
+
+// reloadRepoOrder carries the frozen tab order over to a reloaded snapshot:
+// repos still present keep their place, vanished ones drop, and new ones
+// follow in recency order.
+func reloadRepoOrder(old []string, snap *state.Snapshot) []string {
+	fresh := repoRecency(snap)
+	var out []string
+	for _, r := range old {
+		if slices.Contains(fresh, r) {
+			out = append(out, r)
+		}
+	}
+	for _, r := range fresh {
+		if !slices.Contains(out, r) {
 			out = append(out, r)
 		}
 	}
@@ -290,7 +341,7 @@ func (m model) repos() []string {
 // cycleRepo steps the repo filter d places through All and the repos,
 // wrapping both ways, and resets the list as on open.
 func (m *model) cycleRepo(d int) {
-	opts := append([]string{""}, m.repos()...)
+	opts := append([]string{""}, m.repoOrder...)
 	i := max(slices.Index(opts, m.repo), 0)
 	m.repo = opts[((i+d)%len(opts)+len(opts))%len(opts)]
 	m.resetList()
@@ -704,8 +755,9 @@ func (m *model) applyReload(msg actionMsg) {
 
 	m.snap = msg.snap
 	m.indexRepos()
+	m.repoOrder = reloadRepoOrder(m.repoOrder, msg.snap)
 	m.setRows()
-	if m.repo != "" && !slices.Contains(m.repos(), m.repo) {
+	if m.repo != "" && !slices.Contains(m.repoOrder, m.repo) {
 		m.repo = ""
 	}
 	m.refilter()

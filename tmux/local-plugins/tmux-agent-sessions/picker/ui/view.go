@@ -54,7 +54,7 @@ func (m model) renderList() []string {
 		case *state.Session:
 			r = newSessionRow(x, m.pos[i])
 		case *state.Worktree:
-			r = newWorktreeRow(x, m.pos[i], m.badges[x.Repo], fullW)
+			r = newWorktreeRow(x, m.pos[i], m.repoHit[i], m.badges[x.Repo], fullW)
 		}
 		out = append(out, renderRow(r, memW, m.w, i == m.cur, m.snap.Now))
 	}
