@@ -38,13 +38,17 @@ var promptLabels = map[promptKind]string{
 }
 
 // listMode is what the list rows are: sessions, or git worktrees grouping
-// panes by their directory. ctrl+w switches; the picker opens on sessions.
+// panes by their directory. ctrl+w switches.
 type listMode int
 
 const (
 	modeSessions listMode = iota
 	modeWorktrees
 )
+
+// openMode is the mode the picker opens in (D71). With no pane in any
+// repo there are no worktree rows, so it opens on sessions instead.
+var openMode = modeWorktrees
 
 // actionMsg reports a finished stay-open action and the reloaded snapshot.
 type actionMsg struct {
@@ -106,6 +110,9 @@ func newModel(a state.Actions, snap *state.Snapshot, err error) model {
 		err:    err,
 	}
 	m.query.Focus()
+	if openMode == modeWorktrees && len(snap.Worktrees) > 0 {
+		m.mode = modeWorktrees
+	}
 	m.indexRepos()
 	m.setRows()
 	m.resetList()

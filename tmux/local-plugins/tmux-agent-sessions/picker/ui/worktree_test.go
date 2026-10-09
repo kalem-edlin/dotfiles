@@ -609,3 +609,22 @@ func TestWorktreeReload(t *testing.T) {
 		t.Errorf("gone repo: %q %s", m.repo, m.countText())
 	}
 }
+
+// The picker opens on worktrees and ctrl+w goes to sessions; with no
+// worktree rows it opens on sessions.
+func TestOpenMode(t *testing.T) {
+	defer func(o listMode) { openMode = o }(openMode)
+	openMode = modeWorktrees
+	m := resize(newModel(&fakeActions{}, wtFixture(), nil), 120, 36)
+	if m.mode != modeWorktrees {
+		t.Fatalf("opened in mode %d, want worktrees", m.mode)
+	}
+	if m = send(t, m, "ctrl+w"); m.mode != modeSessions {
+		t.Errorf("ctrl+w went to mode %d, want sessions", m.mode)
+	}
+	snap := wtFixture()
+	snap.Worktrees = nil
+	if m := newModel(&fakeActions{}, snap, nil); m.mode != modeSessions {
+		t.Errorf("no worktrees: opened in mode %d, want sessions", m.mode)
+	}
+}

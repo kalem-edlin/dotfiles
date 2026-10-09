@@ -246,7 +246,7 @@ Selection and keys:
 
 ### Worktree mode
 
-`ctrl-w` switches the list between sessions and git worktrees (D71). A pane's directory places it in a worktree, so the worktree rows reuse the session layout, card grid, keys, colours and ordering, with the differences below. The picker always opens in session mode. Which mode should be the default is deferred until both have been used.
+`ctrl-w` switches the list between sessions and git worktrees (D71). A pane's directory places it in a worktree, so the worktree rows reuse the session layout, card grid, keys, colours and ordering, with the differences below. The picker opens in worktree mode, chosen after using both (2026-10-09). When no pane is in any repo there are no worktree rows, and it opens in session mode instead.
 
 Effective directory (D73):
 
@@ -332,7 +332,7 @@ The text on each chip is a darker shade of its own pastel (D64, D67), and the ag
 | `C-a Q` | Kill the selected session after a `y/N` prompt | Nothing |
 | `C-a esc` | Close (the prefix disarms and `esc` closes as usual) | same |
 
-`ctrl-d` and `ctrl-u` are unbound (D72). The picker always opens in session mode (D71).
+`ctrl-d` and `ctrl-u` are unbound (D72). The picker opens in worktree mode, falling back to session mode when there are no worktree rows (D71).
 
 Prefix emulation (D16). In tmux 3.7b a popup is an overlay: `server_client_handle_key` gives every key to the overlay callback before any key table is consulted, and `popup_key_cb` writes it to the popup's job. tmux prefix bindings never run while the popup is open, so the picker emulates the prefix itself. `ctrl-a` arms it (the cell turns red) and the next key is checked against `c C r R q Q`. Any other key disarms and does its normal job (`C-a ctrl-j` moves the card as if `C-a` was never pressed, and `C-a x` types `x`). Lowercase acts on the card selection and uppercase on the session, so in worktree mode, where a row is not a session, `R` and `Q` do nothing (D81). Option chords are avoided because AeroSpace uses Option, `fn` triggers Wispr Flow, and no Ghostty remaps are used. tmux 3.8 replaces popups with floating panes, so re-check this on an upgrade.
 
@@ -421,5 +421,4 @@ Maintenance cautions:
 ## Deferred
 
 - X1. Show all worktrees of tracked repos, including those with no panes. A repo would count as tracked when it has at least one member pane. Linked worktrees are listed in `<commondir>/worktrees/*/gitdir`, readable in process without git (content-engine has about 50), so this fits D75's budget. Rows with no panes would sort above all others and select into an empty grid, where enter could create a session there.
-- X2. Choose the default open mode after using both. An option or a second binding could then open straight into worktree mode.
 - X3. A tracked-repo registry beyond "repos with panes", if X1 needs repos that currently have no panes. None exists today: `GIT_WORKTREE_PARENT` in `zsh/.zshrc` covers content-engine only, and `tmux-remote-workspaces/scripts/common.sh` already normalises an origin URL to `host/owner/repo`.
