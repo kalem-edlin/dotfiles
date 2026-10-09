@@ -106,7 +106,7 @@ yourself, in this rough order:
   Credentials are never copied from the focus machine or any other host —
   each provider CLI must be logged in on the worker itself.
 - **Mac mini-specific manual steps:**
-  - Confirm the account identity is `alfierobertson` before any destructive
+  - Confirm the Mini account identity (the `User` in `~/.ssh/config.local`) before any destructive
     reprovisioning.
   - Confirm the GUI login/reboot model: the durability timer loads into
     `gui/$UID`, which requires the Mini to either auto-login or otherwise
@@ -126,23 +126,25 @@ yourself, in this rough order:
 The worker installer never edits the laptop. Registering a worker with the
 focus machine is a separate, manual, focus-machine-side pair of edits:
 
-1. **Add and test a logical SSH alias** in the laptop's `ssh/.ssh/config`.
-   Keep the alias stable and independent of the underlying route — see the
-   `mini` entry for the pattern of a LAN-preferred / Tailscale-fallback host
-   that still resolves to one logical alias:
+1. **Add and test a logical SSH alias** in the laptop's untracked
+   `~/.ssh/config.local` (mode 600). The tracked `ssh/.ssh/config` only
+   `Include`s it and keeps reusable settings; real host entries never go in
+   the repo. Keep the alias stable and independent of the underlying route —
+   the `mini` pattern below is a LAN-preferred / Tailscale-fallback host that
+   still resolves to one logical alias (addresses are placeholders):
 
    ```sshconfig
    # Prefer LAN when reachable; Tailscale is the fallback route. The logical
    # alias stays `mini` on both routes.
-   Match originalhost mini exec "~/.ssh/mini-lan-available"
-       HostName Alfies-Mac-mini.local
+   Match originalhost mini exec "~/.ssh/mini-lan-available my-mini.local"
+       HostName my-mini.local
 
    Match all
 
    Host mini
-       HostName 100.67.127.104
-       HostKeyAlias 100.67.127.104
-       User alfierobertson
+       HostName 100.64.0.10
+       HostKeyAlias 100.64.0.10
+       User <mini-user>
    ```
 
    A plain VPS worker (`agents-roll`) is simpler — a single `Host` block is
@@ -150,7 +152,7 @@ focus machine is a separate, manual, focus-machine-side pair of edits:
 
    ```sshconfig
    Host agents-roll
-       HostName 76.13.137.3
+       HostName 203.0.113.10
        User root
        IdentityFile ~/.ssh/id_ed25519
    ```

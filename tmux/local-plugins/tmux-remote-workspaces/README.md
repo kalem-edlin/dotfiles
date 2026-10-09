@@ -118,8 +118,8 @@ it resets local mouse-tracking state and redraws, working around the known
 terminal artifact.
 
 For the Mini specifically, always pass `mini` to `rw`. The SSH package makes
-that alias location-aware: it prefers `Alfies-Mac-mini.local` when the verified
-LAN listener is reachable and otherwise uses the Tailscale address. The
+that alias location-aware: it prefers the Mini's `.local` LAN hostname when the
+verified LAN listener is reachable and otherwise uses the Tailscale address. The
 explicit `mini-lan` alias is diagnostic/maintenance-only and must not be added
 to `config.json` as another worker.
 
