@@ -454,7 +454,7 @@ func TestHeightBudget(t *testing.T) {
 		for _, w := range []int{20, 60, 61, 100, 180} {
 			for h := 1; h <= 50; h++ {
 				m := resize(newModel(&fakeActions{}, snap, nil), w, h)
-				m = send(t, m, "ctrl+d", "ctrl+d", "ctrl+j")
+				m = send(t, m, "ctrl+j", "ctrl+j", "ctrl+l")
 				lines := strings.Split(m.render(), "\n")
 				if len(lines) != h {
 					t.Fatalf("%dx%d: %d lines", w, h, len(lines))

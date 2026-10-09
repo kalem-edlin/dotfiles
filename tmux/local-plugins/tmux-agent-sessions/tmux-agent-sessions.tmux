@@ -32,8 +32,8 @@ fi
 # status age. Runs inside the server, so a focus change spawns no process: the
 # epoch comes from strftime via #{T:@agent_clock}. A fixed array index keeps
 # reloads idempotent and leaves other pane-focus-in hooks alone. @agent_at is
-# deliberately not touched, so a visit does not move the picker's default
-# selection. Every focus, agent or not, also stamps @pane_focus_at with the
+# deliberately not touched, so a visit does not reorder the picker's rows.
+# Every focus, agent or not, also stamps @pane_focus_at with the
 # same epoch, which the picker reads as focus recency (tmux keeps no
 # per-pane focus time).
 tmux set -g @agent_clock '%s'

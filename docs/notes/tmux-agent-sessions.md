@@ -1,17 +1,17 @@
 # Tmux agent sessions
 
-The tmux agent sessions picker is complete. It replaces the sessionx popup behind `prefix o` with a custom picker that shows, for every tmux session, which Claude Code and pi agents are running, what each one is called, what state it is in, and how much memory each window and session uses. Agents publish their own state into tmux pane options, so opening the picker costs one tmux call and one memory helper call. This document records the current system and the decisions needed to maintain it. It is not an implementation plan or backlog.
+The tmux agent sessions picker is complete. It replaces the sessionx popup behind `prefix o` with a custom picker that shows, for every tmux session, which Claude Code and pi agents are running, what each one is called, what state it is in, and how much memory each window and session uses. A second mode (`ctrl-w`) lists the git worktrees that panes sit in instead of sessions. Agents publish their own state into tmux pane options, so opening the picker costs one tmux call and one memory helper call. This document records the current system and the decisions needed to maintain it. It is not an implementation plan or backlog, apart from the short deferred list at the end.
 
 The plugin directory has no README of its own, so this note is the reference for its files, options and keys.
 
-The full planning history (user intent, findings, decisions D1-D70) is in commit 44c0a44, `docs/tasks/sessionx-improvements.md`, removed after this note replaced it.
+The full planning history (user intent, findings, decisions D1-D70) is in commit 44c0a44, `docs/tasks/sessionx-improvements.md`, removed after this note replaced it. Decisions D71-D81 come from the worktree mode build (commits 6dc081b to be1fdea, 2026-10-08). Its plan was never committed, so this note is their only record.
 
 ## Why it exists
 
 - Sessionx had no resource usage support, opened slowly (tens of tmux client calls and about 1 s at the pinned commit), and offered weak extension points. Owning the picker made it faster to iterate on the picker and the agent hooks together, so sessionx and its pin were removed from `tmux/tmux.conf` and `setup/lib.sh`. An old checkout may still sit under `~/.config/tmux/plugins/tmux-sessionx` until it is deleted by hand.
 - The state model follows herdr and similar tools: the agent reports its own state through hooks or an extension, and the picker reads it. The picker never scrapes pane contents to decide status, never polls ssh, and never runs per-session tmux calls. Reports from the agent are cheap, exact and survive UI changes in the agent.
 - The pushed-state design has the usual failure modes and the system handles them explicitly. A crashed agent leaves its options behind, so the picker checks that `@agent_pid` is alive. An Esc interrupt fires no `Stop` hook, so Claude's `idle_prompt` notification recovers the state. `pane_current_command` is unreliable for Claude Code because it renames its process, so the publisher records the agent pid itself.
-- Boundaries that still hold: opening the picker makes one tmux call and one `pane-mem` call (about 5 ms for the helper), the picker has no fork or patch of sessionx to maintain, and agents never invoke `tmux` against the live server during verification of tmux-side work.
+- Boundaries that still hold: opening the picker makes one tmux call and one `pane-mem` call (about 5 ms for the helper) and spawns nothing else, worktree mode included, the picker has no fork or patch of sessionx to maintain, and agents never invoke `tmux` against the live server during verification of tmux-side work.
 
 ## Components and file locations
 
@@ -19,13 +19,13 @@ Everything tmux-side lives in the local plugin `tmux/local-plugins/tmux-agent-se
 
 | Path (plugin dir) | Role |
 |---|---|
-| `tmux-agent-sessions.tmux` | Binds `prefix o`, sets `@agent_clock`, installs the `pane-focus-in[41]` hook |
+| `tmux-agent-sessions.tmux` | Binds `prefix o`, sets `@agent_clock`, installs the `pane-focus-in[41]` hook (focus stamp and Done to Idle) |
 | `scripts/agent-state` | Publisher called by Claude Code hooks |
 | `scripts/pane-mem` | Memory entry point. Runs `bin/pane-mem-darwin` when present, otherwise one `ps` snapshot summed with awk |
 | `scripts/pane-mem-chip` | Prints the status line chip for the current pane |
 | `scripts/wire-mem-chip` | Idempotently prepends the chip to `status-right` after TPM |
 | `src/pane-mem.c` | Source of the macOS footprint helper |
-| `picker/` | Go module `agentpicker` with packages `state`, `tmuxio`, `ui` and `main` |
+| `picker/` | Go module `agentpicker` with packages `state`, `tmuxio`, `worktree`, `ui` and `main` |
 | `bin/` | Built `agent-picker` and `pane-mem-darwin`, gitignored |
 | `tests/` | `agent-state-test.sh`, `pane-mem-test.sh` and fixtures |
 
@@ -55,11 +55,13 @@ Pane options are written only by the publishers and the focus hook.
 | `@agent_kind` | publisher at session start | `claude` or `pi` |
 | `@agent_pid` | publisher at session start | The agent process. The picker treats a dead pid as no agent |
 | `@agent_state` | publisher, focus hook | `idle`, `working`, `awaiting` or `finished` (shown as Done) |
-| `@agent_at` | publisher on every transition except the focus-to-Idle one | Epoch of the last agent event. Drives the picker's initial card and session ordering, so a visit must not move it |
+| `@agent_at` | publisher on every transition except the focus-to-Idle one | Epoch of the last agent event. Fallback for `@agent_state_at` in row ordering, so a visit must not move it. It no longer picks the initial card (D79) |
 | `@agent_state_at` | publisher, focus hook | Epoch when the current state began. A repeat of the same state keeps the stamp. Drives the age shown on chips |
 | `@agent_name` | publisher | Session title (see Titles) |
 | `@agent_subs` | publisher | Running subagent count. Reset to 0 at session start. pi publishes its running `/sub` count |
 | `@agent_empty` | publisher | `1` from session start (startup, `/new`, `/clear`) while the chat has no prompt. Unset on the first prompt, on resume and on compaction |
+| `@agent_cwd` | publisher | The agent's own working directory (D73). Claude writes the hook input's `cwd` at `SessionStart`, `UserPromptSubmit` and `Stop`, and `new_cwd` on `CwdChanged`. pi writes `ctx.cwd` at `session_start` only, since it is fixed per process. Worktree mode uses it in place of the pane directory |
+| `@pane_focus_at` | focus hook | Epoch when the pane last gained focus, on every pane, agent or not (D74). Picks the initial card in both modes and is a worktree's last ordering key |
 
 Rules for the publishers:
 
@@ -68,8 +70,8 @@ Rules for the publishers:
 - `@agent_state_at` is written with `set -F` using `#{?#{&&:#{==:#{@agent_state},NEW},#{@agent_state_at}},#{@agent_state_at},NOW}` before `@agent_state` is overwritten, so the age needs no read round trip.
 - `@agent_pid` for Claude: the publisher walks up from its parent with `ps -o ppid=` until it reaches the process whose parent is `#{pane_pid}`. If the first hop is a hook wrapper shell directly under the pane process, the agent is the pane process itself. This avoids depending on hook wrapping or on Claude renaming its process. For pi it is `process.pid`.
 - `@agent_subs` decrement clamps at zero: `set -pF @agent_subs '#{?#{e|>|:#{@agent_subs},0},#{e|-|:#{@agent_subs},1},0}'`.
-- Text values are sanitized (control characters to spaces, runs collapsed, trailing separators stripped) so a name cannot break tmux argv or a picker row.
-- Claude hooks are registered with `async: true` except `UserPromptSubmit`, `SubagentStart` and `SubagentStop`, which are synchronous so a turn's `Stop` can never land before them, and `SessionEnd`, which must finish before Claude exits. The `Notification` hook matches `elicitation_dialog|elicitation_url_dialog|idle_prompt` and `PreToolUse` and `PostToolUse` match `AskUserQuestion` only.
+- Text values are sanitized (control characters to spaces, runs collapsed, trailing separators stripped) so a name cannot break tmux argv or a picker row. A path is not rewritten: `@agent_cwd` is skipped when the path is empty, holds a control character or ends in `;` (which tmux would read as a command separator), in both publishers. The Claude write rides in the same tmux call as the event's other writes, so it costs no extra spawn.
+- Claude hooks are registered with `async: true` (`CwdChanged` included) except `UserPromptSubmit`, `SubagentStart` and `SubagentStop`, which are synchronous so a turn's `Stop` can never land before them, and `SessionEnd`, which must finish before Claude exits. The `Notification` hook matches `elicitation_dialog|elicitation_url_dialog|idle_prompt` and `PreToolUse` and `PostToolUse` match `AskUserQuestion` only.
 - The remote workspace panes (rw) are out of scope. Agents inside a worker's tmux server are invisible to the laptop picker. Such panes show `remote` where memory would go, and carry no agent chip.
 
 ## State classification and transitions
@@ -96,17 +98,19 @@ The four states and what the user means by them:
 | Claude `Notification` `elicitation_dialog` or `elicitation_url_dialog` | awaiting |
 | Claude `Notification` `idle_prompt` while working | idle, only when `@agent_subs` is 0 and no background shell exists |
 | Claude `SubagentStart` and `SubagentStop` | `@agent_subs` plus one and minus one. State unchanged |
+| Claude `CwdChanged` (Bash `cd`, entering a worktree) | `@agent_cwd` set from `new_cwd`. State unchanged |
 | Claude `Stop` with `@agent_subs` above 0, or a background shell | working |
 | `Stop` or pi `agent_settled`, marker present, no subagents | awaiting |
 | `Stop` or `agent_settled`, no marker, pane visible | idle |
 | `Stop` or `agent_settled`, no marker, pane not visible | finished |
 | tmux `pane-focus-in` while finished | idle |
-| Claude `SessionEnd` (except reason `clear` or `resume`), pi `session_shutdown` | all `@agent_*` options unset |
+| Claude `SessionEnd` (except reason `clear` or `resume`), pi `session_shutdown` | all `@agent_*` options unset, `@agent_cwd` included |
 
 Details that matter when changing this:
 
 - A pane is visible when `#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}` is true, evaluated with `if -F` in the same tmux call that sets the state (D8). An attached but unfocused terminal counts as visible.
 - The focus transition is a tmux hook (`pane-focus-in[41]`, a fixed array index so reloads stay idempotent and other hooks are left alone) with an `if -F` check, so a focus change spawns no process. The epoch comes from `set -g @agent_clock '%s'` expanded with `#{T:@agent_clock}`. It touches `@agent_state` and `@agent_state_at` only, never `@agent_at`. It also fires when the terminal regains focus, which counts as a visit.
+- The same hook first runs `set -pF @pane_focus_at "#{T:@agent_clock}"` unconditionally, ahead of the `if -F` (D74). tmux keeps no per-pane focus time (`window_activity` is last output), and a stamp inside the server costs no process. Checked on an isolated tmux 3.7b server: it fires on attach, `select-window` and `switch-client` in both directions, and on `select-pane` when the pane's window is visible, so no `client-session-changed` hook is needed.
 - Awaiting is never cleared by a visit (D56). It lasts until the next prompt, `/clear` or the agent exiting. The focus hook only turns Done into Idle.
 - Working wins over the marker when subagents or background shells are running. When a background Claude subagent finishes, Claude Code resumes the main agent, whose next `Stop` sets the final state. `SubagentStop` reaching zero does not change state by itself.
 - `AskUserQuestion` counts as Awaiting when it happens. The user rarely uses it, and `claudef` runs with `bypassPermissions`, so permission prompts almost never occur and `permission_prompt` is deliberately not hooked.
@@ -174,36 +178,38 @@ Empty chat:
 - `-s` and `-S` give the popup and its border cells the catppuccin mocha base `#1e1e2e` (sessionx's old background). Cells with their own background keep it, and the border keeps its default line colour. Ghostty runs `background-opacity = 0.9`, so default cells stay translucent.
 - `run-shell` shows any non-zero exit in view mode, which traps the client until `q`. So the binding ends in `|| true` and the picker always exits 0 (`main.go`). The same rule applies to every `run-shell` binding that can open a dialog, and new bindings of that kind should follow it.
 - If `bin/agent-picker` is missing at plugin load, `prefix o` shows `agent-picker not built: run make install` and there is no fallback.
-- One load is one `tmux display-message -p -c CLIENT '#{session_id}' ; list-panes -a -F ...` call (the format carries session, window, pane, pids, commands, `#{session_last_attached}`, `@remote-host`, `@workspace-last-command` and every `@agent_*` option) plus one `pane-mem` call. A failed first load prints the error and waits for enter. Data is reloaded only after an action.
+- One load is one `tmux display-message -p -c CLIENT '#{session_id}␞#{pane_id}' ; list-panes -a -F ...` call plus one `pane-mem` call. The first line gives the client's session and active pane. The format carries session, window, pane, pids, commands, `#{session_last_attached}`, `#{session_attached}`, `#{pane_current_path}`, `@remote-host`, `@workspace-last-command`, `@pane_focus_at` and every `@agent_*` option. A failed first load prints the error and waits for enter. Data is reloaded only after an action.
+- Every load builds both the session rows and the worktree rows, so `ctrl-w` never waits on I/O. Worktree resolution happens in process (D75, see Worktree mode) and spawns nothing.
 - Measured: keypress to first frame was 76 to 89 ms in an isolated popup run, polling overhead included. Cold start of the binary is about 23 ms, mostly Charm library init.
 
 ### Implementation notes
 
 - The module `picker/go.mod` pins `junegunn/fzf` (only `src/algo` and `src/util`), and `charm.land/bubbletea/v2`, `lipgloss/v2` and `bubbles/v2`. The Charm v2 modules live under `charm.land`, and the `github.com/charmbracelet/*/v2` paths fail `go get`.
 - `algo.Init("default")` must run at start, or scores are wrong.
-- Package split: `state` holds the snapshot types and the `Actions` interface, `tmuxio` holds the tmux call, `pane-mem` and the actions, `ui` holds the Bubble Tea model and rendering, and `main` wires them.
+- Package split: `state` holds the snapshot types, the `Row` interface and the `Actions` interface, `tmuxio` holds the tmux call, `pane-mem`, worktree grouping, row sorting and the actions, `worktree` holds the filesystem resolver, `ui` holds the Bubble Tea model and rendering, and `main` wires them.
+- Sessions and worktrees share one `Row` interface (`RowID`, `Members`, `IsCurrent`, `Recency`), so sorting, row aggregates, the default card and reload by id are one code path for both modes.
 - Bubble Tea runs with `tea.WithColorProfile` set to truecolor and no background detection, so no colour query goes to the terminal. All state is in memory. A keystroke updates the model and redraws without starting a process. The escape timeout is Bubble Tea's 50 ms default. The size can read as 0 under tmux (Bubble Tea issue #1718), so the model renders at 80x24 until a real size arrives. A reply to the synchronized-output query could leak to the shell on a very fast quit (issue #1590) and did not appear in testing, including esc 80 ms after open.
-- Search is plain matching of a name or a piece of one, anywhere in the session name (D33). The whole query is one case-insensitive pattern run through `algo.FuzzyMatchV2`, which also gives the highlight positions (shown in red). fzf's extended syntax is not implemented. Rows keep their order and are not re-sorted by score. After a query change the cursor moves to the bottom match.
+- Search is plain matching of a name or a piece of one, anywhere in the session name (D33), or in worktree mode the branch name (the commit id when detached). The whole query is one case-insensitive pattern run through `algo.FuzzyMatchV2`, which also gives the highlight positions (shown in red). fzf's extended syntax is not implemented. Rows keep their no-query order in both modes and are never re-sorted by score. After a query change the cursor moves to the bottom match.
 - Actions run in Go through `tmuxio`. Targets are ids (`$N`, `@N`, `%N`), and names are passed only where tmux needs one. `AGENT_SESSIONS_RW_CLOSE` overrides the `rw-close.sh` path.
 
 ### Layout
 
-From the top: the card grid, the session list, then the input line between two rules. There is no header and no key hints.
+From the top: the card grid, the row list (sessions or worktrees), then the input line between two rules. There is no header and no key hints. Both modes use the same layout.
 
 | Part | Rule |
 |---|---|
-| Session list | 6 rows (`listRows`), bottom up. With fewer sessions the empty rows sit at the top. Panel background is the base blended 70% toward surface0 |
-| Input line | Query with a static block cursor (no blink ticks). At the right edge the match count (`matches/total` sessions) and a 2-column cell, `#a6e3a1` at rest and `#f38ba8` while the prefix is armed. The rules above and below use `#585b70` |
+| Row list | 6 rows (`listRows`), bottom up. With fewer rows the empty rows sit at the top. Panel background is the base blended 70% toward surface0 |
+| Input line | Query with a static block cursor (no blink ticks). At the right edge the match count (`matches/total` rows, where total counts rows that pass the repo filter) and a 2-column cell, `#a6e3a1` at rest and `#f38ba8` while the prefix is armed. In worktree mode the repo filter chip sits left of the count (D80). The rules above and below use `#585b70` |
 | Grid | Everything above the list. Hidden when less than one card row (`cardRows + 2` lines) fits |
 | Short screens | `heights()` gives the input line priority, then up to 6 list rows and the two rules. Rows go from the grid first, then from the list down to one row, and the rules drop only when no list row would be left |
 
 On a large screen the grid may use fewer lines than it is given, which leaves a blank gap between the grid and the list. This is accepted, and the popup size stays at 90% by 85%.
 
-The text input keymap is trimmed so it does not take `ctrl-a`, `ctrl-d`, `ctrl-j`, `ctrl-k`, `ctrl-n`, `ctrl-p`, `ctrl-u` or `ctrl-w`. Arrows, backspace and typing still edit. Prompts (rename, new window, new session) additionally get `ctrl-u`, `ctrl-w`, `ctrl-a` and `ctrl-k` as in tmux's command prompt, so a prefilled name can be cleared.
+The text input keymap is trimmed so it does not take `ctrl-a`, `ctrl-d`, `ctrl-h`, `ctrl-j`, `ctrl-k`, `ctrl-n`, `ctrl-p`, `ctrl-u` or `ctrl-w`. Bubbles binds `ctrl-h` to backspace by default, and the query drops it because the grid uses it (D72). Ghostty sends `0x7f` for backspace and `0x08` for `ctrl-h`, so the two stay distinct through the popup. Arrows, backspace and typing still edit. Prompts (rename, new window, new session) additionally get `ctrl-h` as backspace and `ctrl-u`, `ctrl-w`, `ctrl-a` and `ctrl-k` as in tmux's command prompt, so a prefilled name can be cleared.
 
 ### Session order and initial cursor
 
-Session order, top to bottom (D63): the invoking client's session is always last (bottom). The others are sorted so higher priority sits lower, comparing in turn the Awaiting count, the Done count, the Working count, the newest agent state change (`@agent_state_at`, else `@agent_at`), then `session_last_attached`. Counts compare one after another (two Awaiting beats one Awaiting plus five Done) and not as a weighted sum. Ties keep tmux's order.
+Session order, top to bottom (D63): the invoking client's session is always last (bottom). The others are sorted so higher priority sits lower, comparing in turn the Awaiting count, the Done count, the Working count, the newest agent state change (`@agent_state_at`, else `@agent_at`), then `session_last_attached`. Counts compare one after another (two Awaiting beats one Awaiting plus five Done) and not as a weighted sum. Ties keep tmux's order. Worktree rows use the same sort (`sortRows`) with their own last key (D78).
 
 The cursor starts one row above the bottom (D13), which is the highest priority session other than the current one. With a single session it sits on that session. The window of the list is anchored at the bottom so the current session shows.
 
@@ -211,11 +217,11 @@ The cursor starts one row above the bottom (D13), which is the highest priority 
 
 Left to right: a gutter column (dark, with a rosewater `▌` on the selected row), the name, then three sections pushed to the right edge and divided by thin vertical lines (`#585b70`). A long name is truncated with `…` before chips are dropped, and chips are dropped (rightmost first) only when the name would fall under 12 columns. The selected row has a light highlight across its full width.
 
-1. Status chips: Working, Awaiting, Done in that order, each only when its count is above zero (D55). Each reads count, label, age (`2 Working 4m`), where the count is the number of agents in that state and the age is the newest state change among them. This is the only section of variable width. There is no Idle chip on rows.
+1. Status chips: Working, Awaiting, Done in that order, each only when its count is above zero (D55). Each reads count, state icon, age (`2 <icon> 4m`), where the count is the number of agents in that state and the age is the newest state change among them. This is the only section of variable width. There is no Idle chip on rows.
 2. Agents: bot glyph, a space, the count of all agents in the session, then the age of the newest state change of any of them (`<bot> 3 5m`, D66). A session with no agents shows `<bot> 0` with no age. The section is a constant 8 cells so it aligns on every row. The count shows up to 99.
 3. Memory, right aligned in a width shared by all rows (at least 5 cells).
 
-Only the status chips have a background. `ctrl+w` switches the chip labels between words and icons (`2 <icon> 4m`) for that picker run (D57). The setting is not saved.
+Only the status chips have a background. Row chips always show icons. The words/icons toggle on `ctrl-w` (D57) was removed to free the key for the mode switch (D71).
 
 Ages use the format `42s`, `5m`, `3h`, `2d`, then weeks from 7 days (`3w`), with no months. The age is dimmer than the text beside it everywhere: on rows outside a chip it is `#7f849c` (or `#a6adc8` on the selected row), and on chips it is a lighter shade of the chip text (see colours).
 
@@ -227,16 +233,68 @@ Card construction:
 
 - One card per window. A window with two or more agent panes gets one card per agent pane instead, in pane order (D51). A window with one agent pane is one card for that agent.
 - Header: `W name` on a window card and `W.P name` on a split card (D58). The index is lavender. Split cards of one window show the same window pane count and the same window memory total, and only the header and agent title differ.
-- Subtitle (D53): `Empty chat` (dimmed) for an agent with `@agent_empty`, else `@agent_name`. A card with no agent shows the running command of the window's lowest-index pane. At a shell prompt that is the last command line from `@workspace-last-command`, dimmed. Otherwise it is `@workspace-last-command` if set (`pnpm branch` where `pane_current_command` says `node`), falling back to `pane_current_command`. `#{pane_title}` is unusable because `allow-set-title` is off.
+- Subtitle (D53): `Empty chat` (dimmed) for an agent with `@agent_empty`, else `@agent_name`. A card with no agent shows the running command of the window's lowest-index pane (lowest-index member pane in worktree mode). At a shell prompt that is the last command line from `@workspace-last-command`, dimmed. Otherwise it is `@workspace-last-command` if set (`pnpm branch` where `pane_current_command` says `node`), falling back to `pane_current_command`. `#{pane_title}` is unusable because `allow-set-title` is off.
 - Third line, wrapping when needed: the `N panes` chip (always shown, `1 pane` included, text `#cdd6f4` on `#45475a`), the agent chip if any, and the window memory as plain text with no cell. An agent chip reads `claudef <icon> 5m` or `pif <icon> 5m` (a card shows at most one agent, with no aggregate chips).
 - Text that does not fit is truncated with `…` or wrapped at the card edge.
 - Unselected cards blend every colour, chips included, 50% toward the base (`dimAmount`). The selected card has a bright border (`#cdd6f4`) and full colour.
 
 Selection and keys:
 
-- The initial card is the one for the pane whose agent changed state most recently (`@agent_at`), else the active window's active pane. It may sit further down the grid, and the grid scrolls to show it.
-- `ctrl-j` and `ctrl-k` step through cards in reading order and stop at the first and last card. `ctrl-d` and `ctrl-u` move one grid row keeping the column, landing on the last card for a short last row.
-- Moving to another session rebuilds the grid and reselects the default card.
+- The initial card (D79, replacing D15's newest `@agent_at` rule) is the card holding the row's member pane with the newest `@pane_focus_at`. In session mode every pane of the session is a member. A tie goes to the first pane in window and pane order. A focused pane without a card of its own (a shell beside split agent cards) selects its window's first card. With no stamped pane, session mode falls back to the active window's active pane, and worktree mode to a member pane that is active in an active window of an attached session (`#{session_attached}`), else the first card. The initial card may sit further down the grid, and the grid scrolls to show it.
+- Card moves are spatial, as vim directions (D72). `ctrl-h` and `ctrl-l` move one card left or right within the grid row and stop at its edges. `ctrl-j` and `ctrl-k` move one grid row down or up keeping the column, land on the last card when the row below is short, and stop at the top and bottom rows. `ctrl-d` and `ctrl-u` are no longer bound, and reading-order stepping is gone.
+- Moving to another row rebuilds the grid and reselects the default card.
+
+### Worktree mode
+
+`ctrl-w` switches the list between sessions and git worktrees (D71). A pane's directory places it in a worktree, so the worktree rows reuse the session layout, card grid, keys, colours and ordering, with the differences below. The picker always opens in session mode. Which mode should be the default is deferred until both have been used.
+
+Effective directory (D73):
+
+- An agent pane with a live `@agent_pid` and a non-empty `@agent_cwd` uses `@agent_cwd`. Every other pane, remote panes included, uses `#{pane_current_path}` (`Pane.Dir()`).
+- The reason is that an agent can move. Claude's hook `cwd` follows the Bash tool's `cd` and the worktree root after entering a worktree, while `pane_current_path` of a Claude pane stays at its launch directory. Transcripts showed `cwd` moving within 26 of 43 sampled sessions.
+- A Claude session started before the `CwdChanged` registration still gets `@agent_cwd` from its next prompt or `Stop`, because `scripts/agent-state` changes apply on the next hook run. Only mid-turn moves need the restart that picks up the new hook.
+
+Resolution (D75). `picker/worktree` maps a directory to its worktree by reading the filesystem only, and never spawns git:
+
+- Walk up to the first `.git`. A `.git` directory is a main worktree and is its own common dir. A `.git` file holds `gitdir: <path>`. The worktree's `HEAD` is in that gitdir, and the common dir is named by `<gitdir>/commondir`, or is the gitdir itself when that file is absent (submodules, `--separate-git-dir`).
+- A directory that does not exist, or whose `.git` entry or `HEAD` is unreadable or malformed, resolves to no worktree. Panes outside any repo never appear in worktree mode.
+- Files are read with a raw open, one read and close into a 4 KiB buffer, because syscalls are nearly all of the cost. Paths are cleaned but not passed through `EvalSymlinks`.
+- One `Resolver` is made per load (`buildSnapshot`). It caches every directory a walk passes through, so siblings of a resolved directory stop at the first shared ancestor. Nothing is cached across loads, so results are exact at open time.
+- Cost is about 0.6 ms for 100 directories on a fresh resolver. Options rejected during planning: `git rev-parse` per path (34 ms in parallel, 179 ms sequential, which would double the open time), precomputing `@pane_worktree` in a zsh `chpwd` hook and agent hooks (a tmux spawn per `cd`, and stale for anything that changes directory outside zsh, such as nvim `:cd`), and a background cache or daemon (another component to keep alive for no gain).
+
+Identity and labels (D76):
+
+- A worktree's id is its root directory. Its repo is the source repo's local directory name, not the remote: the basename of the main worktree (the parent of a `.git` common dir), the name of a bare `<name>.git` common dir without the suffix, the common dir's basename when it was reached through a `commondir` file, else the worktree root's basename (submodules, `--separate-git-dir`). Examples: `content-engine-1`, `search-primitives`, `dotfiles`.
+- The row label is the branch from `HEAD` (`refs/heads/` stripped, other refs with `refs/` stripped). A detached `HEAD` shows the 7-character commit id, dimmed.
+- `ctrl-t` switches every row label to the worktree directory basename (`content-engine-5`, `roll-hiring`) and back, for that picker run. Search still matches the branch (or commit id), and match highlights show only on branch labels.
+
+Membership and cards (D77):
+
+- A window shows when at least one of its panes is a member, meaning its effective directory resolves to the selected worktree. A window with no member pane gets no card.
+- The split-card rule counts member agent panes only. Two or more give one split card per member agent. One gives a window card for that agent. None gives a window card whose subtitle comes from the first member pane. An agent pane in another worktree gets no card.
+- The `N panes` chip and window memory stay window totals, other worktrees' panes included.
+- A window linked into several sessions is grouped once, under the first session that holds it in tmux's order. Grouping happens before sorting, so it does not depend on agent states.
+
+Rows and order (D78):
+
+- Status chips and the agents cell count member agent panes only.
+- The memory column shows the repo name instead, right aligned in a width shared by all worktree rows: the widest repo name, at least 5 and at most 14 columns, truncated with `…`.
+- The current worktree is the one holding the invoking client's active pane (its effective directory) and sits at the bottom. The others sort as sessions do (Awaiting, Done and Working counts, then the newest agent state change), with the newest `@pane_focus_at` among member panes in place of `session_last_attached`. Ties keep first-appearance order.
+- The cursor starts one row up. When the bottom row is not the current worktree (the client's pane is outside any repo, or the repo filter hides it), the cursor starts on the bottom row.
+
+Repo filter (D80):
+
+- `tab` and `shift-tab` step forward and back through All and each repo, wrapping both ways. The filter starts at All on every open.
+- Repos are ordered by first appearance scanning the worktree rows from the bottom up, so the first `tab` lands on the highest priority repo, normally the current worktree's. Entries are repo names, so two repos with the same directory name share one entry.
+- The filter applies with and without a query, before the branch match. A filter step resets the cursor and card as on open.
+- The input line shows the filter as a chip (`#cdd6f4` on `#45475a`, the panes chip colours) left of the match count, reading `All` or the repo name. It takes whatever room the query leaves, is truncated, and is dropped below 3 columns.
+
+Mode switch:
+
+- The query, the repo filter and the `ctrl-t` label choice are kept across `ctrl-w` within one run. Session mode ignores the filter and shows no chip.
+- The cursor and card go to their defaults: with an empty query the open-time cursor rule, with a query the bottom match, as after typing.
+
+Actions (D81). Card actions (`enter`, `C-a r`, `C-a q`) work as in session mode, using the card's own session. `C-a c` needs a card and makes a window in that card's session with `-c <worktree root>`. `C-a C` needs a worktree row and makes a detached session rooted at the worktree, with its directory name as the default name. `C-a R`, `C-a Q` and enter with no card do nothing, because a worktree row is not a session.
 
 ### Colours
 
@@ -253,30 +311,36 @@ The text on each chip is a darker shade of its own pastel (D64, D67), and the ag
 
 ### Keys and actions
 
-| Key | Action |
-|---|---|
-| `ctrl-n`, `down` / `ctrl-p`, `up` | Next / previous session |
-| `ctrl-j` / `ctrl-k` | Next / previous card |
-| `ctrl-d` / `ctrl-u` | Card row down / up |
-| `ctrl-w` | Toggle row status chips between words and icons |
-| `enter` | Go to the selected card, or create a session from an unmatched query |
-| `esc`, `ctrl-c` | Close |
-| `C-a c` | New window in the selected session, name prompted (empty keeps automatic naming) |
-| `C-a C` | New session, name prompted with the query as the default |
-| `C-a r` | Rename the selected card's window |
-| `C-a R` | Rename the selected session |
-| `C-a q` | Kill the selected card's pane (split card) or window (window card) |
-| `C-a Q` | Kill the selected session after a `y/N` prompt |
-| `C-a esc` | Close (the prefix disarms and `esc` closes as usual) |
+| Key | Session mode | Worktree mode |
+|---|---|---|
+| `ctrl-n`, `down` / `ctrl-p`, `up` | Next / previous row | same |
+| `ctrl-h` / `ctrl-l` | Card left / right within the grid row | same |
+| `ctrl-j` / `ctrl-k` | Card row down / up, keeping the column | same |
+| `ctrl-w` | Switch to worktree mode | Switch to session mode |
+| `ctrl-t` | Nothing | Toggle row labels between branch and directory name |
+| `tab` / `shift-tab` | Nothing | Next / previous repo filter |
+| `enter` | Go to the selected card, or create a session from an unmatched query | Go to the selected card. Nothing without a card |
+| `esc`, `ctrl-c` | Close | same |
+| `C-a c` | New window in the selected session, in its active pane's directory, name prompted (empty keeps automatic naming) | New window in the selected card's session, started in the worktree root. Nothing without a card |
+| `C-a C` | New detached session in the home directory, name prompted with the query as the default | New detached session started in the worktree root, name prompted with the worktree directory name as the default |
+| `C-a r` | Rename the selected card's window | same |
+| `C-a R` | Rename the selected session | Nothing |
+| `C-a q` | Kill the selected card's pane (split card) or window (window card) | same |
+| `C-a Q` | Kill the selected session after a `y/N` prompt | Nothing |
+| `C-a esc` | Close (the prefix disarms and `esc` closes as usual) | same |
 
-Prefix emulation (D16). In tmux 3.7b a popup is an overlay: `server_client_handle_key` gives every key to the overlay callback before any key table is consulted, and `popup_key_cb` writes it to the popup's job. tmux prefix bindings never run while the popup is open, so the picker emulates the prefix itself. `ctrl-a` arms it (the cell turns red) and the next key is checked against `c C r R q Q`. Any other key disarms and does its normal job (`C-a ctrl-j` moves the card as if `C-a` was never pressed, and `C-a x` types `x`). Lowercase acts on the card selection and uppercase on the session. Option chords are avoided because AeroSpace uses Option, `fn` triggers Wispr Flow, and no Ghostty remaps are used. tmux 3.8 replaces popups with floating panes, so re-check this on an upgrade.
+`ctrl-d` and `ctrl-u` are unbound (D72). The picker always opens in session mode (D71).
 
-Enter targets. A split card runs `switch-client`, `select-window` and `select-pane` on its pane. A window card runs `switch-client` and `select-window` and keeps the window's active pane. With no session matched, enter creates a session named by the query (rejecting empty names and names containing `.` or `:`).
+Prefix emulation (D16). In tmux 3.7b a popup is an overlay: `server_client_handle_key` gives every key to the overlay callback before any key table is consulted, and `popup_key_cb` writes it to the popup's job. tmux prefix bindings never run while the popup is open, so the picker emulates the prefix itself. `ctrl-a` arms it (the cell turns red) and the next key is checked against `c C r R q Q`. Any other key disarms and does its normal job (`C-a ctrl-j` moves the card as if `C-a` was never pressed, and `C-a x` types `x`). Lowercase acts on the card selection and uppercase on the session, so in worktree mode, where a row is not a session, `R` and `Q` do nothing (D81). Option chords are avoided because AeroSpace uses Option, `fn` triggers Wispr Flow, and no Ghostty remaps are used. tmux 3.8 replaces popups with floating panes, so re-check this on an upgrade.
+
+Enter targets. A split card runs `switch-client`, `select-window` and `select-pane` on its pane. A window card runs `switch-client` and `select-window` and keeps the window's active pane. With no session matched, enter creates a session named by the query (rejecting empty names and names containing `.` or `:`). In worktree mode enter switches to the selected card's own session, and with no card (no match, or a row without cards) it does nothing.
+
+Action signatures: `NewWindow(session, dir, name)` uses `dir` as `-c`, or reads the session's active pane directory with one `display-message` when `dir` is empty. `NewSession(name, dir)` uses `dir`, or the home directory when empty.
 
 Action behaviour:
 
 - Name prompts and the kill confirmation are inline in place of the input line, and `esc` cancels. Errors show inline in the input line.
-- After any stay-open action the picker reloads, even when the action failed, because a kill can succeed after `rw-close.sh` fails. A failed reload keeps the old snapshot. The selected session and card are kept by id when they still exist.
+- After any stay-open action the picker reloads, even when the action failed, because a kill can succeed after `rw-close.sh` fails. A failed reload keeps the old snapshot. The selected row (session id or worktree root) and card are kept by id when they still exist. A repo filter whose repo has gone falls back to All.
 - Kill paths. tmux `prefix q` routes panes with `@remote-host` through `tmux-remote-workspaces/scripts/rw-close.sh --pane`. The picker does the same: `KillPane` reads `@remote-host` fresh, and window and session kills close every remote pane in them through `rw-close.sh --pane` first, then kill the window or session. If `rw-close.sh` cannot run at all the kill does not go ahead. If it fails for individual panes the kill still proceeds and the failures are reported. Closing every window of a session keeps killing the session, which is plain tmux behaviour.
 
 ## Icon font
@@ -311,7 +375,8 @@ Why the font is derived, and the Ghostty facts behind it (Ghostty 1.3.1 source):
 - `pane-mem-darwin` builds with `clang -O2` on macOS only. A failed build falls back to the `ps` path.
 - Go on macOS comes from the Brewfiles. On Linux `setup/go.sh` installs a pinned Go (1.26.3, sha256 for linux-amd64 and linux-arm64 verified with `sha256sum -c`) into `~/.local/opt/go-<version>` and links `go` and `gofmt` into `~/.local/bin`. It is not apt, because Ubuntu 24.04's `golang-go` is older than the module needs. It skips when `go version` already reports the pin. `setup/linux-headless.sh` calls it before the dotfiles install and checks `go` in its verify list. `go` is listed in `setup/tool-parity-exceptions.txt` as installed by another mechanism, and `setup/headless-doctor.sh` requires `go` and warns when `bin/agent-picker` is missing.
 - Tests:
-  - `go -C tmux/local-plugins/tmux-agent-sessions/picker test ./...` covers snapshot parsing from fixture `list-panes` output, session ordering, the matcher, age formatting, golden renders of rows, cards, the grid and the input line at several widths, model tests that feed key messages (prefix arm and disarm, card stepping, mode toggle, default selection, enter), and action tests against a fake `tmux` shim first in `PATH`.
+  - `go -C tmux/local-plugins/tmux-agent-sessions/picker test ./...` covers snapshot parsing from fixture `list-panes` output, session and worktree ordering, worktree membership, the matcher, age formatting, golden renders of rows, cards, the grid and the input line at several widths for both modes (`wt_*` goldens for worktree mode), model tests that feed key messages (prefix arm and disarm, spatial card moves, `ctrl-h` not deleting, mode switch, repo filter, default selection, enter, worktree action gating), and action tests against a fake `tmux` shim first in `PATH`.
+  - `picker/worktree` tests build real repos under a temp dir with `git init` and `git worktree add` (main checkout, linked worktrees, subdirectories, detached `HEAD`, bare repos, missing `commondir`, non-repo and missing directories, malformed `.git` and `HEAD` files) and skip when `git` is not installed. `BenchmarkResolve100` times a fresh resolver over 100 directories, and `BenchmarkBuildSnapshotWorktrees` a 600-pane snapshot over 40 worktrees.
   - `tests/agent-state-test.sh` drives `scripts/agent-state` with fixture hook JSON through a fake tmux shim and asserts the argv of every tmux call.
   - `tests/pane-mem-test.sh` covers the memory script and chip formatting.
   - Run Go tools with `TMUX` and `TMUX_PANE` unset. Tests must assert the shim is in use before anything runs, and never touch the live server.
@@ -324,7 +389,7 @@ Why the font is derived, and the Ghostty facts behind it (Ghostty 1.3.1 source):
 | Picker Go code or `agent-picker` build | Rebuild (`make install` or the `go build` line above). The next `prefix o` uses the new binary. Reload tmux if the binary was missing at plugin load |
 | `tmux-agent-sessions.tmux` or `tmux.conf` | Reload tmux config |
 | `scripts/agent-state` | Takes effect on the next hook run. Already running agents need no restart |
-| Claude hook registrations in `settings.json` | Restart the Claude session (hooks are read at session start) |
+| Claude hook registrations in `settings.json` | Restart the Claude session (hooks are read at session start). Until then a session misses `CwdChanged`, and its `@agent_cwd` updates only at prompts and `Stop` |
 | `agent-state.ts` or `subagent-widget.ts` | `/reload` in pif (an old runtime's state write cannot overtake a new runtime's start, because the publish chain is shared on `globalThis`) |
 | Icon font, `SIZE`, codepoints, `font-codepoint-map` | Rerun `make lucide-font` if the font changed, then restart Ghostty |
 
@@ -332,7 +397,8 @@ Maintenance cautions:
 
 - Do not invoke `tmux` against the live server from tooling or tests. Verify tmux-side work statically, with shims, or against an isolated `-S` server.
 - Any new `run-shell` binding that can show a dialog must exit 0 or end in `|| true`.
-- Changing the option contract means changing `scripts/agent-state`, `agent-state.ts`, the `list-panes` format in `picker/tmuxio/snapshot.go` (columns are positional, keep the constants in step) and the fixtures together.
+- Changing the option contract means changing `scripts/agent-state`, `agent-state.ts`, the `list-panes` format in `picker/tmuxio/snapshot.go` (columns are positional, keep the constants in step) and the fixtures together. The two raw path columns sit before the numeric last columns so a path containing a line break is joined back up like a multi-line command.
+- Keep worktree resolution in process. A git spawn or an extra tmux call per load would break the open budget.
 - The marker text is shared by `agents/communication.md`, `scripts/agent-state` and `agent-state.ts`.
 
 ## Known gaps and limitations
@@ -345,3 +411,12 @@ Maintenance cautions:
 - Memory is footprint on macOS, so totals overcount shared and graphics memory.
 - Pane option writes do not trigger resurrect saves. Autosave runs from a separate 300 s timer.
 - The tmux 3.7b popup behaviour that forces prefix emulation may change in 3.8.
+- Worktree mode shows only worktrees that hold at least one pane. Other worktrees of the same repo are invisible.
+- Worktree paths are not resolved through symlinks, so one checkout reached through a symlink and through its real path shows as two rows.
+- The repo filter groups by directory name, so two different repos with the same directory name share one filter entry.
+
+## Deferred
+
+- X1. Show all worktrees of tracked repos, including those with no panes. A repo would count as tracked when it has at least one member pane. Linked worktrees are listed in `<commondir>/worktrees/*/gitdir`, readable in process without git (content-engine has about 50), so this fits D75's budget. Rows with no panes would sort above all others and select into an empty grid, where enter could create a session there.
+- X2. Choose the default open mode after using both. An option or a second binding could then open straight into worktree mode.
+- X3. A tracked-repo registry beyond "repos with panes", if X1 needs repos that currently have no panes. None exists today: `GIT_WORKTREE_PARENT` in `zsh/.zshrc` covers content-engine only, and `tmux-remote-workspaces/scripts/common.sh` already normalises an origin URL to `host/owner/repo`.
