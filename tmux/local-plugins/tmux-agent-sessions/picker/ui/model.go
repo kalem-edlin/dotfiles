@@ -65,10 +65,12 @@ type model struct {
 	query  textinput.Model
 	prompt textinput.Model
 
-	mode      listMode
-	rows      []state.Row // the mode's rows: snap.Sessions or snap.Worktrees
-	repo      string      // worktree repo filter, "" for All; kept across modes
-	dirLabels bool        // worktree rows show their directory name, not the branch
+	mode     listMode
+	rows     []state.Row          // the mode's rows: snap.Sessions or snap.Worktrees
+	repo     string               // worktree repo filter, "" for All; kept across modes
+	fullRepo bool                 // worktree rows show full repo names, kept across modes
+	badges   map[string]repoBadge // per repo name, from the snapshot's worktrees
+	repoW    int                  // full-repo badge width
 
 	matches []int   // indexes into rows, display order
 	total   int     // rows that pass the repo filter
@@ -104,9 +106,26 @@ func newModel(a state.Actions, snap *state.Snapshot, err error) model {
 		err:    err,
 	}
 	m.query.Focus()
+	m.indexRepos()
 	m.setRows()
 	m.resetList()
 	return m
+}
+
+// repoFullMaxW caps the full-repo badge width.
+const repoFullMaxW = 24
+
+// indexRepos assigns every repo of the snapshot its badge (D76) and sets
+// the full-repo badge width: the widest repo name, capped at repoFullMaxW.
+func (m *model) indexRepos() {
+	var names []string
+	m.repoW = 0
+	for _, t := range m.snap.Worktrees {
+		names = append(names, t.Repo)
+		m.repoW = max(m.repoW, width(oneLine(t.Repo)))
+	}
+	m.repoW = min(m.repoW, repoFullMaxW)
+	m.badges = assignRepoBadges(names)
 }
 
 // setRows points rows at the current mode's rows.
@@ -465,7 +484,7 @@ func (m model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.toggleMode()
 	case "ctrl+t":
 		if m.mode == modeWorktrees {
-			m.dirLabels = !m.dirLabels
+			m.fullRepo = !m.fullRepo
 		}
 	case "tab":
 		if m.mode == modeWorktrees {
@@ -677,6 +696,7 @@ func (m *model) applyReload(msg actionMsg) {
 	oldCur, oldSel := m.cur, m.sel
 
 	m.snap = msg.snap
+	m.indexRepos()
 	m.setRows()
 	if m.repo != "" && !slices.Contains(m.repos(), m.repo) {
 		m.repo = ""
@@ -719,13 +739,14 @@ func (m model) countText() string {
 	return fmt.Sprintf("%d/%d", len(m.matches), m.total)
 }
 
-// filterText is the repo filter's indicator, shown in worktree mode only.
-func (m model) filterText() string {
-	switch {
-	case m.mode != modeWorktrees:
-		return ""
-	case m.repo == "":
-		return "All"
+// filterChip is the repo filter's indicator, shown in worktree mode only:
+// All in the panes chip colours, or the repo on its badge shade (D80).
+func (m model) filterChip() filterChip {
+	if m.mode != modeWorktrees {
+		return filterChip{}
 	}
-	return m.repo
+	if b, ok := m.badges[m.repo]; ok && m.repo != "" {
+		return filterChip{text: m.repo, fg: b.fg, bg: b.bg}
+	}
+	return filterChip{text: "All", fg: cText, bg: panesChipBg}
 }

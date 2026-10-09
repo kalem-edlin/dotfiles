@@ -90,22 +90,163 @@ func matchRoots(m model) []string {
 	return out
 }
 
-func TestGoldenWorktreeRows(t *testing.T) {
+// wtRows renders the fixture's worktree rows with "ain" highlighted and
+// the cursor on roll-hiring, abbreviated or in full-repo mode.
+func wtRows(w int, full bool) []string {
 	snap := wtFixture()
+	m := newModel(&fakeActions{}, snap, nil)
+	fullW := 0
+	if full {
+		fullW = m.repoW
+	}
 	mm := newMatcher()
+	var lines []string
+	for i, wt := range snap.Worktrees {
+		_, pos := mm.match("ain", rowLabel(wt))
+		lines = append(lines, renderRow(newWorktreeRow(wt, pos, m.badges[wt.Repo], fullW), 0, w, i == 3, now))
+	}
+	return lines
+}
+
+func TestGoldenWorktreeRows(t *testing.T) {
 	for _, w := range widths {
-		var lines []string
-		for _, dir := range []bool{false, true} {
-			for i, wt := range snap.Worktrees {
-				_, pos := mm.match("ain", rowLabel(wt))
-				lines = append(lines, renderRow(newWorktreeRow(wt, pos, dir, repoMaxW), repoMaxW, w, i == 3, now))
+		for _, full := range []bool{false, true} {
+			name := fmt.Sprintf("wt_rows_%d", w)
+			if full {
+				name = fmt.Sprintf("wt_rows_full_%d", w)
+			}
+			lines := wtRows(w, full)
+			checkWidths(t, name, lines, w)
+			golden(t, name, plain(lines))
+			if w == 120 {
+				golden(t, name+"_styled", strings.Join(lines, "\n")+"\n")
 			}
 		}
-		checkWidths(t, "wt rows", lines, w)
-		golden(t, fmt.Sprintf("wt_rows_%d", w), plain(lines))
-		if w == 120 {
-			golden(t, "wt_rows_120_styled", strings.Join(lines, "\n")+"\n")
+	}
+}
+
+// A worktree row is the gutter, the 2-column badge on its repo's shade, a
+// space and the label, with no repo column. Full-repo mode widens every
+// badge to the longest repo name, keeps the branch label aligned, and
+// drops the agents section but not the status chips (D76, D78).
+func TestWorktreeRowBadges(t *testing.T) {
+	const w = 120
+	snap := wtFixture()
+	badges := newModel(&fakeActions{}, snap, nil).badges
+	short, full := wtRows(w, false), wtRows(w, true)
+	for i, wt := range snap.Worktrees {
+		b := badges[wt.Repo]
+		label := wt.Branch
+		if wt.Detached() {
+			label = wt.Head
 		}
+		got := ansi.Strip(short[i])
+		if !strings.HasPrefix(got[len("▌"):], " "+b.code+" "+label) && !strings.HasPrefix(got, "  "+b.code+" "+label) {
+			t.Errorf("row %d: %q", i, got)
+		}
+		if !strings.Contains(short[i], bg(b.bg)) || !strings.Contains(full[i], bg(b.bg)) {
+			t.Errorf("row %d: badge shade %s missing", i, b.bg)
+		}
+		if strings.Contains(got, wt.Repo) {
+			t.Errorf("row %d still shows the repo name: %q", i, got)
+		}
+		if !strings.Contains(got, botIcon) {
+			t.Errorf("row %d lacks its agents section: %q", i, got)
+		}
+		f := ansi.Strip(full[i])
+		if col(f, label) != 2+len("content-engine-1")+1 || !strings.Contains(f, wt.Repo) {
+			t.Errorf("full row %d: label at %d: %q", i, col(f, label), f)
+		}
+		if strings.Contains(f, botIcon) || strings.Contains(f, "│") {
+			t.Errorf("full row %d keeps the agents section: %q", i, f)
+		}
+		if n := len(aggregate(wt.Panes, rowOrder)); n > 0 && !strings.Contains(f, stateIcon[state.StateWorking]) &&
+			!strings.Contains(f, stateIcon[state.StateDone]) && !strings.Contains(f, stateIcon[state.StateAwaiting]) {
+			t.Errorf("full row %d lost its chips: %q", i, f)
+		}
+	}
+	// The full badge is truncated at repoFullMaxW.
+	long := wtree("/dev/x", "a-repository-name-longer-than-the-cap", "main", "")
+	r := newWorktreeRow(long, nil, repoBadge{code: "ar", fg: cText, bg: cSurface2}, repoFullMaxW)
+	if r.repo != "a-repository-name-longe…" || width(r.repo) != repoFullMaxW {
+		t.Errorf("long repo badge = %q", r.repo)
+	}
+}
+
+func TestAssignRepoBadges(t *testing.T) {
+	type want struct{ code, bg, fg string }
+	tests := []struct {
+		name  string
+		repos []string
+		want  map[string]want
+	}{
+		{"distinct first two", []string{"yap-trial", "dotfiles", "search-primitives", "content-engine-1"}, map[string]want{
+			"content-engine-1":  {"co", cSurface2, cText},
+			"dotfiles":          {"do", cOverlay0, cText},
+			"search-primitives": {"se", cOverlay1, cCrust},
+			"yap-trial":         {"ya", cOverlay2, cCrust},
+		}},
+		{"conflicts fall to initials then pairs", []string{"content-engine-2", "co", "content-engine-1"}, map[string]want{
+			"co":               {"co", cSurface2, cText},
+			"content-engine-1": {"ce", cOverlay0, cText},
+			"content-engine-2": {"cn", cOverlay1, cCrust},
+		}},
+		{"case and punctuation ignored", []string{"Search_Primitives", "search-primitives", ".dotfiles"}, map[string]want{
+			".dotfiles":         {"do", cSurface2, cText},
+			"Search_Primitives": {"se", cOverlay0, cText},
+			"search-primitives": {"sp", cOverlay1, cCrust},
+		}},
+		{"single characters", []string{"x", "x-", "x_y"}, map[string]want{
+			"x":   {"x1", cSurface2, cText},
+			"x-":  {"x2", cOverlay0, cText},
+			"x_y": {"xy", cOverlay1, cCrust},
+		}},
+		{"no letters or digits", []string{"--", "__", "a"}, map[string]want{
+			"--": {"00", cSurface2, cText},
+			"__": {"01", cOverlay0, cText},
+			"a":  {"a1", cOverlay1, cCrust},
+		}},
+		{"shades wrap after six", []string{"a1", "b1", "c1", "d1", "e1", "f1", "g1", "h1"}, map[string]want{
+			"a1": {"a1", cSurface2, cText},
+			"b1": {"b1", cOverlay0, cText},
+			"c1": {"c1", cOverlay1, cCrust},
+			"d1": {"d1", cOverlay2, cCrust},
+			"e1": {"e1", cSubtext0, cCrust},
+			"f1": {"f1", cSubtext1, cCrust},
+			"g1": {"g1", cSurface2, cText},
+			"h1": {"h1", cOverlay0, cText},
+		}},
+		{"duplicates count once", []string{"dotfiles", "dotfiles", "yap"}, map[string]want{
+			"dotfiles": {"do", cSurface2, cText},
+			"yap":      {"ya", cOverlay0, cText},
+		}},
+	}
+	for _, tc := range tests {
+		got := assignRepoBadges(tc.repos)
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: %d badges, want %d", tc.name, len(got), len(tc.want))
+		}
+		for name, w := range tc.want {
+			if b := got[name]; b.code != w.code || b.bg != w.bg || b.fg != w.fg {
+				t.Errorf("%s: %q = %+v, want %+v", tc.name, name, b, w)
+			}
+		}
+	}
+	// Codes stay unique until every candidate is gone: r0-r9 and 00-99
+	// give 110 names starting with r a code each.
+	var many []string
+	for i := range 110 {
+		many = append(many, fmt.Sprintf("r%d", i))
+	}
+	seen := map[string]bool{}
+	for _, b := range assignRepoBadges(many) {
+		if width(b.code) != 2 {
+			t.Errorf("code %q is not 2 columns", b.code)
+		}
+		seen[b.code] = true
+	}
+	if len(seen) != 110 {
+		t.Errorf("%d unique codes for 110 repos", len(seen))
 	}
 }
 
@@ -129,10 +270,13 @@ func TestGoldenWorktreeCards(t *testing.T) {
 }
 
 func TestGoldenWorktreeInputLine(t *testing.T) {
-	for _, w := range []int{40, 80, 120} {
+	for _, w := range []int{30, 40, 80, 120} {
 		m, _ := newWTTest(t)
 		m.w = w
 		all := m.renderInput()
+		m = send(t, m, "m", "a", "i", "n")
+		allQuery := m.renderInput()
+		m = send(t, m, "backspace", "backspace", "backspace", "backspace")
 		m = send(t, m, "tab", "tab") // content-engine-1
 		repo := m.renderInput()
 		m = send(t, m, "m", "a", "i", "n")
@@ -143,7 +287,7 @@ func TestGoldenWorktreeInputLine(t *testing.T) {
 		long := m.renderInput()
 		m = send(t, m, strings.Split("-and-more", "")...)
 		longer := m.renderInput()
-		lines := []string{all, repo, query, long, longer}
+		lines := []string{all, allQuery, repo, query, long, longer}
 		checkWidths(t, "wt input", lines, w)
 		golden(t, fmt.Sprintf("wt_input_%d", w), plain(lines))
 		if w == 120 {
@@ -195,7 +339,7 @@ func TestWorktreeModeSwitch(t *testing.T) {
 		t.Errorf("count = %s", got)
 	}
 	rows := ansi.Strip(strings.Join(m.renderList(), "\n"))
-	if !strings.Contains(rows, "exp/roll-hiring") || !strings.Contains(rows, "content-engin…") {
+	if !strings.Contains(rows, "co exp/roll-hiring") || strings.Contains(rows, "content-engine-1") {
 		t.Errorf("rows:\n%s", rows)
 	}
 	m = send(t, m, "ctrl+n")
@@ -270,13 +414,13 @@ func TestRepoFilterCycle(t *testing.T) {
 func TestTabDoesNothingInSessionMode(t *testing.T) {
 	m, _ := newTest(t)
 	m = send(t, m, "tab", "shift+tab", "ctrl+t")
-	if m.repo != "" || m.dirLabels || m.query.Value() != "" || sessionName(m) != "dotfiles-agents-with-a-very-long-session-name-for-truncation" {
-		t.Errorf("session mode: repo=%q dir=%v query=%q cur=%q", m.repo, m.dirLabels, m.query.Value(), sessionName(m))
+	if m.repo != "" || m.fullRepo || m.query.Value() != "" || sessionName(m) != "dotfiles-agents-with-a-very-long-session-name-for-truncation" {
+		t.Errorf("session mode: repo=%q full=%v query=%q cur=%q", m.repo, m.fullRepo, m.query.Value(), sessionName(m))
 	}
 }
 
-// Search matches branches (or a detached commit id) in either label state,
-// never re-ranks, and highlights only on branch labels.
+// Search matches branches (or a detached commit id) in either repo view,
+// never re-ranks, and always highlights the label.
 func TestWorktreeSearch(t *testing.T) {
 	m, _ := newWTTest(t)
 	m = send(t, m, "m", "a", "i", "n")
@@ -289,24 +433,77 @@ func TestWorktreeSearch(t *testing.T) {
 	}
 	m = send(t, m, "ctrl+t")
 	if got := matchRoots(m); !reflect.DeepEqual(got, want) {
-		t.Errorf("main with dir labels: %v", got)
+		t.Errorf("main in full-repo mode: %v", got)
 	}
 	list := strings.Join(m.renderList(), "\n")
-	if strings.Contains(list, fg(matchFg)) || !strings.Contains(ansi.Strip(list), "content-engine-1 ") {
-		t.Errorf("dir labels: %q", ansi.Strip(list))
+	if !strings.Contains(list, fg(matchFg)) || !strings.Contains(ansi.Strip(list), "content-engine-1 main") {
+		t.Errorf("full-repo mode: %q", ansi.Strip(list))
 	}
-	// A directory name is not searched.
+	// Neither a directory nor a repo name is searched.
 	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "y", "a", "p", "-")
 	if len(m.matches) != 0 {
-		t.Errorf("dir name matched: %v", matchRoots(m))
+		t.Errorf("repo name matched: %v", matchRoots(m))
 	}
 	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "1", "a", "2", "b")
 	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"/dev/content-engine-5"}) {
 		t.Errorf("commit id: %v", got)
 	}
 	m = send(t, m, "ctrl+t")
-	if m.dirLabels {
+	if m.fullRepo {
 		t.Error("ctrl+t should toggle back")
+	}
+}
+
+// Full-repo mode is off on open and survives mode switches within a run.
+func TestFullRepoModeKept(t *testing.T) {
+	m, _ := newWTTest(t)
+	if m.fullRepo || strings.Contains(ansi.Strip(strings.Join(m.renderList(), "\n")), "yap-trial") {
+		t.Fatal("full-repo mode should start off")
+	}
+	m = send(t, m, "ctrl+t", "ctrl+w")
+	if !m.fullRepo {
+		t.Fatal("full-repo mode lost in session mode")
+	}
+	if list := ansi.Strip(strings.Join(m.renderList(), "\n")); !strings.Contains(list, botIcon) {
+		t.Errorf("session rows changed: %q", list)
+	}
+	m = send(t, m, "ctrl+w")
+	list := ansi.Strip(strings.Join(m.renderList(), "\n"))
+	if !m.fullRepo || !strings.Contains(list, "yap-trial        main") || strings.Contains(list, botIcon) {
+		t.Errorf("back in worktree mode: full=%v\n%s", m.fullRepo, list)
+	}
+}
+
+// The filter chip follows the query on the left; a repo's chip takes its
+// badge shade. Prompts and errors show no chip.
+func TestFilterChipPlacement(t *testing.T) {
+	m, _ := newWTTest(t)
+	m = send(t, m, "m", "a")
+	got := ansi.Strip(m.renderInput())
+	if !strings.HasPrefix(got, "  ma   All ") || !strings.HasSuffix(got, "3/5   ") {
+		t.Errorf("All chip: %q", got)
+	}
+	m = send(t, m, "tab", "tab") // content-engine-1
+	line := m.renderInput()
+	if !strings.HasPrefix(ansi.Strip(line), "  ma   content-engine-1 ") {
+		t.Errorf("repo chip: %q", ansi.Strip(line))
+	}
+	b := m.badges["content-engine-1"]
+	if !strings.Contains(line, bg(b.bg)) || !strings.Contains(line, fg(b.fg)) {
+		t.Errorf("repo chip should use the badge shade %s: %q", b.bg, line)
+	}
+	m = send(t, m, "tab") // yap-trial
+	if b := m.badges["yap-trial"]; b.bg != cOverlay1 || !strings.Contains(m.renderInput(), bg(b.bg)) {
+		t.Errorf("yap-trial chip: %+v %q", b, m.renderInput())
+	}
+	m = send(t, m, "ctrl+a", "C")
+	if strings.Contains(m.renderInput(), bg(m.badges["yap-trial"].bg)) {
+		t.Errorf("prompt shows the chip: %q", ansi.Strip(m.renderInput()))
+	}
+	m = send(t, m, "esc")
+	m.err = errFake
+	if got := ansi.Strip(m.renderInput()); strings.Contains(got, "yap-trial") {
+		t.Errorf("error shows the chip: %q", got)
 	}
 }
 

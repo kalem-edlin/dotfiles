@@ -199,7 +199,7 @@ From the top: the card grid, the row list (sessions or worktrees), then the inpu
 | Part | Rule |
 |---|---|
 | Row list | 6 rows (`listRows`), bottom up. With fewer rows the empty rows sit at the top. Panel background is the base blended 70% toward surface0 |
-| Input line | Query with a static block cursor (no blink ticks). At the right edge the match count (`matches/total` rows, where total counts rows that pass the repo filter) and a 2-column cell, `#a6e3a1` at rest and `#f38ba8` while the prefix is armed. In worktree mode the repo filter chip sits left of the count (D80). The rules above and below use `#585b70` |
+| Input line | Query with a static block cursor (no blink ticks). At the right edge the match count (`matches/total` rows, where total counts rows that pass the repo filter) and a 2-column cell, `#a6e3a1` at rest and `#f38ba8` while the prefix is armed. In worktree mode the repo filter chip follows the query on the left, one space after its cursor (D80). The rules above and below use `#585b70` |
 | Grid | Everything above the list. Hidden when less than one card row (`cardRows + 2` lines) fits |
 | Short screens | `heights()` gives the input line priority, then up to 6 list rows and the two rules. Rows go from the grid first, then from the list down to one row, and the rules drop only when no list row would be left |
 
@@ -265,8 +265,11 @@ Resolution (D75). `picker/worktree` maps a directory to its worktree by reading 
 Identity and labels (D76):
 
 - A worktree's id is its root directory. Its repo is the source repo's local directory name, not the remote: the basename of the main worktree (the parent of a `.git` common dir), the name of a bare `<name>.git` common dir without the suffix, the common dir's basename when it was reached through a `commondir` file, else the worktree root's basename (submodules, `--separate-git-dir`). Examples: `content-engine-1`, `search-primitives`, `dotfiles`.
-- The row label is the branch from `HEAD` (`refs/heads/` stripped, other refs with `refs/` stripped). A detached `HEAD` shows the 7-character commit id, dimmed.
-- `ctrl-t` switches every row label to the worktree directory basename (`content-engine-5`, `roll-hiring`) and back, for that picker run. Search still matches the branch (or commit id), and match highlights show only on branch labels.
+- The row label is the branch from `HEAD` (`refs/heads/` stripped, other refs with `refs/` stripped). A detached `HEAD` shows the 7-character commit id, dimmed. Worktree directory names are never shown as labels, since branches are what is read and searched. Search matches the branch (or commit id) and match highlights always show.
+- A repo badge sits immediately left of the label, after the gutter and its leading space: exactly 2 columns holding the repo's code, bold, on the repo's shade, then one plain space and the label. It replaces the old repo column on the right.
+- Codes and shades are computed once per snapshot from the distinct repo names of all worktree rows (`assignRepoBadges` in `picker/ui/badge.go`), independent of the filter and of row order, so they stay stable between opens. Names claim in sorted (byte-wise) order. Candidates come from the lowercased name's ASCII letters and digits, in this order: the first two, the initials of the first two segments when split on other characters (`search-primitives` gives `sp`), the first character with each later one in turn, the first character with `1` to `9`, then `00` to `99`. A name without letters or digits starts at `00`. Each name takes its first unclaimed candidate. Examples: `content-engine-1` is `co`, `dotfiles` is `do`, `search-primitives` is `se`, `yap-trial` is `ya`, and with `co` and `content-engine-1` already claiming `co` and `ce`, `content-engine-2` gets `cn`.
+- Shades are Mocha greys, darkest first: Surface2, Overlay0, Overlay1, Overlay2, Subtext0, Subtext1. Surface1 is skipped because it matches the selected row background. The repo at position i in sorted order takes shade i mod 6. Text is `#cdd6f4` on the first two and `#11111b` on the other four. Badges keep full colour on the selected row.
+- `ctrl-t` toggles full-repo mode for that picker run (off on open, kept across `ctrl-w`). Every badge widens to the full repo name on the same shade, padded to a shared width (the longest repo name among all worktree rows, at most 24 columns, truncated with `…`), so the branch labels stay aligned behind it. The row's right side then shows only the status chips: the agents section and its separator are hidden, and the label gets the freed width.
 
 Membership and cards (D77):
 
@@ -278,7 +281,7 @@ Membership and cards (D77):
 Rows and order (D78):
 
 - Status chips and the agents cell count member agent panes only.
-- The memory column shows the repo name instead, right aligned in a width shared by all worktree rows: the widest repo name, at least 5 and at most 14 columns, truncated with `…`.
+- There is no memory or repo column. The right side ends with the agents section and one space, or with the status chips in full-repo mode, and the repo shows only in the badge (D76).
 - The current worktree is the one holding the invoking client's active pane (its effective directory) and sits at the bottom. The others sort as sessions do (Awaiting, Done and Working counts, then the newest agent state change), with the newest `@pane_focus_at` among member panes in place of `session_last_attached`. Ties keep first-appearance order.
 - The cursor starts one row up. When the bottom row is not the current worktree (the client's pane is outside any repo, or the repo filter hides it), the cursor starts on the bottom row.
 
@@ -287,11 +290,11 @@ Repo filter (D80):
 - `tab` and `shift-tab` step forward and back through All and each repo, wrapping both ways. The filter starts at All on every open.
 - Repos are ordered by first appearance scanning the worktree rows from the bottom up, so the first `tab` lands on the highest priority repo, normally the current worktree's. Entries are repo names, so two repos with the same directory name share one entry.
 - The filter applies with and without a query, before the branch match. A filter step resets the cursor and card as on open.
-- The input line shows the filter as a chip (`#cdd6f4` on `#45475a`, the panes chip colours) left of the match count, reading `All` or the repo name. It takes whatever room the query leaves, is truncated, and is dropped below 3 columns.
+- The input line shows the filter as a chip directly after the query, one space after its visible text and cursor, while the match count and the prefix cell stay at the right edge. It reads `All` (`#cdd6f4` on `#45475a`, the panes chip colours) or the repo name on that repo's badge shade and text colour. The query has priority: the chip takes whatever room is left, is truncated, and is dropped below 3 columns. Prompts and errors replace the query and show no chip.
 
 Mode switch:
 
-- The query, the repo filter and the `ctrl-t` label choice are kept across `ctrl-w` within one run. Session mode ignores the filter and shows no chip.
+- The query, the repo filter and full-repo mode are kept across `ctrl-w` within one run. Session mode ignores the filter and shows no chip.
 - The cursor and card go to their defaults: with an empty query the open-time cursor rule, with a query the bottom match, as after typing.
 
 Actions (D81). Card actions (`enter`, `C-a r`, `C-a q`) work as in session mode, using the card's own session. `C-a c` needs a card and makes a window in that card's session with `-c <worktree root>`. `C-a C` needs a worktree row and makes a detached session rooted at the worktree, with its directory name as the default name. `C-a R`, `C-a Q` and enter with no card do nothing, because a worktree row is not a session.
@@ -317,7 +320,7 @@ The text on each chip is a darker shade of its own pastel (D64, D67), and the ag
 | `ctrl-h` / `ctrl-l` | Card left / right within the grid row | same |
 | `ctrl-j` / `ctrl-k` | Card row down / up, keeping the column | same |
 | `ctrl-w` | Switch to worktree mode | Switch to session mode |
-| `ctrl-t` | Nothing | Toggle row labels between branch and directory name |
+| `ctrl-t` | Nothing | Toggle full-repo mode: badges show full repo names and rows show only their status chips on the right |
 | `tab` / `shift-tab` | Nothing | Next / previous repo filter |
 | `enter` | Go to the selected card, or create a session from an unmatched query | Go to the selected card. Nothing without a card |
 | `esc`, `ctrl-c` | Close | same |

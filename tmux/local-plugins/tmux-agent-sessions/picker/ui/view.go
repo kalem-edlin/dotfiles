@@ -37,6 +37,10 @@ func (m model) render() string {
 // rows sit at the top.
 func (m model) renderList() []string {
 	memW := m.memWidth()
+	fullW := 0
+	if m.fullRepo {
+		fullW = m.repoW
+	}
 	rows := m.listHeight()
 	n := len(m.matches)
 	first, shown := m.top, min(n, rows)
@@ -50,26 +54,20 @@ func (m model) renderList() []string {
 		case *state.Session:
 			r = newSessionRow(x, m.pos[i])
 		case *state.Worktree:
-			r = newWorktreeRow(x, m.pos[i], m.dirLabels, memW)
+			r = newWorktreeRow(x, m.pos[i], m.badges[x.Repo], fullW)
 		}
 		out = append(out, renderRow(r, memW, m.w, i == m.cur, m.snap.Now))
 	}
 	return out
 }
 
-// repoMaxW caps the worktree rows' repo column.
-const repoMaxW = 14
-
-// memWidth is the right column's width, shared by every row of the mode:
-// the widest session memory, or the widest repo name up to repoMaxW.
+// memWidth is the memory column's width, shared by every session row: the
+// widest session memory. Worktree rows have no memory column (D78).
 func (m model) memWidth() int {
-	w := 5
 	if m.mode == modeWorktrees {
-		for _, t := range m.snap.Worktrees {
-			w = max(w, width(oneLine(t.Repo)))
-		}
-		return min(w, repoMaxW)
+		return 0
 	}
+	w := 5
 	for _, s := range m.snap.Sessions {
 		w = max(w, width(memLabel(s.Members())))
 	}
@@ -90,5 +88,9 @@ func (m model) renderInput() string {
 	default:
 		left = indent + m.query.View()
 	}
-	return renderInputLine(left, m.filterText(), m.countText(), m.armed, m.w)
+	var chip filterChip
+	if m.pending == promptNone && m.err == nil {
+		chip = m.filterChip()
+	}
+	return renderInputLine(left, chip, m.countText(), m.armed, m.w)
 }

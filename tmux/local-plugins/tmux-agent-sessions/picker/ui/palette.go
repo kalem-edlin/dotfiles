@@ -17,6 +17,7 @@ const (
 	cSurface2  = "#585b70"
 	cOverlay0  = "#6c7086"
 	cOverlay1  = "#7f849c"
+	cOverlay2  = "#9399b2"
 	cSubtext0  = "#a6adc8"
 	cSubtext1  = "#bac2de"
 	cText      = "#cdd6f4"

@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"agentpicker/state"
@@ -283,6 +282,12 @@ type listRow struct {
 	agents   int   // all agents in the row's member panes
 	agentsAt int64 // newest state change among them
 	mem      string
+
+	// Worktree rows only (D76, D78).
+	repo       string // badge text left of the name: the repo's code, or its full name
+	repoFg     string
+	repoBg     string
+	statusOnly bool // full-repo mode: no agents section on the right
 }
 
 func newSessionRow(s *state.Session, pos []int) listRow {
@@ -293,19 +298,19 @@ func newSessionRow(s *state.Session, pos []int) listRow {
 }
 
 // newWorktreeRow labels the row with its branch, or its commit id dimmed
-// when detached, or with its directory name when dirLabel is set; the
-// match highlights show only on the branch label. The memory column holds
-// the repo name, truncated to repoW.
-func newWorktreeRow(t *state.Worktree, pos []int, dirLabel bool, repoW int) listRow {
+// when detached, behind the repo badge b (D76). fullW above zero is
+// full-repo mode (D78): the badge shows the repo name padded or truncated
+// to fullW, and the row drops its agents section.
+func newWorktreeRow(t *state.Worktree, pos []int, b repoBadge, fullW int) listRow {
 	n, at := agentSummary(t.Panes)
 	r := listRow{pos: pos, chips: aggregate(t.Panes, rowOrder), agents: n, agentsAt: at,
-		mem: truncate(oneLine(t.Repo), repoW)}
-	switch {
-	case dirLabel:
-		r.name, r.pos = oneLine(filepath.Base(t.Root)), nil
-	case t.Detached():
+		repo: b.code, repoFg: b.fg, repoBg: b.bg}
+	if fullW > 0 {
+		r.repo, r.statusOnly = padRight(truncate(oneLine(t.Repo), fullW), fullW), true
+	}
+	if t.Detached() {
 		r.name, r.dim = t.Head, true
-	default:
+	} else {
 		r.name = oneLine(t.Branch)
 	}
 	return r
@@ -351,7 +356,9 @@ func highlightName(name string, pos []int, fg, bg string, bold bool) string {
 // the left, then three sections pushed to the right edge, divided by thin
 // rules (D55): the status chips (the only variable width), the agents
 // section and the memory, both of fixed width so they line up on every
-// row. A long name is truncated before chips are dropped.
+// row. A long name is truncated before chips are dropped. A worktree row
+// has its repo badge before the name and no memory section (memW 0), and
+// in full-repo mode only the chips on the right (D78).
 func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	bg := panelBg
 	if selected {
@@ -376,8 +383,19 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 		return total
 	}
 	// gutter, a leading space and at least one space after the name; the
-	// right edge keeps one space after the memory.
-	avail := w - 3 - 2*sepW - agentsW - memW - 1
+	// right edge keeps one space after the last section.
+	fixed := 0
+	if !r.statusOnly {
+		fixed += sepW + agentsW
+	}
+	if memW > 0 {
+		fixed += sepW + memW
+	}
+	badgeW := 0
+	if r.repo != "" {
+		badgeW = width(r.repo) + 1
+	}
+	avail := w - 3 - fixed - badgeW - 1
 	nameW := width(r.name)
 	n := len(chips)
 	for n > 0 && avail-chipsW(n) < min(nameW, 12) {
@@ -389,8 +407,11 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	if r.dim {
 		nameFg = dimFg
 	}
-	line := gutter + paint(" ", "", bg, false) +
-		highlightName(name, r.pos, nameFg, bg, selected)
+	line := gutter + paint(" ", "", bg, false)
+	if r.repo != "" {
+		line += paint(r.repo, r.repoFg, r.repoBg, true) + paint(" ", "", bg, false)
+	}
+	line += highlightName(name, r.pos, nameFg, bg, selected)
 	right := ""
 	for i, c := range chips[:n] {
 		if i > 0 {
@@ -398,12 +419,18 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 		}
 		right += c
 	}
-	memFgc := memFg
-	if selected {
-		memFgc = cText
+	if !r.statusOnly {
+		right += sep + agentsCell(r.agents, r.agentsAt, now, bg, selected)
 	}
-	right += sep + agentsCell(r.agents, r.agentsAt, now, bg, selected) + sep +
-		paint(strings.Repeat(" ", max(0, memW-width(r.mem)))+r.mem+" ", memFgc, bg, selected)
+	if memW > 0 {
+		memFgc := memFg
+		if selected {
+			memFgc = cText
+		}
+		right += sep + paint(strings.Repeat(" ", max(0, memW-width(r.mem)))+r.mem+" ", memFgc, bg, selected)
+	} else {
+		right += paint(" ", "", bg, false)
+	}
 	if fill := w - width(line) - width(right); fill > 0 {
 		line += paint(strings.Repeat(" ", fill), "", bg, false)
 	}
@@ -420,11 +447,16 @@ func renderRule(w int) string {
 	return paint(strings.Repeat("─", w), borderRest, "", false)
 }
 
+// filterChip is the input line's repo filter chip; empty text shows none.
+type filterChip struct {
+	text, fg, bg string
+}
+
 // renderInputLine draws left (query, prompt or error) with the match count
-// and the prefix cell at the right edge (D20). A non-empty filter (the
-// repo filter in worktree mode) shows as a chip left of the count, in
-// whatever room left leaves it, truncated or dropped first.
-func renderInputLine(left, filter, count string, armed bool, w int) string {
+// and the prefix cell at the right edge (D20). A filter chip (the repo
+// filter in worktree mode, D80) follows left after one space, in whatever
+// room left leaves it, truncated or dropped first.
+func renderInputLine(left string, filter filterChip, count string, armed bool, w int) string {
 	cellBg := cellRest
 	if armed {
 		cellBg = cellArmed
@@ -432,10 +464,8 @@ func renderInputLine(left, filter, count string, armed bool, w int) string {
 	right := paint(count, countFg, "", false) + " " + paint("  ", "", cellBg, false)
 	room := w - width(right)
 	// A space either side of the chip, and the chip's own padding.
-	if fw := room - width(left) - 4; filter != "" && fw >= minFilterW {
-		chip := chipColored(truncate(filter, fw), cText, panesChipBg, true)
-		right = chip + " " + right
-		room -= width(chip) + 1
+	if fw := room - width(left) - 4; filter.text != "" && fw >= minFilterW {
+		left += " " + chipColored(truncate(filter.text, fw), filter.fg, filter.bg, true)
 	}
 	return padRight(padRight(left, room)+right, w)
 }
