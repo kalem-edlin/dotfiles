@@ -17,6 +17,7 @@
 // @agent_empty marks a chat with no prompt yet (D59), from session start to
 // the first prompt. @agent_subs counts running /sub subagents
 // (subagent-widget.ts, D61); a settle with subagents running stays Working.
+// @agent_cwd is ctx.cwd, fixed per process, so it is published at start only.
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -33,6 +34,7 @@ const OPTIONS = [
   "@agent_name",
   "@agent_subs",
   "@agent_empty",
+  "@agent_cwd",
 ];
 const TMUX_TIMEOUT_MS = 5000;
 const SHUTDOWN_WAIT_MS = 1000;
@@ -284,9 +286,14 @@ export default function (pi: ExtensionAPI) {
     // A reopened session without a name shows its first prompt until titled.
     const fallback = named || !prompt.trim() ? "" : sanitize(prompt, 40);
     if (fallback) named = true;
+    // Skipped when empty or unsafe as an argv element (control characters, or
+    // a trailing ";" that tmux takes for a separator).
+    const cwd = ctx.cwd;
+    const cwdOk = Boolean(cwd) && !/[\u0000-\u001f\u007f]/.test(cwd) && !cwd.endsWith(";");
     void publish([
       set(pane, "@agent_kind", "pi"),
       set(pane, "@agent_pid", String(process.pid)),
+      ...(cwdOk ? [set(pane, "@agent_cwd", cwd)] : []),
       set(pane, "@agent_subs", "0"),
       ...setState(pane, "idle", now()),
       fallback ? set(pane, "@agent_name", fallback) : nameCommand(pane, sessionName),

@@ -126,6 +126,19 @@
         ]
       }
     ],
+    "CwdChanged": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude CwdChanged",
+            "timeout": 3,
+            "async": true
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "matcher": "",

@@ -55,11 +55,20 @@ pane_read() {
 
 # jq helper: sanitized text (control chars to space, runs collapsed, trimmed).
 JQ_DEFS='def clean: tostring | gsub("[[:cntrl:]\u2028\u2029]"; " ") | gsub(" +"; " ") | sub("^ "; "") | sub(" $"; "");
-def cut($n): clean | .[0:$n] | sub("[ ;\\\\]+$"; "");'
+def cut($n): clean | .[0:$n] | sub("[ ;\\\\]+$"; "");
+def path_ok: tostring | if test("[[:cntrl:]]") or endswith(";") then "" else . end;'
 
 jq_get() {
   [ -n "$JQ" ] || return 1
   printf '%s' "$input" | "$JQ" -r "$JQ_DEFS $1" 2>/dev/null
+}
+
+# @agent_cwd from the hook's cwd. path_ok drops one with control characters or
+# a trailing ";", which tmux would take for a separator; empty writes nothing.
+# Events read their jq fields one per line with read, so a missing line
+# (command substitution drops trailing empty ones) is just ''.
+add_cwd() {
+  [ -z "$1" ] || add set -p -t "$pane" @agent_cwd "$1"
 }
 
 # Session title from the transcript JSONL: the last custom-title (/rename),
@@ -184,16 +193,15 @@ bg_shells() {
 
 case "$event" in
   SessionStart)
-    fields="$(jq_get '(.source // "" | clean), (.transcript_path // "" | tostring)')" || exit 0
-    src="${fields%%$'\n'*}"
-    transcript="${fields#*$'\n'}"
-    [ "$transcript" != "$fields" ] || transcript=""
+    fields="$(jq_get '(.source // "" | clean), (.cwd // "" | path_ok), (.transcript_path // "" | tostring)')" || exit 0
+    { IFS= read -r src; IFS= read -r cwd; IFS= read -r transcript; } <<<"$fields"
     pane_read '#{pane_pid}' || exit 0
     pane_pid="$REPLY"
     add set -p -t "$pane" @agent_kind claude
     if find_agent_pid "$pane_pid"; then
       add set -p -t "$pane" @agent_pid "$REPLY"
     fi
+    add_cwd "$cwd"
     # startup and clear begin a new transcript with no title yet (clear gets
     # the new session's path; the old file's title would be stale), so only
     # resume and compact read one. Compaction restarts the session mid-turn:
@@ -223,14 +231,13 @@ case "$event" in
     run
     ;;
   UserPromptSubmit)
-    fields="$(jq_get '(.prompt // "" | cut(40)), (.transcript_path // "" | tostring)')" || exit 0
-    name="${fields%%$'\n'*}"
-    transcript="${fields#*$'\n'}"
-    [ "$transcript" != "$fields" ] || transcript=""
+    fields="$(jq_get '(.prompt // "" | cut(40)), (.cwd // "" | path_ok), (.transcript_path // "" | tostring)')" || exit 0
+    { IFS= read -r name; IFS= read -r cwd; IFS= read -r transcript; } <<<"$fields"
     pane_read '#{@agent_name}' || exit 0
     current="$REPLY"
     add_state working
     add set -pu -t "$pane" @agent_empty # the first prompt ends emptiness
+    add_cwd "$cwd"
     # The transcript title wins; until one exists the first prompt stands in.
     if transcript_title "$transcript"; then
       add set -p -t "$pane" @agent_name "$REPLY"
@@ -263,6 +270,12 @@ case "$event" in
     esac
     run
     ;;
+  CwdChanged)
+    # Only the directory moves (Bash cd, entering a worktree); state is kept.
+    cwd="$(jq_get '.new_cwd // "" | path_ok')" || exit 0
+    add_cwd "$cwd"
+    run
+    ;;
   SubagentStart)
     add set -pF -t "$pane" @agent_subs '#{e|+|:#{@agent_subs},1}'
     run
@@ -277,10 +290,9 @@ case "$event" in
         | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | last // "")
         as $last
       | (if $last == "Awaiting your input." then "1" else "0" end),
-        (.transcript_path // "" | tostring)')" || exit 0
-    marker="${fields%%$'\n'*}"
-    transcript="${fields#*$'\n'}"
-    [ "$transcript" != "$fields" ] || transcript=""
+        (.cwd // "" | path_ok), (.transcript_path // "" | tostring)')" || exit 0
+    { IFS= read -r marker; IFS= read -r cwd; IFS= read -r transcript; } <<<"$fields"
+    add_cwd "$cwd"
 
     # Name only, from the transcript title; without one the name is kept.
     if transcript_title "$transcript"; then
@@ -303,7 +315,7 @@ case "$event" in
       # /clear and /resume keep the same agent process; SessionStart follows.
       clear | resume) exit 0 ;;
     esac
-    for option in kind pid state state_at at name subs empty; do
+    for option in kind pid state state_at at name subs empty cwd; do
       add set -pu -t "$pane" "@agent_$option"
     done
     run

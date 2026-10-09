@@ -86,6 +86,9 @@ join() {
   printf '%s' "${out%"$SEP"}"
 }
 
+# The @agent_cwd write for every fixture's hook cwd (/tmp).
+CWD_W="$(join set -p -t "$PANE" @agent_cwd /tmp)"
+
 # hook EVENT FIXTURE [env...]: runs the publisher with TMUX/TMUX_PANE set.
 hook() {
   local event="$1" fixture="$2"
@@ -209,7 +212,7 @@ status=$?
 agent_pid="$(cat "$pidfile")"
 assert_calls "SessionStart startup" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{pane_pid}')" \
-  "$(join set -p -t "$PANE" @agent_kind claude \; set -p -t "$PANE" @agent_pid "$agent_pid" \
+  "$(join set -p -t "$PANE" @agent_kind claude \; set -p -t "$PANE" @agent_pid "$agent_pid" \; "$CWD_W" \
     \; set -pu -t "$PANE" @agent_name \; set -p -t "$PANE" @agent_empty 1 \; set -p -t "$PANE" @agent_subs 0 \
     \; "$(state_calls idle)")"
 
@@ -219,14 +222,14 @@ printf '%s %s %s\n' "$PANE" "$SERVER_PID" "$PPID" >"$DISPLAY_OUT"
 hook SessionStart "$FIXTURES/session-start-compact.json"
 assert_calls "SessionStart compact keeps state; wrapper shell resolves to pane pid" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{pane_pid}')" \
-  "$(join set -p -t "$PANE" @agent_kind claude \; set -p -t "$PANE" @agent_pid "$PPID" \; set -pu -t "$PANE" @agent_empty)"
+  "$(join set -p -t "$PANE" @agent_kind claude \; set -p -t "$PANE" @agent_pid "$PPID" \; "$CWD_W" \; set -pu -t "$PANE" @agent_empty)"
 
 # Pane pid not among our ancestors: no @agent_pid.
 printf '%s %s %s\n' "$PANE" "$SERVER_PID" 999999 >"$DISPLAY_OUT"
 hook SessionStart "$FIXTURES/session-start-compact.json"
 assert_calls "SessionStart without a matching ancestor omits @agent_pid" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{pane_pid}')" \
-  "$(join set -p -t "$PANE" @agent_kind claude \; set -pu -t "$PANE" @agent_empty)"
+  "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \; set -pu -t "$PANE" @agent_empty)"
 
 # resume shows the transcript title at once; startup and clear unset the name
 # even when the transcript has a title; compact refreshes it, else keeps it.
@@ -234,28 +237,28 @@ printf '%s %s %s\n' "$PANE" "$SERVER_PID" 999999 >"$DISPLAY_OUT"
 ss_read="$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{pane_pid}')"
 hook SessionStart "$(with_transcript "$FIXTURES/session-start-resume.json" "$FIXTURES/transcript-ai-title.jsonl")"
 assert_calls "SessionStart resume sets the transcript title" "$ss_read" \
-  "$(join set -p -t "$PANE" @agent_kind claude \
+  "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \
     \; set -p -t "$PANE" @agent_name "Auto title: wire session titles into the agent picker card r" \
     \; set -pu -t "$PANE" @agent_empty \; set -p -t "$PANE" @agent_subs 0 \; "$(state_calls idle)")"
 
 hook SessionStart "$(with_transcript "$FIXTURES/session-start-resume.json" "$FIXTURES/transcript-untitled.jsonl")"
 assert_calls "SessionStart resume without a title unsets the name and @agent_empty" "$ss_read" \
-  "$(join set -p -t "$PANE" @agent_kind claude \; set -pu -t "$PANE" @agent_name \
+  "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \; set -pu -t "$PANE" @agent_name \
     \; set -pu -t "$PANE" @agent_empty \; set -p -t "$PANE" @agent_subs 0 \; "$(state_calls idle)")"
 
 hook SessionStart "$(with_transcript "$FIXTURES/session-start.json" "$FIXTURES/transcript-ai-title.jsonl")"
 assert_calls "SessionStart startup unsets the name, sets @agent_empty 1, without reading the transcript" "$ss_read" \
-  "$(join set -p -t "$PANE" @agent_kind claude \; set -pu -t "$PANE" @agent_name \
+  "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \; set -pu -t "$PANE" @agent_name \
     \; set -p -t "$PANE" @agent_empty 1 \; set -p -t "$PANE" @agent_subs 0 \; "$(state_calls idle)")"
 
 hook SessionStart "$(with_transcript "$FIXTURES/session-start-clear.json" "$FIXTURES/transcript-ai-title.jsonl")"
 assert_calls "SessionStart clear unsets the name, sets @agent_empty 1, without reading the transcript" "$ss_read" \
-  "$(join set -p -t "$PANE" @agent_kind claude \; set -pu -t "$PANE" @agent_name \
+  "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \; set -pu -t "$PANE" @agent_name \
     \; set -p -t "$PANE" @agent_empty 1 \; set -p -t "$PANE" @agent_subs 0 \; "$(state_calls idle)")"
 
 hook SessionStart "$(with_transcript "$FIXTURES/session-start-compact.json" "$FIXTURES/transcript-titles.jsonl")"
 assert_calls "SessionStart compact refreshes the name from the transcript" "$ss_read" \
-  "$(join set -p -t "$PANE" @agent_kind claude \
+  "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \
     \; set -p -t "$PANE" @agent_name "Renamed session: refactor the agent-state publisher for tmux" \
     \; set -pu -t "$PANE" @agent_empty)"
 
@@ -265,21 +268,21 @@ printf '%s %s \n' "$PANE" "$SERVER_PID" >"$DISPLAY_OUT"
 hook UserPromptSubmit "$FIXTURES/user-prompt.json"
 assert_calls "UserPromptSubmit names an unnamed pane (sanitized, 40 chars)" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{@agent_name}')" \
-  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; "$CWD_W" \
     \; set -p -t "$PANE" @agent_name "Fix the broken #{pane_id}; it's \"quoted\"")"
 
 printf '%s %s %s\n' "$PANE" "$SERVER_PID" "existing name" >"$DISPLAY_OUT"
 hook UserPromptSubmit "$FIXTURES/user-prompt.json"
 assert_calls "UserPromptSubmit keeps an existing name; unsets @agent_empty in the same call" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{@agent_name}')" \
-  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty)"
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; "$CWD_W")"
 
 # No title in an existing transcript: the prompt fallback as above.
 printf '%s %s \n' "$PANE" "$SERVER_PID" >"$DISPLAY_OUT"
 hook UserPromptSubmit "$(with_transcript "$FIXTURES/user-prompt.json" "$FIXTURES/transcript-untitled.jsonl")"
 assert_calls "UserPromptSubmit without a transcript title falls back to the prompt" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{@agent_name}')" \
-  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; "$CWD_W" \
     \; set -p -t "$PANE" @agent_name "Fix the broken #{pane_id}; it's \"quoted\"")"
 
 # A transcript title replaces any name, including the prompt fallback.
@@ -287,13 +290,13 @@ printf '%s %s %s\n' "$PANE" "$SERVER_PID" "existing name" >"$DISPLAY_OUT"
 hook UserPromptSubmit "$(with_transcript "$FIXTURES/user-prompt.json" "$FIXTURES/transcript-ai-title.jsonl")"
 assert_calls "UserPromptSubmit sets the last ai-title (sanitized, 60 chars)" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{@agent_name}')" \
-  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; "$CWD_W" \
     \; set -p -t "$PANE" @agent_name "Auto title: wire session titles into the agent picker card r")"
 
 hook UserPromptSubmit "$(with_transcript "$FIXTURES/user-prompt.json" "$FIXTURES/transcript-malformed.jsonl")"
 assert_calls "UserPromptSubmit skips malformed and nested title lines" \
   "$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{@agent_name}')" \
-  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; set -p -t "$PANE" @agent_name "Valid auto title")"
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; "$CWD_W" \; set -p -t "$PANE" @agent_name "Valid auto title")"
 
 # --- AskUserQuestion, notifications, subagents ------------------------------------
 
@@ -326,12 +329,13 @@ assert_calls "SubagentStop decrements clamped at zero" \
 
 # --- Stop ---------------------------------------------------------------------------
 
-no_marker_call="$(join if -F -t "$PANE" "$SUBS_GT0" "$(st working)" \
+no_marker_state="$(join if -F -t "$PANE" "$SUBS_GT0" "$(st working)" \
   "if -F -t $PANE '$VISIBLE' '$(st idle)' '$(st finished)'")"
+no_marker_call="$(join "$CWD_W" \; "$no_marker_state")"
 
 hook Stop "$FIXTURES/stop-marker.json"
 assert_calls "Stop with marker: subs>0 working, else awaiting" \
-  "$(join if -F -t "$PANE" "$SUBS_GT0" "$(st working)" "$(st awaiting)")"
+  "$(join "$CWD_W" \; if -F -t "$PANE" "$SUBS_GT0" "$(st working)" "$(st awaiting)")"
 
 hook Stop "$FIXTURES/stop-plain.json"
 assert_calls "Stop without marker: subs>0 working, else visible idle / finished" "$no_marker_call"
@@ -347,14 +351,14 @@ stop_with_transcript() {
 # The last custom-title wins over a later ai-title.
 stop_with_transcript "$FIXTURES/transcript-titles.jsonl"
 assert_calls "Stop overrides the name with the last custom-title (sanitized, 60 chars)" \
-  "$(join set -p -t "$PANE" @agent_name "Renamed session: refactor the agent-state publisher for tmux" \
+  "$(join "$CWD_W" \; set -p -t "$PANE" @agent_name "Renamed session: refactor the agent-state publisher for tmux" \
     \; if -F -t "$PANE" "$SUBS_GT0" "$(st working)" \
     "if -F -t $PANE '$VISIBLE' '$(st idle)' '$(st finished)'")"
 
 stop_with_transcript "$FIXTURES/transcript-ai-title.jsonl"
 assert_calls "Stop sets the last ai-title without a custom-title" \
-  "$(join set -p -t "$PANE" @agent_name "Auto title: wire session titles into the agent picker card r" \
-    \; "$no_marker_call")"
+  "$(join "$CWD_W" \; set -p -t "$PANE" @agent_name "Auto title: wire session titles into the agent picker card r" \
+    \; "$no_marker_state")"
 
 # Titles older than the 256 KB tail window: the whole-file scan finds them.
 {
@@ -370,7 +374,7 @@ assert_calls "Stop sets the last ai-title without a custom-title" \
 } >"$scratch/long.jsonl"
 stop_with_transcript "$scratch/long.jsonl"
 assert_calls "Stop finds titles outside the tail window" \
-  "$(join set -p -t "$PANE" @agent_name "early rename" \; "$no_marker_call")"
+  "$(join "$CWD_W" \; set -p -t "$PANE" @agent_name "early rename" \; "$no_marker_state")"
 
 # The same through grep, on a PATH without rg.
 norg_dir="$scratch/norg"
@@ -383,7 +387,7 @@ ln -s "$shim_dir/date" "$norg_dir/date"
 jq --arg tp "$scratch/long.jsonl" '.transcript_path = $tp' "$FIXTURES/stop-title.json" >"$scratch/stop.json"
 hook Stop "$scratch/stop.json" PATH="$norg_dir"
 assert_calls "Stop finds titles outside the tail window without rg" \
-  "$(join set -p -t "$PANE" @agent_name "early rename" \; "$no_marker_call")"
+  "$(join "$CWD_W" \; set -p -t "$PANE" @agent_name "early rename" \; "$no_marker_state")"
 
 stop_with_transcript "$FIXTURES/transcript-untitled.jsonl"
 assert_calls "Stop without a transcript title keeps the name" "$no_marker_call"
@@ -413,10 +417,10 @@ read_call="$(join display-message -p -t "$PANE" "#{pane_id} #{pid} #{@agent_pid}
 
 hook Stop "$FIXTURES/stop-plain.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
 assert_calls "Stop with a background shell under the agent publishes working" \
-  "$read_call" "$(state_calls working)"
+  "$read_call" "$(join "$CWD_W" \; "$(state_calls working)")"
 hook Stop "$FIXTURES/stop-marker.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
 assert_calls "Stop with a background shell and the marker still publishes working" \
-  "$read_call" "$(state_calls working)"
+  "$read_call" "$(join "$CWD_W" \; "$(state_calls working)")"
 hook Notification "$FIXTURES/notification-idle-prompt.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
 assert_calls "idle_prompt with a background shell changes nothing" "$read_call"
 
@@ -426,15 +430,72 @@ hook Notification "$FIXTURES/notification-idle-prompt.json" AGENT_STATE_TEST_PS=
 assert_calls "idle_prompt: other children and another parent's shell are ignored" "$read_call" \
   "$(join if -F -t "$PANE" '#{&&:#{==:#{@agent_state},working},#{==:#{e|>|:#{@agent_subs},0},0}}' "$(st idle)")"
 
+# --- @agent_cwd -----------------------------------------------------------------------
+
+# with_cwd FIXTURE JQ: the fixture rewritten by the jq filter.
+with_cwd() {
+  jq "$2" "$1" >"$scratch/cwd.json"
+  printf '%s' "$scratch/cwd.json"
+}
+SPACED='/Users/x/My Repo/wt 2'
+
+hook CwdChanged "$FIXTURES/cwd-changed.json"
+assert_calls "CwdChanged sets only @agent_cwd from new_cwd (spaces kept)" \
+  "$(join set -p -t "$PANE" @agent_cwd "$SPACED")"
+
+hook CwdChanged "$(with_cwd "$FIXTURES/cwd-changed.json" 'del(.cwd)')"
+assert_calls "CwdChanged reads new_cwd, not cwd" \
+  "$(join set -p -t "$PANE" @agent_cwd "$SPACED")"
+
+hook CwdChanged "$(with_cwd "$FIXTURES/cwd-changed.json" 'del(.new_cwd)')"
+assert_calls "CwdChanged without new_cwd writes nothing"
+
+hook CwdChanged "$(with_cwd "$FIXTURES/cwd-changed.json" '.new_cwd = "/tmp/a\nb"')"
+assert_calls "CwdChanged drops a cwd with control characters"
+
+hook CwdChanged "$(with_cwd "$FIXTURES/cwd-changed.json" '.new_cwd = "/tmp/a;"')"
+assert_calls "CwdChanged drops a cwd ending in a tmux separator"
+
+printf '%s %s %s\n' "$PANE" "$SERVER_PID" 999999 >"$DISPLAY_OUT"
+hook SessionStart "$(with_cwd "$FIXTURES/session-start-compact.json" "$(printf '.cwd = "%s"' "$SPACED")")"
+assert_calls "SessionStart publishes a cwd with spaces as one argument" "$ss_read" \
+  "$(join set -p -t "$PANE" @agent_kind claude \; set -p -t "$PANE" @agent_cwd "$SPACED" \
+    \; set -pu -t "$PANE" @agent_empty)"
+
+hook SessionStart "$(with_cwd "$FIXTURES/session-start-compact.json" 'del(.cwd)')"
+assert_calls "SessionStart without cwd writes no @agent_cwd" "$ss_read" \
+  "$(join set -p -t "$PANE" @agent_kind claude \; set -pu -t "$PANE" @agent_empty)"
+
+hook SessionStart "$(with_cwd "$FIXTURES/session-start-compact.json" '.cwd = ""')"
+assert_calls "SessionStart with an empty cwd writes no @agent_cwd" "$ss_read" \
+  "$(join set -p -t "$PANE" @agent_kind claude \; set -pu -t "$PANE" @agent_empty)"
+
+printf '%s %s %s\n' "$PANE" "$SERVER_PID" "existing name" >"$DISPLAY_OUT"
+ups_read="$(join display-message -p -t "$PANE" '#{pane_id} #{pid} #{@agent_name}')"
+hook UserPromptSubmit "$(with_cwd "$FIXTURES/user-prompt.json" "$(printf '.cwd = "%s"' "$SPACED")")"
+assert_calls "UserPromptSubmit publishes a cwd with spaces" "$ups_read" \
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty \; set -p -t "$PANE" @agent_cwd "$SPACED")"
+
+hook UserPromptSubmit "$(with_cwd "$FIXTURES/user-prompt.json" 'del(.cwd)')"
+assert_calls "UserPromptSubmit without cwd writes no @agent_cwd" "$ups_read" \
+  "$(join "$(state_calls working)" \; set -pu -t "$PANE" @agent_empty)"
+
+hook Stop "$(with_cwd "$FIXTURES/stop-plain.json" "$(printf '.cwd = "%s"' "$SPACED")")"
+assert_calls "Stop publishes a cwd with spaces" \
+  "$(join set -p -t "$PANE" @agent_cwd "$SPACED" \; "$no_marker_state")"
+
+hook Stop "$(with_cwd "$FIXTURES/stop-plain.json" 'del(.cwd)')"
+assert_calls "Stop without cwd writes no @agent_cwd" "$no_marker_state"
+
 # --- SessionEnd ---------------------------------------------------------------------
 
 hook SessionEnd "$FIXTURES/session-end.json"
-assert_calls "SessionEnd unsets every @agent_* option" \
+assert_calls "SessionEnd unsets every @agent_* option, @agent_cwd included" \
   "$(join set -pu -t "$PANE" @agent_kind \; set -pu -t "$PANE" @agent_pid \
     \; set -pu -t "$PANE" @agent_state \; set -pu -t "$PANE" @agent_state_at \
     \; set -pu -t "$PANE" @agent_at \
     \; set -pu -t "$PANE" @agent_name \; set -pu -t "$PANE" @agent_subs \
-    \; set -pu -t "$PANE" @agent_empty)"
+    \; set -pu -t "$PANE" @agent_empty \; set -pu -t "$PANE" @agent_cwd)"
 
 hook SessionEnd "$FIXTURES/session-end-clear.json"
 assert_calls "SessionEnd for /clear leaves options to the following SessionStart"
