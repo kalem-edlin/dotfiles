@@ -146,27 +146,30 @@ func TestBuildWorktreesMembership(t *testing.T) {
 	}
 }
 
-// Worktrees sort as sessions do: the current one last, then awaiting,
-// done, working, the newest state change, and the newest member focus in
-// place of the last attach.
+// Worktrees sort as sessions do, by last access only: the current one
+// last, the rest by the newest member focus stamp. Agent states (awaiting,
+// done, working, a newer state change) do not reorder them. Stamps are per
+// pane, so the window shared by /r/shared and /r/split counts its focus only
+// for /r/shared, whose pane had it.
 func TestWorktreeOrder(t *testing.T) {
 	info := map[string]worktree.Info{}
-	for _, n := range []string{"cur", "aw", "dn", "new", "old", "focus", "plain"} {
+	for _, n := range []string{"cur", "aw", "dn", "wk", "plain", "shared", "split"} {
 		info["/r/"+n] = worktree.Info{Root: "/r/" + n, Repo: "r", Branch: n}
 	}
 	rows, mem := buildRows([]paneRow{
-		{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/r/cur", focus: 9},
-		{sid: "$1", wid: "@2", widx: 2, pid: "%2", path: "/r/aw", st: "awaiting", stateAt: 1},
-		{sid: "$1", wid: "@3", widx: 3, pid: "%3", path: "/r/dn", st: "finished", stateAt: 1},
-		{sid: "$1", wid: "@4", widx: 4, pid: "%4", path: "/r/new", st: "working", stateAt: 50},
-		{sid: "$1", wid: "@5", widx: 5, pid: "%5", path: "/r/old", st: "working", stateAt: 10},
-		{sid: "$1", wid: "@6", widx: 6, pid: "%6", path: "/r/focus", focus: 7},
-		{sid: "$1", wid: "@7", widx: 7, pid: "%7", path: "/r/plain", focus: 3},
+		{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/r/cur", focus: 1},
+		{sid: "$1", wid: "@2", widx: 2, pid: "%2", path: "/r/aw", st: "awaiting", stateAt: 90, focus: 2},
+		{sid: "$1", wid: "@3", widx: 3, pid: "%3", path: "/r/dn", st: "finished", stateAt: 80, focus: 3},
+		{sid: "$1", wid: "@4", widx: 4, pid: "%4", path: "/r/wk", st: "working", stateAt: 70, focus: 4},
+		{sid: "$1", wid: "@5", widx: 5, pid: "%5", path: "/r/plain", focus: 6},
+		{sid: "$1", wid: "@6", widx: 6, pid: "%6", path: "/r/shared", focus: 9},
+		{sid: "$1", wid: "@6", widx: 6, pid: "%7", pidx: 1, path: "/r/split"},
+		{sid: "$1", wid: "@7", widx: 7, pid: "%8", path: "/r/split", focus: 5},
 	})
 	sessions := buildSnapshot(clientLine{}, rows, mem, 0).Sessions
 	ws := buildWorktrees(sessions, "%1", fakeResolve(info))
 	sortRows(ws)
-	want := []string{"/r/plain", "/r/focus", "/r/old", "/r/new", "/r/dn", "/r/aw", "/r/cur"}
+	want := []string{"/r/aw", "/r/dn", "/r/wk", "/r/split", "/r/plain", "/r/shared", "/r/cur"}
 	if got := roots(ws); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
 	}
@@ -246,10 +249,13 @@ func TestSnapshotWorktreesGit(t *testing.T) {
 		{sid: "$2", wid: "@2", widx: 1, pid: "%4", pidx: 1, path: plain},
 	})
 	snap := buildSnapshot(clientLine{session: "$1", pane: "%1"}, rows, mem, 0)
-	if got, want := roots(snap.Worktrees), []string{other[0], api[1], api[0]}; !reflect.DeepEqual(got, want) {
+	// Neither other worktree has a focus stamp, so they tie and keep first
+	// appearance order (the awaiting agent does not move api-exp-one); the
+	// current one is last.
+	if got, want := roots(snap.Worktrees), []string{api[1], other[0], api[0]}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("worktrees %v, want %v", got, want)
 	}
-	o, linked, cur := snap.Worktrees[0], snap.Worktrees[1], snap.Worktrees[2]
+	linked, o, cur := snap.Worktrees[0], snap.Worktrees[1], snap.Worktrees[2]
 	if !cur.Current || cur.Branch != "main" || cur.Repo != "api" {
 		t.Errorf("current = %+v", cur)
 	}

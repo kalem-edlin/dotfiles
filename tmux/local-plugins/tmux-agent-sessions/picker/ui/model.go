@@ -276,7 +276,7 @@ func (m model) inFilter(r state.Row) bool {
 }
 
 // repos are the filter's repos in the order tab steps through them: first
-// appearance from the bottom worktree row (the highest priority) up.
+// appearance from the bottom worktree row (the most recently accessed) up.
 func (m model) repos() []string {
 	var out []string
 	for i := len(m.snap.Worktrees) - 1; i >= 0; i-- {

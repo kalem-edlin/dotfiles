@@ -68,9 +68,12 @@ func TestParseOrderCurrentLast(t *testing.T) {
 	if snap.CurrentID != "$2" || snap.Now != 1800000000 {
 		t.Fatalf("CurrentID %q Now %d", snap.CurrentID, snap.Now)
 	}
-	// No agents first by last attach, then $7 (an idle agent with a state
-	// time), $6 (1 working) and $1 (1 of each), the client's session last.
-	want := []string{"$5", "$4", "$3", "$7", "$6", "$1", "$2"}
+	// By last access (the newest focus stamp, else the last attach): $5
+	// (never), $4 and $7 (attached at 1500, a tie kept in tmux order), $6
+	// (focus ...0001), $1 (focus ...9900), $3 (focus ...9960). The client's
+	// $2 (focus ...9950) is last though $3 is newer, and agent states play
+	// no part.
+	want := []string{"$5", "$4", "$7", "$6", "$1", "$3", "$2"}
 	if got := sessionIDs(snap); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
 	}
@@ -86,7 +89,8 @@ func TestParseOrderCurrentLast(t *testing.T) {
 
 func TestParseNoClient(t *testing.T) {
 	snap := parseSnapshot("\n"+loadRows(t), loadMem(t), 0)
-	want := []string{"$5", "$2", "$4", "$3", "$7", "$6", "$1"}
+	// Without a client $2 takes its place by access, before $3.
+	want := []string{"$5", "$4", "$7", "$6", "$1", "$2", "$3"}
 	if got := sessionIDs(snap); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
 	}
@@ -304,7 +308,7 @@ func TestLoadWithClient(t *testing.T) {
 		"list-panes", "-a", "-F", listFormat))
 	_, rows := parseRows("\n" + loadRows(t))
 	expectCalls(t, memLog, memPIDs(rows))
-	if got := sessionIDs(snap); !reflect.DeepEqual(got, []string{"$5", "$4", "$3", "$7", "$6", "$1", "$2"}) {
+	if got := sessionIDs(snap); !reflect.DeepEqual(got, []string{"$5", "$4", "$7", "$6", "$1", "$3", "$2"}) {
 		t.Errorf("order %v", got)
 	}
 	if p := findPane(t, snap, "%3"); p.AgentKind != "" {
@@ -355,13 +359,20 @@ func TestListFormat(t *testing.T) {
 	}
 }
 
-// orderSession is a session with one window of agent panes in the given
-// states; at is the state change time of each, last its LastAttached.
-func orderSession(id string, last int64, current bool, at int64, states ...state.State) *state.Session {
+// orderPane is an agent pane in state st, changed at stateAt, with
+// @pane_focus_at focus (0 for unstamped).
+type orderPane struct {
+	st             state.State
+	stateAt, focus int64
+}
+
+// orderSession is a session with one window of the given panes, last its
+// LastAttached.
+func orderSession(id string, last int64, current bool, panes ...orderPane) *state.Session {
 	s := &state.Session{ID: id, Name: id, LastAttached: last, Current: current}
 	w := &state.Window{ID: "@" + id, Session: s}
-	for _, st := range states {
-		w.Panes = append(w.Panes, &state.Pane{State: st, StateAt: at, Window: w})
+	for _, p := range panes {
+		w.Panes = append(w.Panes, &state.Pane{State: p.st, StateAt: p.stateAt, FocusAt: p.focus, Window: w})
 	}
 	s.Windows = []*state.Window{w}
 	return s
@@ -372,7 +383,9 @@ func sortedIDs(ss ...*state.Session) []string {
 	return sessionIDs(&state.Snapshot{Sessions: ss})
 }
 
-func TestOrderPriority(t *testing.T) {
+// Rows order by last access only (D78): older higher, the current row last.
+// Agent states never reorder them.
+func TestOrderByAccess(t *testing.T) {
 	aw, dn, wk := state.StateAwaiting, state.StateDone, state.StateWorking
 	cases := []struct {
 		name string
@@ -380,25 +393,33 @@ func TestOrderPriority(t *testing.T) {
 		want []string
 	}{
 		{"current last", []*state.Session{
-			orderSession("cur", 9, true, 0), orderSession("a", 1, false, 0, aw, aw), orderSession("b", 2, false, 0)},
+			orderSession("cur", 1, true), orderSession("a", 9, false, orderPane{aw, 9, 0}), orderSession("b", 2, false)},
 			[]string{"b", "a", "cur"}},
-		{"awaiting beats done", []*state.Session{
-			orderSession("done3", 9, false, 9, dn, dn, dn), orderSession("aw1", 1, false, 1, aw)},
-			[]string{"done3", "aw1"}},
-		{"more awaiting wins", []*state.Session{
-			orderSession("aw2", 1, false, 1, aw, aw), orderSession("aw1", 9, false, 9, aw)},
-			[]string{"aw1", "aw2"}},
-		{"done beats working", []*state.Session{
-			orderSession("dn1", 1, false, 1, dn), orderSession("wk3", 9, false, 9, wk, wk, wk)},
-			[]string{"wk3", "dn1"}},
-		{"newest state change breaks a count tie", []*state.Session{
-			orderSession("new", 1, false, 500, wk), orderSession("old", 9, false, 100, wk)},
+		{"newer access lower", []*state.Session{
+			orderSession("new", 50, false), orderSession("old", 10, false)},
 			[]string{"old", "new"}},
-		{"last attach breaks the rest", []*state.Session{
-			orderSession("recent", 50, false, 100, wk), orderSession("stale", 10, false, 100, wk)},
-			[]string{"stale", "recent"}},
+		{"awaiting agents do not reorder", []*state.Session{
+			orderSession("aw2", 1, false, orderPane{aw, 1, 0}, orderPane{aw, 1, 0}), orderSession("none", 9, false)},
+			[]string{"aw2", "none"}},
+		{"done agents do not reorder", []*state.Session{
+			orderSession("dn3", 1, false, orderPane{dn, 1, 0}, orderPane{dn, 1, 0}, orderPane{dn, 1, 0}),
+			orderSession("dn1", 9, false, orderPane{dn, 9, 0})},
+			[]string{"dn3", "dn1"}},
+		{"working agents do not reorder", []*state.Session{
+			orderSession("wk3", 1, false, orderPane{wk, 1, 0}, orderPane{wk, 1, 0}, orderPane{wk, 1, 0}),
+			orderSession("wk1", 9, false, orderPane{wk, 9, 0})},
+			[]string{"wk3", "wk1"}},
+		{"a newer state change does not reorder", []*state.Session{
+			orderSession("changed", 1, false, orderPane{wk, 500, 0}), orderSession("visited", 9, false, orderPane{wk, 100, 0})},
+			[]string{"changed", "visited"}},
+		{"a focus stamp newer than the last attach wins", []*state.Session{
+			orderSession("focused", 10, false, orderPane{focus: 200}), orderSession("attached", 100, false)},
+			[]string{"attached", "focused"}},
+		{"no stamps falls back to the last attach", []*state.Session{
+			orderSession("unstamped", 50, false), orderSession("stamped", 10, false, orderPane{focus: 40})},
+			[]string{"stamped", "unstamped"}},
 		{"full ties keep tmux order", []*state.Session{
-			orderSession("x", 5, false, 0), orderSession("y", 5, false, 0)},
+			orderSession("x", 5, false, orderPane{aw, 9, 0}), orderSession("y", 5, false)},
 			[]string{"x", "y"}},
 	}
 	for _, c := range cases {

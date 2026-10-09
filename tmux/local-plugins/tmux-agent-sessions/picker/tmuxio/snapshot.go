@@ -294,7 +294,7 @@ func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64)
 		}
 	}
 	// Worktrees are grouped in tmux's session order, before the sort, so
-	// their windows and full ties do not depend on agent states.
+	// their windows and full ties do not depend on the session order.
 	snap.Worktrees = buildWorktrees(snap.Sessions, cl.pane, worktree.NewResolver().Resolve)
 	sortRows(snap.Sessions)
 	sortRows(snap.Worktrees)
@@ -343,40 +343,17 @@ func buildWorktrees(sessions []*state.Session, currentPane string, resolve func(
 	return out
 }
 
-// sortRows orders rows for display.
+// sortRows orders rows for display, by last access only (D78): top to
+// bottom, so the most recently accessed row sits nearest the cursor at the
+// bottom, with the client's own row last. Agent states do not reorder
+// rows. Stable, so full ties keep tmux's order.
 func sortRows[R state.Row](rows []R) {
-	// Top to bottom, so the highest priority sits nearest the cursor at
-	// the bottom: the client's own row last, the others by awaiting
-	// agents, then done, then working, then the newest agent state change,
-	// then recency (a session's latest attach, a worktree's latest focus),
-	// each higher value lower. Stable, so full ties keep tmux's order.
-	type rank struct {
-		awaiting, done, working int
-		at, recent              int64
-	}
-	ranks := make(map[string]rank, len(rows))
-	for _, r := range rows {
-		k := rank{recent: r.Recency()}
-		k.awaiting, k.done, k.working, k.at = state.AgentCounts(r.Members())
-		ranks[r.RowID()] = k
-	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if a.IsCurrent() != b.IsCurrent() {
 			return b.IsCurrent()
 		}
-		x, y := ranks[a.RowID()], ranks[b.RowID()]
-		switch {
-		case x.awaiting != y.awaiting:
-			return x.awaiting < y.awaiting
-		case x.done != y.done:
-			return x.done < y.done
-		case x.working != y.working:
-			return x.working < y.working
-		case x.at != y.at:
-			return x.at < y.at
-		}
-		return x.recent < y.recent
+		return a.Recency() < b.Recency()
 	})
 }
 

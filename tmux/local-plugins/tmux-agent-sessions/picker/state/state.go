@@ -68,28 +68,6 @@ func (p *Pane) Dir() string {
 	return p.Path
 }
 
-// AgentCounts counts the live agents in panes by state and finds the
-// newest state change among all of them (0 when none). An agent in any
-// other state counts as idle, and remote panes have no agent, as on the
-// list rows.
-func AgentCounts(panes []*Pane) (awaiting, done, working int, at int64) {
-	for _, p := range panes {
-		if p.Remote || p.State == StateNone {
-			continue
-		}
-		switch p.State {
-		case StateAwaiting:
-			awaiting++
-		case StateDone:
-			done++
-		case StateWorking:
-			working++
-		}
-		at = max(at, p.StateSince())
-	}
-	return
-}
-
 // Row is one list row: a session, or a worktree in worktree mode. Both
 // order, aggregate and pick their default card from their member panes.
 type Row interface {
@@ -100,7 +78,7 @@ type Row interface {
 	Members() []*Pane
 	// IsCurrent reports the invoking client's own row, listed last.
 	IsCurrent() bool
-	// Recency is the last ordering key, after the agent counts.
+	// Recency is the row's last access, its only ordering key.
 	Recency() int64
 }
 
@@ -126,7 +104,18 @@ type Session struct {
 
 func (s *Session) RowID() string   { return s.ID }
 func (s *Session) IsCurrent() bool { return s.Current }
-func (s *Session) Recency() int64  { return s.LastAttached }
+
+// Recency is the session's last access: the newest @pane_focus_at among
+// its panes, or its last attach when that is newer (or nothing is stamped).
+func (s *Session) Recency() int64 {
+	at := s.LastAttached
+	for _, w := range s.Windows {
+		for _, p := range w.Panes {
+			at = max(at, p.FocusAt)
+		}
+	}
+	return at
+}
 
 // Members is every pane of the session, in window and pane order.
 func (s *Session) Members() []*Pane {
@@ -156,7 +145,9 @@ func (t *Worktree) IsCurrent() bool  { return t.Current }
 func (t *Worktree) Members() []*Pane { return t.Panes }
 func (t *Worktree) Detached() bool   { return t.Branch == "" }
 
-// Recency is the newest @pane_focus_at among the member panes.
+// Recency is the worktree's last access: the newest @pane_focus_at among
+// its member panes. Focus stamps are per pane, so visiting a window shared
+// by several worktrees only counts for the worktree of the focused pane.
 func (t *Worktree) Recency() int64 {
 	var at int64
 	for _, p := range t.Panes {
@@ -169,8 +160,9 @@ func (t *Worktree) Recency() int64 {
 type Snapshot struct {
 	CurrentID   string // session id of the invoking client, "" if unknown
 	CurrentPane string // id of the invoking client's active pane, "" if unknown
-	// Sessions in display order, top to bottom, higher priority lower: see
-	// the sort in tmuxio. The client's own session is last (D9, D17).
+	// Sessions in display order, top to bottom, the most recently accessed
+	// lowest: see the sort in tmuxio. The client's own session is last (D9,
+	// D17).
 	Sessions []*Session
 	// Worktrees in display order, sorted as Sessions are, the worktree of
 	// CurrentPane last.
