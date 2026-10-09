@@ -2,6 +2,11 @@
 set -eu
 
 profile=${CLAUDEF_PROFILE:-"$HOME/.config/claudef"}
+plugin_dir="$profile"
+# Load the plugin at its source so new shared skills need no restow.
+if [ -r "$profile/.claude-plugin/plugin.json" ]; then
+  plugin_dir=$(dirname "$(dirname "$(realpath "$profile/.claude-plugin/plugin.json")")")
+fi
 prompt_link="$profile/communication.md"
 prompt=""
 native_ccline="$HOME/.claude/ccline"
@@ -40,7 +45,7 @@ if [ -n "$prompt" ] && [ -r "$prompt" ]; then
     --dangerously-skip-permissions \
     --settings "$profile/settings.json" \
     --setting-sources user,project,local \
-    --plugin-dir "$profile" \
+    --plugin-dir "$plugin_dir" \
     --system-prompt-snapshot off \
     --append-system-prompt-file "$prompt" \
     "$@"
@@ -50,6 +55,6 @@ exec env -u CLAUDE_CONFIG_DIR claude \
   --dangerously-skip-permissions \
   --settings "$profile/settings.json" \
   --setting-sources user,project,local \
-  --plugin-dir "$profile" \
+  --plugin-dir "$plugin_dir" \
   --system-prompt-snapshot off \
   "$@"

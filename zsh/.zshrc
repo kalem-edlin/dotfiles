@@ -583,6 +583,10 @@ pif() {
   if [[ -r "$agents_dir/communication.md" ]]; then
     prompt_args+=(--append-system-prompt "$agents_dir/communication.md")
   fi
+  # Read the canonical directory directly so new skills need no restow.
+  if [[ -n "$agents_dir" && -d "$agents_dir/skills" ]]; then
+    prompt_args+=(--skill "$agents_dir/skills")
+  fi
 
   PI_CODING_AGENT_DIR="$profile" \
     PI_CODING_AGENT_SESSION_DIR="$native/sessions" \
