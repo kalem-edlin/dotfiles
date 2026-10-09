@@ -31,9 +31,21 @@ func statusChip(p *state.Pane, now int64, selected bool) string {
 	return stateChip(runtimeLabel(p.AgentKind)+" "+stateIcon[st], fmtAge(now, stateAt(p)), st, selected)
 }
 
-// aggChip is a row's status chip: `2 <icon> 5m`.
+// rowChipLabel is the word on a row's status chip. Rows always use words;
+// the icons belong to the card grid (D57).
+var rowChipLabel = map[state.State]string{
+	state.StateWorking:  "Working",
+	state.StateAwaiting: "Awaiting",
+	state.StateDone:     "Done",
+}
+
+// aggChip is a row's status chip: `2 Working 5m`.
 func aggChip(a agg, now int64, selected bool) string {
-	return stateChip(fmt.Sprintf("%d %s", a.count, stateIcon[a.state]), fmtAge(now, a.at), a.state, selected)
+	label := rowChipLabel[a.state]
+	if label == "" {
+		label = stateIcon[a.state]
+	}
+	return stateChip(fmt.Sprintf("%d %s", a.count, label), fmtAge(now, a.at), a.state, selected)
 }
 
 // Fixed widths of a row's agents section and the separator around it.
@@ -461,12 +473,14 @@ func renderInputLine(left string, filter filterChip, count string, armed bool, w
 	if armed {
 		cellBg = cellArmed
 	}
-	right := paint(count, countFg, "", false) + " " + paint("  ", "", cellBg, false)
-	room := w - width(right)
+	countS := paint(count, countFg, "", false)
+	cell := paint("  ", "", cellBg, false)
+	right := countS + " " + cell
 	// A space either side of the chip, and the chip's own padding.
-	if fw := room - width(left) - 4; filter.text != "" && fw >= minFilterW {
-		left += " " + chipColored(truncate(filter.text, fw), filter.fg, filter.bg, true)
+	if fw := w - width(left) - width(right) - 4; filter.text != "" && fw >= minFilterW {
+		right = countS + " " + chipColored(truncate(filter.text, fw), filter.fg, filter.bg, true) + " " + cell
 	}
+	room := w - width(right)
 	return padRight(padRight(left, room)+right, w)
 }
 

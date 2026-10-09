@@ -117,8 +117,8 @@ func TestRowAlignmentAndAgents(t *testing.T) {
 }
 
 // Chips go Working, Awaiting, Done, only when the count is above zero; no
-// Idle chip on rows. Row chips show icons (D55).
-func TestRowChipOrderAndIcons(t *testing.T) {
+// Idle chip on rows. Row chips show words, not the card grid's icons (D57).
+func TestRowChipOrderAndWords(t *testing.T) {
 	s := sess("$7", "mix", now, win(1, "a", true,
 		active(agent("claude", "a", state.StateDone, 600, 1)),
 		agent("claude", "b", state.StateWorking, 240, 1),
@@ -127,14 +127,14 @@ func TestRowChipOrderAndIcons(t *testing.T) {
 		agent("pi", "e", state.StateIdle, 30, 1)))
 	r := newSessionRow(s, nil)
 	row := ansi.Strip(renderRow(r, 5, 140, false, now))
-	iw := col(row, "2 "+stateIcon[state.StateWorking]+" 2m")
-	ww := col(row, "1 "+stateIcon[state.StateAwaiting]+" 1m")
-	dw := col(row, "1 "+stateIcon[state.StateDone]+" 10m")
+	iw := col(row, "2 Working 2m")
+	ww := col(row, "1 Awaiting 1m")
+	dw := col(row, "1 Done 10m")
 	if iw < 0 || ww < iw || dw < ww {
 		t.Errorf("chip order wrong (working %d awaiting %d done %d): %q", iw, ww, dw, row)
 	}
-	if strings.Contains(row, "Working") || strings.Contains(row, "Idle") || strings.Contains(row, stateIcon[state.StateIdle]) {
-		t.Errorf("word or idle chip on a row: %q", row)
+	if strings.Contains(row, stateIcon[state.StateWorking]) || strings.Contains(row, "Idle") || strings.Contains(row, stateIcon[state.StateIdle]) {
+		t.Errorf("icon or idle chip on a row: %q", row)
 	}
 	if !strings.Contains(row, " "+botIcon+" 5 30s") {
 		t.Errorf("agents section: %q", row)

@@ -1,5 +1,5 @@
   yap-trial        main                                                                                                 |
-  content-engine-1 1a2b3c4                                                                                     1  15m  |
-  content-engine-1 main                                                                                         1  2m  |
-▌ content-engine-1 exp/roll-hiring                                                                     1  5m   1  1m  |
-  dotfiles         main                                                                                        1  15s  |
+  content-engine-1 1a2b3c4                                                                                  1 Done 15m  |
+  content-engine-1 main                                                                                   1 Working 2m  |
+▌ content-engine-1 exp/roll-hiring                                                           1 Awaiting 5m   1 Done 1m  |
+  dotfiles         main                                                                                  1 Working 15s  |

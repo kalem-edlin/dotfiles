@@ -99,7 +99,7 @@ The four states and what the user means by them:
 | Claude `Notification` `idle_prompt` while working | idle, only when `@agent_subs` is 0 and no background shell exists |
 | Claude `SubagentStart` and `SubagentStop` | `@agent_subs` plus one and minus one. State unchanged |
 | Claude `CwdChanged` (Bash `cd`, entering a worktree) | `@agent_cwd` set from `new_cwd`. State unchanged |
-| Claude `Stop` with `@agent_subs` above 0, or a background shell | working |
+| Claude `Stop` with an in-flight entry in the hook's `background_tasks` (subagent, background shell, monitor or workflow). Without that field (older Claude): `@agent_subs` above 0, or a background shell | working. `@agent_subs` is resynced to the in-flight subagent count from the list |
 | `Stop` or pi `agent_settled`, marker present, no subagents | awaiting |
 | `Stop` or `agent_settled`, no marker, pane visible | idle |
 | `Stop` or `agent_settled`, no marker, pane not visible | finished |
@@ -126,12 +126,12 @@ An agent ends a reply that needs the user's answer or decision with the exact fi
 
 ### Subagent counting and background work
 
-- Claude: `SubagentStart` and `SubagentStop` adjust `@agent_subs`.
+- Claude: `SubagentStart` and `SubagentStop` adjust `@agent_subs`, and every `Stop` resyncs it from the hook input's `background_tasks` (present since Claude Code 2.1.29x, status `running` or `pending` counts as in flight). The counter alone drifts: a finished subagent resumed with `SendMessage` fires `SubagentStop` again at its next stop but no `SubagentStart`, so each resume takes the count one below reality and the clamp hides it at 0. Seen 2026-10-08: a session resumed one subagent twice and showed Idle with a subagent still running. The list is authoritative at `Stop`, which is when the state is decided; `SubagentStop`'s own list still contains the stopping subagent, so it is not used there.
 - pi: `subagent-widget.ts` emits the running count on `pif:subagents`. `agent-state.ts` publishes it as `@agent_subs`, and a settle with subagents running publishes Working. A finished subagent starts a parent turn, which settles as usual. If no turn starts within 2 s (after `/subrm` or `/subclear`), the held Working settles on its own.
 - `idle_prompt` arrives about 60 s after the prompt goes idle, including while background subagents run, so the Esc-recovery rule applies only when `@agent_subs` is 0 (D69). Recovery after a real Esc interrupt therefore takes about 60 s and the pane shows Working until then.
-- Background shell detection (D70). A subagent that backgrounds a command and ends its turn fires `SubagentStop` at once and `SubagentStart` only when it resumes, and a main-agent `run_in_background` shell fires no hook at all. So `Stop` and `idle_prompt` call `bg_shells`, which runs one `ps -A` and looks for a direct child of the agent process whose command line contains `/.claude/shell-snapshots/`. At those two points no foreground tool runs, so any such child is background work and the state stays Working. The tmux read for the agent pid happens only if some shell-snapshots process exists at all. Cost is about 40 ms per `Stop`.
+- Background shell detection (D70). A subagent that backgrounds a command and ends its turn fires `SubagentStop` at once and `SubagentStart` only when it resumes, and a main-agent `run_in_background` shell fires no hook at all. `background_tasks` covers both as `shell` or `subagent` entries, so `Stop` skips the ps scan when the field is present. Without it, and always at `idle_prompt` (whose input has no task list), the publisher calls `bg_shells`, which runs one `ps -A` and looks for a direct child of the agent process whose command line contains `/.claude/shell-snapshots/`. At those two points no foreground tool runs, so any such child is background work and the state stays Working. The tmux read for the agent pid happens only if some shell-snapshots process exists at all. Cost is about 40 ms per `Stop`.
 - Known tradeoff: a dev server started as a Claude background shell keeps its agent Working. This is accepted because persistent jobs belong in tmux panes.
-- A subagent that dies without `SubagentStop` leaves the pane Working until the next `SessionStart`.
+- A subagent that dies without `SubagentStop` leaves the pane Working until the next `Stop` resyncs the count from `background_tasks`.
 
 ## Titles
 
@@ -199,7 +199,7 @@ From the top: the card grid, the row list (sessions or worktrees), then the inpu
 | Part | Rule |
 |---|---|
 | Row list | 6 rows (`listRows`), bottom up. With fewer rows the empty rows sit at the top. Panel background is the base blended 70% toward surface0 |
-| Input line | Query with a static block cursor (no blink ticks). At the right edge the match count (`matches/total` rows, where total counts rows that pass the repo filter) and a 2-column cell, `#a6e3a1` at rest and `#f38ba8` while the prefix is armed. In worktree mode the repo filter chip follows the query on the left, one space after its cursor (D80). The rules above and below use `#585b70` |
+| Input line | Query with a static block cursor (no blink ticks). At the right edge the match count (`matches/total` rows, where total counts rows that pass the repo filter) and a 2-column cell, `#a6e3a1` at rest and `#f38ba8` while the prefix is armed. In worktree mode the repo filter chip sits between the match count and the cell (D80). The rules above and below use `#585b70` |
 | Grid | Everything above the list. Hidden when less than one card row (`cardRows + 2` lines) fits |
 | Short screens | `heights()` gives the input line priority, then up to 6 list rows and the two rules. Rows go from the grid first, then from the list down to one row, and the rules drop only when no list row would be left |
 
@@ -217,11 +217,11 @@ The cursor starts one row above the bottom (D13), which is the highest priority 
 
 Left to right: a gutter column (dark, with a rosewater `▌` on the selected row), the name, then three sections pushed to the right edge and divided by thin vertical lines (`#585b70`). A long name is truncated with `…` before chips are dropped, and chips are dropped (rightmost first) only when the name would fall under 12 columns. The selected row has a light highlight across its full width.
 
-1. Status chips: Working, Awaiting, Done in that order, each only when its count is above zero (D55). Each reads count, state icon, age (`2 <icon> 4m`), where the count is the number of agents in that state and the age is the newest state change among them. This is the only section of variable width. There is no Idle chip on rows.
+1. Status chips: Working, Awaiting, Done in that order, each only when its count is above zero (D55). Each reads count, state word, age (`2 Working 4m`), where the count is the number of agents in that state and the age is the newest state change among them. This is the only section of variable width. There is no Idle chip on rows.
 2. Agents: bot glyph, a space, the count of all agents in the session, then the age of the newest state change of any of them (`<bot> 3 5m`, D66). A session with no agents shows `<bot> 0` with no age. The section is a constant 8 cells so it aligns on every row. The count shows up to 99.
 3. Memory, right aligned in a width shared by all rows (at least 5 cells).
 
-Only the status chips have a background. Row chips always show icons. The words/icons toggle on `ctrl-w` (D57) was removed to free the key for the mode switch (D71).
+Only the status chips have a background. Row chips always show words (`2 Working 5m`), and the icons belong to the card grid. This is a fixed convention: the words/icons toggle on `ctrl-w` (D57) was removed to free the key for the mode switch (D71).
 
 Ages use the format `42s`, `5m`, `3h`, `2d`, then weeks from 7 days (`3w`), with no months. The age is dimmer than the text beside it everywhere: on rows outside a chip it is `#7f849c` (or `#a6adc8` on the selected row), and on chips it is a lighter shade of the chip text (see colours).
 
@@ -268,7 +268,7 @@ Identity and labels (D76):
 - The row label is the branch from `HEAD` (`refs/heads/` stripped, other refs with `refs/` stripped). A detached `HEAD` shows the 7-character commit id, dimmed. Worktree directory names are never shown as labels, since branches are what is read and searched. Search matches the branch (or commit id) and match highlights always show.
 - A repo badge sits immediately left of the label, after the gutter and its leading space: exactly 2 columns holding the repo's code, bold, on the repo's shade, then one plain space and the label. It replaces the old repo column on the right.
 - Codes and shades are computed once per snapshot from the distinct repo names of all worktree rows (`assignRepoBadges` in `picker/ui/badge.go`), independent of the filter and of row order, so they stay stable between opens. Names claim in sorted (byte-wise) order. Candidates come from the lowercased name's ASCII letters and digits, in this order: the first two, the initials of the first two segments when split on other characters (`search-primitives` gives `sp`), the first character with each later one in turn, the first character with `1` to `9`, then `00` to `99`. A name without letters or digits starts at `00`. Each name takes its first unclaimed candidate. Examples: `content-engine-1` is `co`, `dotfiles` is `do`, `search-primitives` is `se`, `yap-trial` is `ya`, and with `co` and `content-engine-1` already claiming `co` and `ce`, `content-engine-2` gets `cn`.
-- Shades are Mocha greys, darkest first: Surface2, Overlay0, Overlay1, Overlay2, Subtext0, Subtext1. Surface1 is skipped because it matches the selected row background. The repo at position i in sorted order takes shade i mod 6. Text is `#cdd6f4` on the first two and `#11111b` on the other four. Badges keep full colour on the selected row.
+- Shades are five dark greys, darkest first: `#37384b`, `#3e4052` (Surface0 toward Surface1), `#4d4f63` (Surface1 toward Surface2), `#585b70` (Surface2) and `#606379` (Surface2 toward Overlay0). They sit a few levels above the row background so they read without standing out. The band around Surface1 is skipped because it matches the selected row background. The repo at position i in sorted order takes shade i mod 5. Text is `#bac2de` (Subtext1) on all of them. Badges keep full colour on the selected row.
 - `ctrl-t` toggles full-repo mode for that picker run (off on open, kept across `ctrl-w`). Every badge widens to the full repo name on the same shade, padded to a shared width (the longest repo name among all worktree rows, at most 24 columns, truncated with `…`), so the branch labels stay aligned behind it. The row's right side then shows only the status chips: the agents section and its separator are hidden, and the label gets the freed width.
 
 Membership and cards (D77):
@@ -290,7 +290,7 @@ Repo filter (D80):
 - `tab` and `shift-tab` step forward and back through All and each repo, wrapping both ways. The filter starts at All on every open.
 - Repos are ordered by first appearance scanning the worktree rows from the bottom up, so the first `tab` lands on the highest priority repo, normally the current worktree's. Entries are repo names, so two repos with the same directory name share one entry.
 - The filter applies with and without a query, before the branch match. A filter step resets the cursor and card as on open.
-- The input line shows the filter as a chip directly after the query, one space after its visible text and cursor, while the match count and the prefix cell stay at the right edge. It reads `All` (`#cdd6f4` on `#45475a`, the panes chip colours) or the repo name on that repo's badge shade and text colour. The query has priority: the chip takes whatever room is left, is truncated, and is dropped below 3 columns. Prompts and errors replace the query and show no chip.
+- The input line shows the filter as a chip between the match count and the prefix cell, one space from each. It reads `All` (`#cdd6f4` on `#45475a`, the panes chip colours) or the repo name on that repo's badge shade and text colour. The query has priority: the chip takes whatever room is left, is truncated, and is dropped below 3 columns. Prompts and errors replace the query and show no chip.
 
 Mode switch:
 
@@ -410,7 +410,7 @@ Maintenance cautions:
 - A reply that asks a question without the marker shows as Done. A "last line ends with ?" fallback was deliberately not added.
 - After an Esc interrupt the pane shows Working until `idle_prompt` arrives, about 60 s later.
 - A Claude background dev server keeps its agent Working (D70).
-- A subagent that dies without `SubagentStop` leaves the pane Working until the next `SessionStart`.
+- A subagent that dies without `SubagentStop` leaves the pane Working until the next `Stop` resyncs the count from `background_tasks` (or until `SessionStart` on an older Claude without that field).
 - Memory is footprint on macOS, so totals overcount shared and graphics memory.
 - Pane option writes do not trigger resurrect saves. Autosave runs from a separate 300 s timer.
 - The tmux 3.7b popup behaviour that forces prefix emulation may change in 3.8.

@@ -1,7 +1,7 @@
   infra                                                │  0      │  45M remote |
-  roll-carousels-3                             1  5m  │  1 5m   │        1.6G |
-  roll-initiative-2                           1  12m  │  2 12m  │        780M |
-▌ roll-web-funnel-changes            1  2m   1  40s  │  3 40s  │ 1.2G remote |
-  dotfiles-agents-with-a-very-long-session-n…  1  5m  │  1 5m   │        700M |
-  dotfiles                                    1  15s  │  1 15s  │        1.0G |
+  roll-carousels-3                      1 Awaiting 5m  │  1 5m   │        1.6G |
+  roll-initiative-2                        1 Done 12m  │  2 12m  │        780M |
+▌ roll-web-funnel-changes   1 Working 2m   1 Done 40s  │  3 40s  │ 1.2G remote |
+  dotfiles-agents-with-a-very-long-ses…  1 Working 5m  │  1 5m   │        700M |
+  dotfiles                              1 Working 15s  │  1 15s  │        1.0G |
                                                                                 |

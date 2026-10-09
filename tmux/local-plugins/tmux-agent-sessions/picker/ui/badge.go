@@ -11,16 +11,16 @@ type repoBadge struct {
 	fg, bg string
 }
 
-// badgeShades are the Mocha greys repo badges cycle through, darkest
-// first, with the text colour that reads on each. Surface1 is left out:
-// it is almost the selected row background.
+// badgeShades are the greys repo badges cycle through, darkest first:
+// steps from Surface0 to just past Surface2, a few levels above the row
+// background so they read without standing out. The band around Surface1
+// is skipped, since that is the selected row background.
 var badgeShades = []struct{ bg, fg string }{
-	{cSurface2, cText},
-	{cOverlay0, cText},
-	{cOverlay1, cCrust},
-	{cOverlay2, cCrust},
-	{cSubtext0, cCrust},
-	{cSubtext1, cCrust},
+	{blend(cSurface0, cSurface1, 0.3), cSubtext1},
+	{blend(cSurface0, cSurface1, 0.65), cSubtext1},
+	{blend(cSurface1, cSurface2, 0.4), cSubtext1},
+	{cSurface2, cSubtext1},
+	{blend(cSurface2, cOverlay0, 0.4), cSubtext1},
 }
 
 // assignRepoBadges gives each distinct repo name a unique 2-character code
@@ -28,7 +28,7 @@ var badgeShades = []struct{ bg, fg string }{
 // the set of names only. Codes come from the lowercased ASCII letters and
 // digits: the first two, then the initials of the first two segments, then
 // the first with each later one, then the first with 1-9, then 00-99. The
-// i-th name in sorted order gets shade i mod 6.
+// i-th name in sorted order gets shade i mod len(badgeShades).
 func assignRepoBadges(names []string) map[string]repoBadge {
 	sorted := append([]string(nil), names...)
 	sort.Strings(sorted)

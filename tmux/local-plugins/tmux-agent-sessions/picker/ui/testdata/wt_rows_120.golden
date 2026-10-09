@@ -1,5 +1,5 @@
   ya main                                                                                                    │  0      |
-  co 1a2b3c4                                                                                        1  15m  │  1 15m  |
-  co main                                                                                            1  2m  │  1 2m   |
-▌ co exp/roll-hiring                                                                        1  5m   1  1m  │  2 1m   |
-  do main                                                                                           1  15s  │  2 15s  |
+  co 1a2b3c4                                                                                     1 Done 15m  │  1 15m  |
+  co main                                                                                      1 Working 2m  │  1 2m   |
+▌ co exp/roll-hiring                                                              1 Awaiting 5m   1 Done 1m  │  2 1m   |
+  do main                                                                                     1 Working 15s  │  2 15s  |

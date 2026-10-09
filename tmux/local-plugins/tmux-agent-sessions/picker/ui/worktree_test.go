@@ -160,8 +160,8 @@ func TestWorktreeRowBadges(t *testing.T) {
 		if strings.Contains(f, botIcon) || strings.Contains(f, "│") {
 			t.Errorf("full row %d keeps the agents section: %q", i, f)
 		}
-		if n := len(aggregate(wt.Panes, rowOrder)); n > 0 && !strings.Contains(f, stateIcon[state.StateWorking]) &&
-			!strings.Contains(f, stateIcon[state.StateDone]) && !strings.Contains(f, stateIcon[state.StateAwaiting]) {
+		if n := len(aggregate(wt.Panes, rowOrder)); n > 0 && !strings.Contains(f, "Working") &&
+			!strings.Contains(f, "Done") && !strings.Contains(f, "Awaiting") {
 			t.Errorf("full row %d lost its chips: %q", i, f)
 		}
 	}
@@ -174,51 +174,54 @@ func TestWorktreeRowBadges(t *testing.T) {
 }
 
 func TestAssignRepoBadges(t *testing.T) {
-	type want struct{ code, bg, fg string }
+	type want struct {
+		code string
+		pos  int // place in sorted order, which picks the shade
+	}
 	tests := []struct {
 		name  string
 		repos []string
 		want  map[string]want
 	}{
 		{"distinct first two", []string{"yap-trial", "dotfiles", "search-primitives", "content-engine-1"}, map[string]want{
-			"content-engine-1":  {"co", cSurface2, cText},
-			"dotfiles":          {"do", cOverlay0, cText},
-			"search-primitives": {"se", cOverlay1, cCrust},
-			"yap-trial":         {"ya", cOverlay2, cCrust},
+			"content-engine-1":  {"co", 0},
+			"dotfiles":          {"do", 1},
+			"search-primitives": {"se", 2},
+			"yap-trial":         {"ya", 3},
 		}},
 		{"conflicts fall to initials then pairs", []string{"content-engine-2", "co", "content-engine-1"}, map[string]want{
-			"co":               {"co", cSurface2, cText},
-			"content-engine-1": {"ce", cOverlay0, cText},
-			"content-engine-2": {"cn", cOverlay1, cCrust},
+			"co":               {"co", 0},
+			"content-engine-1": {"ce", 1},
+			"content-engine-2": {"cn", 2},
 		}},
 		{"case and punctuation ignored", []string{"Search_Primitives", "search-primitives", ".dotfiles"}, map[string]want{
-			".dotfiles":         {"do", cSurface2, cText},
-			"Search_Primitives": {"se", cOverlay0, cText},
-			"search-primitives": {"sp", cOverlay1, cCrust},
+			".dotfiles":         {"do", 0},
+			"Search_Primitives": {"se", 1},
+			"search-primitives": {"sp", 2},
 		}},
 		{"single characters", []string{"x", "x-", "x_y"}, map[string]want{
-			"x":   {"x1", cSurface2, cText},
-			"x-":  {"x2", cOverlay0, cText},
-			"x_y": {"xy", cOverlay1, cCrust},
+			"x":   {"x1", 0},
+			"x-":  {"x2", 1},
+			"x_y": {"xy", 2},
 		}},
 		{"no letters or digits", []string{"--", "__", "a"}, map[string]want{
-			"--": {"00", cSurface2, cText},
-			"__": {"01", cOverlay0, cText},
-			"a":  {"a1", cOverlay1, cCrust},
+			"--": {"00", 0},
+			"__": {"01", 1},
+			"a":  {"a1", 2},
 		}},
-		{"shades wrap after six", []string{"a1", "b1", "c1", "d1", "e1", "f1", "g1", "h1"}, map[string]want{
-			"a1": {"a1", cSurface2, cText},
-			"b1": {"b1", cOverlay0, cText},
-			"c1": {"c1", cOverlay1, cCrust},
-			"d1": {"d1", cOverlay2, cCrust},
-			"e1": {"e1", cSubtext0, cCrust},
-			"f1": {"f1", cSubtext1, cCrust},
-			"g1": {"g1", cSurface2, cText},
-			"h1": {"h1", cOverlay0, cText},
+		{"shades wrap", []string{"a1", "b1", "c1", "d1", "e1", "f1", "g1", "h1"}, map[string]want{
+			"a1": {"a1", 0},
+			"b1": {"b1", 1},
+			"c1": {"c1", 2},
+			"d1": {"d1", 3},
+			"e1": {"e1", 4},
+			"f1": {"f1", 5},
+			"g1": {"g1", 6},
+			"h1": {"h1", 7},
 		}},
 		{"duplicates count once", []string{"dotfiles", "dotfiles", "yap"}, map[string]want{
-			"dotfiles": {"do", cSurface2, cText},
-			"yap":      {"ya", cOverlay0, cText},
+			"dotfiles": {"do", 0},
+			"yap":      {"ya", 1},
 		}},
 	}
 	for _, tc := range tests {
@@ -227,7 +230,8 @@ func TestAssignRepoBadges(t *testing.T) {
 			t.Errorf("%s: %d badges, want %d", tc.name, len(got), len(tc.want))
 		}
 		for name, w := range tc.want {
-			if b := got[name]; b.code != w.code || b.bg != w.bg || b.fg != w.fg {
+			sh := badgeShades[w.pos%len(badgeShades)]
+			if b := got[name]; b.code != w.code || b.bg != sh.bg || b.fg != sh.fg {
 				t.Errorf("%s: %q = %+v, want %+v", tc.name, name, b, w)
 			}
 		}
@@ -474,18 +478,18 @@ func TestFullRepoModeKept(t *testing.T) {
 	}
 }
 
-// The filter chip follows the query on the left; a repo's chip takes its
-// badge shade. Prompts and errors show no chip.
+// The filter chip sits between the match count and the prefix cell; a
+// repo's chip takes its badge shade. Prompts and errors show no chip.
 func TestFilterChipPlacement(t *testing.T) {
 	m, _ := newWTTest(t)
 	m = send(t, m, "m", "a")
 	got := ansi.Strip(m.renderInput())
-	if !strings.HasPrefix(got, "  ma   All ") || !strings.HasSuffix(got, "3/5   ") {
+	if !strings.HasSuffix(got, " 3/5  All    ") {
 		t.Errorf("All chip: %q", got)
 	}
 	m = send(t, m, "tab", "tab") // content-engine-1
 	line := m.renderInput()
-	if !strings.HasPrefix(ansi.Strip(line), "  ma   content-engine-1 ") {
+	if !strings.HasSuffix(ansi.Strip(line), " 1/3  content-engine-1    ") {
 		t.Errorf("repo chip: %q", ansi.Strip(line))
 	}
 	b := m.badges["content-engine-1"]
@@ -493,7 +497,7 @@ func TestFilterChipPlacement(t *testing.T) {
 		t.Errorf("repo chip should use the badge shade %s: %q", b.bg, line)
 	}
 	m = send(t, m, "tab") // yap-trial
-	if b := m.badges["yap-trial"]; b.bg != cOverlay1 || !strings.Contains(m.renderInput(), bg(b.bg)) {
+	if b := m.badges["yap-trial"]; b.bg != badgeShades[2].bg || !strings.Contains(m.renderInput(), bg(b.bg)) {
 		t.Errorf("yap-trial chip: %+v %q", b, m.renderInput())
 	}
 	m = send(t, m, "ctrl+a", "C")
