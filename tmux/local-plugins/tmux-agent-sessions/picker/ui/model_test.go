@@ -105,18 +105,61 @@ func TestRowMoves(t *testing.T) {
 	}
 }
 
-func TestD15Default(t *testing.T) {
+func TestDefaultCardLastFocused(t *testing.T) {
 	m, _ := newTest(t)
 	m = send(t, m, "ctrl+p") // roll-web-funnel-changes
-	// Newest @agent_at is the pi pane (40s), 1.2 of special-feature-flags,
-	// a split card.
+	// Newest @pane_focus_at is the pi pane (40s), 1.2 of
+	// special-feature-flags, a split card, over the active build window.
 	if got := cardID(m); got != "%special-feature-flags.2" {
 		t.Errorf("default = %q", got)
 	}
-	// No agents: the active window's active pane.
+	// No pane stamped: the active window's active pane.
 	m = send(t, m, "ctrl+p", "ctrl+p", "ctrl+p") // infra
 	if got := cardID(m); got != "$1@w1-prod-ssh" {
-		t.Errorf("no-agent default = %q", got)
+		t.Errorf("no-focus default = %q", got)
+	}
+}
+
+// The newest stamp wins across windows and split cards, agent or not, and
+// an unstamped session falls back to its active pane even when that pane
+// has a newer agent event.
+func TestDefaultCardCases(t *testing.T) {
+	funnel := func(snap *state.Snapshot) *state.Session { return snap.Sessions[3] }
+	pane := func(snap *state.Snapshot, w, p int) *state.Pane { return funnel(snap).Windows[w].Panes[p] }
+	cases := []struct {
+		name  string
+		stamp func(snap *state.Snapshot)
+		want  string
+	}{
+		{"other split card", func(snap *state.Snapshot) {
+			pane(snap, 0, 0).FocusAt = now - 5
+		}, "%special-feature-flags.1"},
+		{"window card in another window", func(snap *state.Snapshot) {
+			pane(snap, 1, 0).FocusAt = now - 5
+		}, "$4@w2-notes"},
+		{"remote window", func(snap *state.Snapshot) {
+			pane(snap, 3, 0).FocusAt = now - 5
+		}, "$4@w4-remote-worker"},
+		// A shell beside split cards has no card: its window's first.
+		{"shell in a split window", func(snap *state.Snapshot) {
+			pane(snap, 0, 2).FocusAt = now - 5
+		}, "%special-feature-flags.1"},
+		{"no stamps", func(snap *state.Snapshot) {
+			for _, w := range funnel(snap).Windows {
+				for _, p := range w.Panes {
+					p.FocusAt = 0
+				}
+			}
+		}, "$4@w3-build"},
+	}
+	for _, c := range cases {
+		snap := fixture()
+		c.stamp(snap)
+		m := resize(newModel(&fakeActions{}, snap, nil), 120, 36)
+		m = send(t, m, "ctrl+p")
+		if got := cardID(m); got != c.want {
+			t.Errorf("%s: default = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
@@ -383,11 +426,13 @@ func TestReloadKeepsSelection(t *testing.T) {
 		t.Fatalf("setup = %q", cardID(m))
 	}
 	// The next snapshot drops roll-carousels-3, shifting rows, and pane
-	// 1.1 of funnel.
+	// 1.1 of funnel, and stamps a newer focus elsewhere, which must not
+	// move the selection.
 	next := fixture()
 	next.Sessions = append(next.Sessions[:1], next.Sessions[2:]...)
 	sff := next.Sessions[2].Windows[0]
 	sff.Panes = sff.Panes[1:]
+	next.Sessions[2].Windows[1].Panes[0].FocusAt = now
 	f.next = next
 	m = send(t, m, "ctrl+a", "c", "enter")
 	if sessionName(m) != "roll-web-funnel-changes" || cardID(m) != "$4@w3-build" {

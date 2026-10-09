@@ -62,15 +62,15 @@ func buildCards(s *state.Session) []card {
 	return out
 }
 
-// newestAgentPane is the pane whose agent changed state most recently
-// (@agent_at, D15), or nil.
-func newestAgentPane(panes []*state.Pane) *state.Pane {
+// lastFocusedPane is the pane with the newest @pane_focus_at, or nil when
+// none has one. A tie goes to the first in pane order.
+func lastFocusedPane(panes []*state.Pane) *state.Pane {
 	var best *state.Pane
 	for _, p := range panes {
-		if p.Remote || p.State == state.StateNone || p.AgentAt == 0 {
+		if p.FocusAt == 0 {
 			continue
 		}
-		if best == nil || p.AgentAt > best.AgentAt {
+		if best == nil || p.FocusAt > best.FocusAt {
 			best = p
 		}
 	}
@@ -101,10 +101,10 @@ func activeWindow(s *state.Session) *state.Window {
 	return nil
 }
 
-// defaultPane is the D15 selection: the newest agent pane, else the active
-// window's active pane.
+// defaultPane is the pane the grid starts on: the session's most recently
+// focused pane, else the active window's active pane.
 func defaultPane(s *state.Session) *state.Pane {
-	if p := newestAgentPane(sessionPanes(s)); p != nil {
+	if p := lastFocusedPane(sessionPanes(s)); p != nil {
 		return p
 	}
 	if w := activeWindow(s); w != nil {
@@ -113,7 +113,9 @@ func defaultPane(s *state.Session) *state.Pane {
 	return nil
 }
 
-// defaultCard returns the index of the D15 card in cards.
+// defaultCard returns the index in cards of the card holding defaultPane.
+// A pane without a card of its own (a shell beside split agent cards) falls
+// to its window's first card.
 func defaultCard(s *state.Session, cards []card) int {
 	if s == nil {
 		return 0
@@ -122,12 +124,19 @@ func defaultCard(s *state.Session, cards []card) int {
 	if p == nil {
 		return 0
 	}
+	first := -1
 	for i, c := range cards {
-		if (c.split && c.pane == p) || (!c.split && c.win == p.Window) {
+		if c.win != p.Window {
+			continue
+		}
+		if !c.split || c.pane == p {
 			return i
 		}
+		if first < 0 {
+			first = i
+		}
 	}
-	return 0
+	return max(first, 0)
 }
 
 // gridCols is 2, or 1 when half the width (less the gap) is under the

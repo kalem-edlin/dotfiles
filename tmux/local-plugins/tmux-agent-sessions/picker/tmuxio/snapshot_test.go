@@ -209,6 +209,54 @@ func TestParseOddNames(t *testing.T) {
 	}
 }
 
+// Paths are kept raw: spaces, odd characters and even a line break survive,
+// and an unset @pane_focus_at reads as 0. Every pane gets them, agent or not.
+func TestParsePathsAndFocus(t *testing.T) {
+	snap := parseSnapshot("$2\n"+loadRows(t), loadMem(t), 0)
+	type view struct {
+		Path, AgentCwd, Dir string
+		FocusAt             int64
+	}
+	cases := map[string]view{
+		// Live agent with a published cwd: Dir is the agent's cwd.
+		"%2": {"/src/api", "/src/api wt/feature x", "/src/api wt/feature x", 1799999900},
+		// Plain pane, no focus stamp.
+		"%1": {"/src/my proj/a;b 日本", "", "/src/my proj/a;b 日本", 0},
+		// Dead agent: its stale cwd is read but Dir falls back to the path.
+		"%3": {"/src/api", "/stale/dead agent", "/src/api", 1799999800},
+		// Live agent without a published cwd.
+		"%4": {"/src/api", "", "/src/api", 0},
+		// Remote pane: never an agent, so the path.
+		"%10": {"/home/u", "/remote/cwd", "/home/u", 1799999960},
+		// Multi-line command line ahead of the paths.
+		"%8": {"/home/u", "", "/home/u", 1799999950},
+		// A line break inside a path joins the record back up, raw.
+		"%13": {"/tmp/line\nbreak", "/tmp/agent\tcwd", "/tmp/agent\tcwd", 1799990001},
+		"%12": {},
+	}
+	for id, want := range cases {
+		p := findPane(t, snap, id)
+		if got := (view{p.Path, p.AgentCwd, p.Dir(), p.FocusAt}); got != want {
+			t.Errorf("%s\n got %+v\nwant %+v", id, got, want)
+		}
+	}
+}
+
+func TestParseClientLine(t *testing.T) {
+	cases := []struct{ first, sid, pid string }{
+		{"$2" + sep + "%8", "$2", "%8"},
+		{"$2", "$2", ""}, // an older line without the pane id
+		{"", "", ""},
+		{" $3 " + sep + " %9 ", "$3", "%9"},
+	}
+	for _, c := range cases {
+		snap := parseSnapshot(c.first+"\n"+loadRows(t), loadMem(t), 0)
+		if snap.CurrentID != c.sid || snap.CurrentPane != c.pid {
+			t.Errorf("%q: %q %q, want %q %q", c.first, snap.CurrentID, snap.CurrentPane, c.sid, c.pid)
+		}
+	}
+}
+
 func TestParseEmptyAndShortRows(t *testing.T) {
 	if snap := parseSnapshot("$1\n", nil, 0); len(snap.Sessions) != 0 || snap.CurrentID != "$1" {
 		t.Errorf("empty: %+v", snap)
@@ -244,7 +292,7 @@ func TestParseMem(t *testing.T) {
 
 func TestLoadWithClient(t *testing.T) {
 	reset(t)
-	fixture(t, "out-display-message", "$2\n"+loadRows(t))
+	fixture(t, "out-display-message", "$2"+sep+"%8\n"+loadRows(t))
 	mem, _ := os.ReadFile("testdata/mem")
 	fixture(t, "mem", string(mem))
 
@@ -252,7 +300,7 @@ func TestLoadWithClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expectCalls(t, tmuxLog, argv("display-message", "-p", "-c", "/dev/ttys042", "#{session_id}", ";",
+	expectCalls(t, tmuxLog, argv("display-message", "-p", "-c", "/dev/ttys042", "#{session_id}"+sep+"#{pane_id}", ";",
 		"list-panes", "-a", "-F", listFormat))
 	_, rows := parseRows("\n" + loadRows(t))
 	expectCalls(t, memLog, memPIDs(rows))
@@ -265,6 +313,9 @@ func TestLoadWithClient(t *testing.T) {
 	if snap.Now == 0 {
 		t.Error("Now not set")
 	}
+	if snap.CurrentID != "$2" || snap.CurrentPane != "%8" {
+		t.Errorf("client = %q %q", snap.CurrentID, snap.CurrentPane)
+	}
 }
 
 func TestLoadNoClient(t *testing.T) {
@@ -275,8 +326,8 @@ func TestLoadNoClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectCalls(t, tmuxLog, argv("list-panes", "-a", "-F", listFormat))
-	if snap.CurrentID != "" || len(snap.Sessions) != 7 {
-		t.Errorf("CurrentID %q, %d sessions", snap.CurrentID, len(snap.Sessions))
+	if snap.CurrentID != "" || snap.CurrentPane != "" || len(snap.Sessions) != 7 {
+		t.Errorf("CurrentID %q CurrentPane %q, %d sessions", snap.CurrentID, snap.CurrentPane, len(snap.Sessions))
 	}
 	// pane-mem printed nothing: every agent with a pid is dead.
 	if p := findPane(t, snap, "%2"); p.AgentKind != "" || p.HasMem {
@@ -299,7 +350,7 @@ func TestListFormat(t *testing.T) {
 		t.Fatalf("%d fields, %d columns", len(fields), nFields)
 	}
 	if !strings.HasPrefix(listFormat, "#{session_id}"+sep+"#{session_name}") ||
-		!strings.HasSuffix(listFormat, sep+"#{@workspace-last-command}"+sep+"#{@agent_state_at}"+sep+"#{@agent_empty}") {
+		!strings.HasSuffix(listFormat, sep+"#{@agent_empty}"+sep+"#{pane_current_path}"+sep+"#{@agent_cwd}"+sep+"#{@pane_focus_at}") {
 		t.Errorf("format %q", listFormat)
 	}
 }

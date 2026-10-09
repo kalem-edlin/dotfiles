@@ -30,6 +30,9 @@ type Pane struct {
 	Remote      bool   // @remote-host is set (D3). Remote panes have no memory and no agent.
 	MemKB       int64  // pane-mem footprint of the pane's process tree
 	HasMem      bool   // false for remote panes and when pane-mem gave no value
+	Path        string // #{pane_current_path}
+	AgentCwd    string // @agent_cwd, the agent's own working directory as its hooks last reported it
+	FocusAt     int64  // @pane_focus_at, epoch seconds the pane last gained focus, 0 if unset
 
 	// Agent fields are zero unless a live agent publishes into the pane.
 	// An agent whose @agent_pid is gone counts as no agent.
@@ -51,6 +54,16 @@ func (p *Pane) StateSince() int64 {
 		return p.StateAt
 	}
 	return p.AgentAt
+}
+
+// Dir is the pane's effective directory: a live agent's @agent_cwd when it
+// published one, since an agent can move away from where its pane started,
+// else #{pane_current_path}.
+func (p *Pane) Dir() string {
+	if p.State != StateNone && p.AgentCwd != "" {
+		return p.AgentCwd
+	}
+	return p.Path
 }
 
 // AgentCounts counts the session's live agents by state and finds the
@@ -98,7 +111,8 @@ type Session struct {
 
 // Snapshot is one read of the server: one tmux call and one pane-mem call.
 type Snapshot struct {
-	CurrentID string // session id of the invoking client, "" if unknown
+	CurrentID   string // session id of the invoking client, "" if unknown
+	CurrentPane string // id of the invoking client's active pane, "" if unknown
 	// Sessions in display order, top to bottom, higher priority lower: see
 	// the sort in tmuxio. The client's own session is last (D9, D17).
 	Sessions []*Session

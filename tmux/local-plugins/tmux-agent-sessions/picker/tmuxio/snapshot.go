@@ -24,6 +24,9 @@ import (
 const sep = "␞"
 
 // fields is the list-panes format, in column order. The first 19 are v1's.
+// The two paths are kept raw (no clean) and sit before a numeric last
+// column, so a path with a line break in it is joined back up by
+// parseRows like a multi-line command line is.
 var fields = []string{
 	"#{session_id}",
 	"#{session_name}",
@@ -47,6 +50,9 @@ var fields = []string{
 	"#{@workspace-last-command}",
 	"#{@agent_state_at}",
 	"#{@agent_empty}",
+	"#{pane_current_path}",
+	"#{@agent_cwd}",
+	"#{@pane_focus_at}",
 }
 
 // Column indexes into a row.
@@ -73,10 +79,17 @@ const (
 	fLastCommand
 	fStateAt
 	fAgentEmpty
+	fPath
+	fAgentCwd
+	fFocusAt
 	nFields
 )
 
 var listFormat = strings.Join(fields, sep)
+
+// clientFormat is the client's line ahead of the panes: its session id and
+// its active pane id.
+const clientFormat = "#{session_id}" + sep + "#{pane_id}"
 
 // paneMemPath is scripts/pane-mem. Empty means "locate it next to the
 // binary"; tests point it at a fake.
@@ -86,41 +99,46 @@ var paneMemPath = ""
 func (a *actions) Load() (*state.Snapshot, error) {
 	var args []string
 	if a.client != "" {
-		args = append(args, "display-message", "-p", "-c", a.client, "#{session_id}", ";")
+		args = append(args, "display-message", "-p", "-c", a.client, clientFormat, ";")
 	}
 	args = append(args, "list-panes", "-a", "-F", listFormat)
 	out, err := runTmux(args...)
 	if err != nil {
 		return nil, err
 	}
-	// Without a client there is no session id line; keep the shape the
+	// Without a client there is no client line; keep the shape the
 	// parser expects (an empty first line), like v1.
 	if a.client == "" {
 		out = "\n" + out
 	}
-	current, rows := parseRows(out)
+	cl, rows := parseRows(out)
 
 	mem, err := readMem(memPIDs(rows))
 	if err != nil {
 		return nil, err
 	}
-	return buildSnapshot(current, rows, mem, time.Now().Unix()), nil
+	return buildSnapshot(cl, rows, mem, time.Now().Unix()), nil
 }
 
 // parseSnapshot is parseRows plus buildSnapshot, for tests.
 func parseSnapshot(raw string, mem map[int]int64, now int64) *state.Snapshot {
-	current, rows := parseRows(raw)
-	return buildSnapshot(current, rows, mem, now)
+	cl, rows := parseRows(raw)
+	return buildSnapshot(cl, rows, mem, now)
 }
 
+// clientLine is the invoking client's first line: its session id and active
+// pane id, both "" when unknown.
+type clientLine struct{ session, pane string }
+
 // parseRows splits raw tmux output: the first line is the client's session
-// id (possibly empty), every following record is one pane of nFields
-// fields. A value with a raw newline in it (a multi-line
+// id and active pane id (possibly empty), every following record is one
+// pane of nFields fields. A value with a raw newline in it (a multi-line
 // @workspace-last-command, say) spreads a record over several lines, so
 // lines are joined until the record has all its separators.
-func parseRows(raw string) (string, [][]string) {
-	current, rest, _ := strings.Cut(raw, "\n")
-	current = strings.TrimSpace(current)
+func parseRows(raw string) (clientLine, [][]string) {
+	first, rest, _ := strings.Cut(raw, "\n")
+	sid, pid, _ := strings.Cut(first, sep)
+	cl := clientLine{session: strings.TrimSpace(sid), pane: strings.TrimSpace(pid)}
 
 	var rows [][]string
 	var acc string
@@ -151,7 +169,7 @@ func parseRows(raw string) (string, [][]string) {
 	if pending {
 		flush()
 	}
-	return current, rows
+	return cl, rows
 }
 
 // memPIDs is every pane pid and every non-empty @agent_pid, for pane-mem.
@@ -228,8 +246,9 @@ func locatePaneMem() (string, error) {
 // buildSnapshot turns rows into the session tree. Rules from v1: an agent
 // whose @agent_pid is not alive is no agent; remote panes get no memory and
 // no agent; an unknown agent state reads as idle.
-func buildSnapshot(current string, rows [][]string, mem map[int]int64, now int64) *state.Snapshot {
-	snap := &state.Snapshot{CurrentID: current, Now: now}
+func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64) *state.Snapshot {
+	current := cl.session
+	snap := &state.Snapshot{CurrentID: current, CurrentPane: cl.pane, Now: now}
 	sessions := map[string]*state.Session{}
 	windows := map[string]*state.Window{}
 
@@ -319,6 +338,9 @@ func buildPane(f []string, mem map[int]int64, w *state.Window) *state.Pane {
 		Command:     clean(f[fCommand]),
 		LastCommand: clean(f[fLastCommand]),
 		Remote:      f[fRemoteHost] != "",
+		Path:        f[fPath],
+		AgentCwd:    f[fAgentCwd],
+		FocusAt:     atoi64(f[fFocusAt]),
 		Window:      w,
 	}
 	if !p.Remote {

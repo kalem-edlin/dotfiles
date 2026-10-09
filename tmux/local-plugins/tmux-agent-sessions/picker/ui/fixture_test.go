@@ -50,6 +50,9 @@ func remote() *state.Pane {
 
 func active(p *state.Pane) *state.Pane { p.Active = true; return p }
 
+// focused stamps the pane's @pane_focus_at ago seconds before now.
+func focused(ago int64, p *state.Pane) *state.Pane { p.FocusAt = now - ago; return p }
+
 // fixture is six sessions in display order: oldest at the top, the
 // client's own session last.
 func fixture() *state.Snapshot {
@@ -71,10 +74,10 @@ func fixture() *state.Snapshot {
 		sess("$4", "roll-web-funnel-changes", now-600,
 			win(1, "special-feature-flags", false,
 				active(agent("claude", "funnel step refactor", state.StateWorking, 120, 610)),
-				agent("pi", "copy audit", state.StateDone, 40, 290),
+				focused(40, agent("pi", "copy audit", state.StateDone, 40, 290)),
 				shell("zsh", "pnpm test --watch", 12)),
 			win(2, "notes", false, active(agent("pi", "release notes draft", state.StateIdle, 2*86400, 260))),
-			win(3, "build", true, active(shell("zsh", "", 8))),
+			win(3, "build", true, focused(600, active(shell("zsh", "", 8)))),
 			win(4, "remote-worker", false, active(remote())),
 		),
 		sess("$5", "dotfiles-agents-with-a-very-long-session-name-for-truncation", now-120,

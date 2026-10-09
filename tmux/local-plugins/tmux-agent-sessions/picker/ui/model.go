@@ -182,7 +182,7 @@ func (m *model) listFollow() {
 }
 
 // resetCards rebuilds the grid for the session under the cursor and
-// selects the D15 default.
+// selects the default card.
 func (m *model) resetCards() {
 	s := m.session()
 	m.cards = buildCards(s)
