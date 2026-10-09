@@ -1,0 +1,10 @@
+  main                                              │  0      │      yap-trial |
+  1a2b3c4                                  1  15m  │  1 15m  │ content-engin… |
+  main                                      1  2m  │  1 2m   │ content-engin… |
+▌ exp/roll-hiring                  1  5m   1  1m  │  2 1m   │ content-engin… |
+  main                                     1  15s  │  2 15s  │       dotfiles |
+  yap-trial                                         │  0      │      yap-trial |
+  content-engine-5                         1  15m  │  1 15m  │ content-engin… |
+  content-engine-1                          1  2m  │  1 2m   │ content-engin… |
+▌ roll-hiring                      1  5m   1  1m  │  2 1m   │ content-engin… |
+  dotfiles                                 1  15s  │  2 15s  │       dotfiles |

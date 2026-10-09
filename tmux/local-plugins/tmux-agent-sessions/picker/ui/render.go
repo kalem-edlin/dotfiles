@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"agentpicker/state"
@@ -71,7 +72,7 @@ func cardMem(label string, selected bool) string {
 
 // cardSubtitle is a card's second line (D53): the agent's session name, or
 // the empty-chat placeholder, else the running command of the agent pane
-// or, for a window without an agent, of its first pane.
+// or, for a window without an agent, of its first (member) pane.
 func cardSubtitle(c card, iw int, selected bool) string {
 	text := tone(cText, selected)
 	p := c.pane
@@ -82,7 +83,7 @@ func cardSubtitle(c card, iw int, selected bool) string {
 		if name := oneLine(p.AgentName); name != "" {
 			return paint(truncate(name, iw), text, "", false)
 		}
-	} else if len(c.win.Panes) > 0 {
+	} else if p = c.lead; p == nil && len(c.win.Panes) > 0 {
 		p = c.win.Panes[0]
 	}
 	if p == nil {
@@ -273,21 +274,41 @@ func renderGrid(cards []card, sel, top, w, h int, now int64) []string {
 	return out
 }
 
-// sessionRow is what a session list row shows.
-type sessionRow struct {
+// listRow is what a list row shows, for a session or a worktree.
+type listRow struct {
 	name     string
+	dim      bool  // a detached worktree's commit id
 	pos      []int // matched rune indexes, ascending
 	chips    []agg // Working, Awaiting, Done with a non-zero count (D55)
-	agents   int   // all agents in the session
+	agents   int   // all agents in the row's member panes
 	agentsAt int64 // newest state change among them
 	mem      string
 }
 
-func newSessionRow(s *state.Session, pos []int) sessionRow {
-	panes := sessionPanes(s)
+func newSessionRow(s *state.Session, pos []int) listRow {
+	panes := s.Members()
 	n, at := agentSummary(panes)
-	return sessionRow{name: oneLine(s.Name), pos: pos, chips: aggregate(panes, rowOrder),
+	return listRow{name: oneLine(s.Name), pos: pos, chips: aggregate(panes, rowOrder),
 		agents: n, agentsAt: at, mem: memLabel(panes)}
+}
+
+// newWorktreeRow labels the row with its branch, or its commit id dimmed
+// when detached, or with its directory name when dirLabel is set; the
+// match highlights show only on the branch label. The memory column holds
+// the repo name, truncated to repoW.
+func newWorktreeRow(t *state.Worktree, pos []int, dirLabel bool, repoW int) listRow {
+	n, at := agentSummary(t.Panes)
+	r := listRow{pos: pos, chips: aggregate(t.Panes, rowOrder), agents: n, agentsAt: at,
+		mem: truncate(oneLine(t.Repo), repoW)}
+	switch {
+	case dirLabel:
+		r.name, r.pos = oneLine(filepath.Base(t.Root)), nil
+	case t.Detached():
+		r.name, r.dim = t.Head, true
+	default:
+		r.name = oneLine(t.Branch)
+	}
+	return r
 }
 
 // highlightName styles name, marking matched runes. name may already be
@@ -326,12 +347,12 @@ func highlightName(name string, pos []int, fg, bg string, bold bool) string {
 	return b.String()
 }
 
-// renderSessionRow draws one list row, w columns wide: gutter and name at
+// renderRow draws one list row, w columns wide: gutter and name at
 // the left, then three sections pushed to the right edge, divided by thin
 // rules (D55): the status chips (the only variable width), the agents
 // section and the memory, both of fixed width so they line up on every
 // row. A long name is truncated before chips are dropped.
-func renderSessionRow(r sessionRow, memW, w int, selected bool, now int64) string {
+func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	bg := panelBg
 	if selected {
 		bg = selectBg
@@ -364,8 +385,12 @@ func renderSessionRow(r sessionRow, memW, w int, selected bool, now int64) strin
 	}
 	name := truncate(r.name, avail-chipsW(n))
 
+	nameFg := cText
+	if r.dim {
+		nameFg = dimFg
+	}
 	line := gutter + paint(" ", "", bg, false) +
-		highlightName(name, r.pos, cText, bg, selected)
+		highlightName(name, r.pos, nameFg, bg, selected)
 	right := ""
 	for i, c := range chips[:n] {
 		if i > 0 {
@@ -396,13 +421,24 @@ func renderRule(w int) string {
 }
 
 // renderInputLine draws left (query, prompt or error) with the match count
-// and the prefix cell at the right edge (D20).
-func renderInputLine(left, count string, armed bool, w int) string {
+// and the prefix cell at the right edge (D20). A non-empty filter (the
+// repo filter in worktree mode) shows as a chip left of the count, in
+// whatever room left leaves it, truncated or dropped first.
+func renderInputLine(left, filter, count string, armed bool, w int) string {
 	cellBg := cellRest
 	if armed {
 		cellBg = cellArmed
 	}
 	right := paint(count, countFg, "", false) + " " + paint("  ", "", cellBg, false)
 	room := w - width(right)
+	// A space either side of the chip, and the chip's own padding.
+	if fw := room - width(left) - 4; filter != "" && fw >= minFilterW {
+		chip := chipColored(truncate(filter, fw), cText, panesChipBg, true)
+		right = chip + " " + right
+		room -= width(chip) + 1
+	}
 	return padRight(padRight(left, room)+right, w)
 }
+
+// minFilterW is the narrowest filter chip text worth showing.
+const minFilterW = 3

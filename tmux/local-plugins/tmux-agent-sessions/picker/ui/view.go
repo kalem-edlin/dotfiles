@@ -1,6 +1,10 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	"agentpicker/state"
+)
 
 // render draws the whole screen, top to bottom (D18): the card grid, the
 // session list, the input line between two rules (D44). No header, no key
@@ -32,10 +36,7 @@ func (m model) render() string {
 // room, D35). The list runs bottom up, so with fewer matches the empty
 // rows sit at the top.
 func (m model) renderList() []string {
-	memW := 5
-	for _, s := range m.snap.Sessions {
-		memW = max(memW, width(memLabel(sessionPanes(s))))
-	}
+	memW := m.memWidth()
 	rows := m.listHeight()
 	n := len(m.matches)
 	first, shown := m.top, min(n, rows)
@@ -44,10 +45,35 @@ func (m model) renderList() []string {
 		out = append(out, renderEmptyRow(m.w))
 	}
 	for i := first; i < first+shown; i++ {
-		s := m.snap.Sessions[m.matches[i]]
-		out = append(out, renderSessionRow(newSessionRow(s, m.pos[i]), memW, m.w, i == m.cur, m.snap.Now))
+		var r listRow
+		switch x := m.rows[m.matches[i]].(type) {
+		case *state.Session:
+			r = newSessionRow(x, m.pos[i])
+		case *state.Worktree:
+			r = newWorktreeRow(x, m.pos[i], m.dirLabels, memW)
+		}
+		out = append(out, renderRow(r, memW, m.w, i == m.cur, m.snap.Now))
 	}
 	return out
+}
+
+// repoMaxW caps the worktree rows' repo column.
+const repoMaxW = 14
+
+// memWidth is the right column's width, shared by every row of the mode:
+// the widest session memory, or the widest repo name up to repoMaxW.
+func (m model) memWidth() int {
+	w := 5
+	if m.mode == modeWorktrees {
+		for _, t := range m.snap.Worktrees {
+			w = max(w, width(oneLine(t.Repo)))
+		}
+		return min(w, repoMaxW)
+	}
+	for _, s := range m.snap.Sessions {
+		w = max(w, width(memLabel(s.Members())))
+	}
+	return w
 }
 
 func (m model) renderInput() string {
@@ -64,5 +90,5 @@ func (m model) renderInput() string {
 	default:
 		left = indent + m.query.View()
 	}
-	return renderInputLine(left, m.countText(), m.armed, m.w)
+	return renderInputLine(left, m.filterText(), m.countText(), m.armed, m.w)
 }

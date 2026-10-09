@@ -81,9 +81,9 @@ func (a *actions) CreateSession(name string) error {
 	return err
 }
 
-// NewSession creates a detached session. An empty name is a cancel, as at
-// v1's prompt; the UI offers the query as the default.
-func (a *actions) NewSession(name string) error {
+// NewSession creates a detached session in dir (home when empty). An empty
+// name is a cancel, as at v1's prompt; the UI offers a default.
+func (a *actions) NewSession(name, dir string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil
@@ -91,22 +91,28 @@ func (a *actions) NewSession(name string) error {
 	if err := checkSessionName(name); err != nil {
 		return err
 	}
-	_, err := runTmux("new-session", "-d", "-s", name, "-c", home())
+	if dir == "" {
+		dir = home()
+	}
+	_, err := runTmux("new-session", "-d", "-s", name, "-c", dir)
 	return err
 }
 
-func (a *actions) NewWindow(s *state.Session, name string) error {
+func (a *actions) NewWindow(s *state.Session, dir, name string) error {
 	if s == nil {
 		return errors.New("no session selected")
 	}
 	name = strings.TrimSpace(name)
-	// Mirror the live `prefix c` (new-window -c "#{pane_current_path}")
-	// using the selected session's active pane.
-	cwd, err := runTmux("display-message", "-p", "-t", s.ID, "#{pane_current_path}")
-	if err != nil {
-		return err
+	cwd := dir
+	if cwd == "" {
+		// Mirror the live `prefix c` (new-window -c "#{pane_current_path}")
+		// using the selected session's active pane.
+		out, err := runTmux("display-message", "-p", "-t", s.ID, "#{pane_current_path}")
+		if err != nil {
+			return err
+		}
+		cwd = strings.TrimRight(out, "\n")
 	}
-	cwd = strings.TrimRight(cwd, "\n")
 	if cwd == "" {
 		cwd = home()
 	}
@@ -114,7 +120,7 @@ func (a *actions) NewWindow(s *state.Session, name string) error {
 	if name != "" {
 		args = append(args, "-n", name)
 	}
-	_, err = runTmux(args...)
+	_, err := runTmux(args...)
 	return err
 }
 

@@ -64,7 +64,7 @@ func TestGoldenSessionRows(t *testing.T) {
 		var lines []string
 		for i, s := range snap.Sessions {
 			_, pos := m.match("roll", s.Name)
-			lines = append(lines, renderSessionRow(newSessionRow(s, pos), 11, w, i == 3, now))
+			lines = append(lines, renderRow(newSessionRow(s, pos), 11, w, i == 3, now))
 		}
 		lines = append(lines, renderEmptyRow(w))
 		checkWidths(t, "rows", lines, w)
@@ -77,7 +77,7 @@ func TestGoldenSessionRows(t *testing.T) {
 
 func TestGoldenCards(t *testing.T) {
 	s := fixture().Sessions[3]
-	cards := buildCards(s)
+	cards := sessionCards(s)
 	for _, w := range widths {
 		lines := renderGrid(cards, 0, 0, w, 15, now)
 		checkWidths(t, "cards", lines, w)

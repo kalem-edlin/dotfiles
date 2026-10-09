@@ -23,6 +23,7 @@ var (
 	shimTmux string
 	shimRW   string
 	homeDir  string
+	gitPath  string // real git, found before PATH is narrowed, for fixtures
 )
 
 func TestMain(m *testing.M) {
@@ -36,6 +37,7 @@ func runTests(m *testing.M) int {
 		return 1
 	}
 	defer os.RemoveAll(tmp)
+	gitPath, _ = exec.LookPath("git")
 	if err := setupHarness(tmp); err != nil {
 		fmt.Fprintln(os.Stderr, "ABORT:", err)
 		return 1

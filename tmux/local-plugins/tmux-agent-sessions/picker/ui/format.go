@@ -104,14 +104,6 @@ func agentSummary(panes []*state.Pane) (n int, at int64) {
 	return n, at
 }
 
-func sessionPanes(s *state.Session) []*state.Pane {
-	var out []*state.Pane
-	for _, w := range s.Windows {
-		out = append(out, w.Panes...)
-	}
-	return out
-}
-
 // memLabel sums local pane memory. Remote panes have none: they show
 // "remote", after the sum when local panes exist too (as v1 did).
 func memLabel(panes []*state.Pane) string {

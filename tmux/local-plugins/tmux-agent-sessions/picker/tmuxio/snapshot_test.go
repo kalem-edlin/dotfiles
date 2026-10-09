@@ -350,7 +350,7 @@ func TestListFormat(t *testing.T) {
 		t.Fatalf("%d fields, %d columns", len(fields), nFields)
 	}
 	if !strings.HasPrefix(listFormat, "#{session_id}"+sep+"#{session_name}") ||
-		!strings.HasSuffix(listFormat, sep+"#{@agent_empty}"+sep+"#{pane_current_path}"+sep+"#{@agent_cwd}"+sep+"#{@pane_focus_at}") {
+		!strings.HasSuffix(listFormat, sep+"#{@agent_empty}"+sep+"#{pane_current_path}"+sep+"#{@agent_cwd}"+sep+"#{@pane_focus_at}"+sep+"#{session_attached}") {
 		t.Errorf("format %q", listFormat)
 	}
 }
@@ -368,9 +368,8 @@ func orderSession(id string, last int64, current bool, at int64, states ...state
 }
 
 func sortedIDs(ss ...*state.Session) []string {
-	snap := &state.Snapshot{Sessions: ss}
-	sortSessions(snap)
-	return sessionIDs(snap)
+	sortRows(ss)
+	return sessionIDs(&state.Snapshot{Sessions: ss})
 }
 
 func TestOrderPriority(t *testing.T) {

@@ -10,15 +10,18 @@ import (
 	"agentpicker/state"
 )
 
-// keyMsg turns "ctrl+j", "enter", "esc", "down", "backspace" or a single
-// character into a key press.
+// keyMsg turns "ctrl+j", "enter", "esc", "down", "backspace", "tab",
+// "shift+tab" or a single character into a key press.
 func keyMsg(k string) tea.KeyPressMsg {
 	named := map[string]rune{
 		"enter": tea.KeyEnter, "esc": tea.KeyEscape, "down": tea.KeyDown,
-		"up": tea.KeyUp, "backspace": tea.KeyBackspace,
+		"up": tea.KeyUp, "backspace": tea.KeyBackspace, "tab": tea.KeyTab,
 	}
 	if c, ok := named[k]; ok {
 		return tea.KeyPressMsg{Code: c}
+	}
+	if k == "shift+tab" {
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
 	}
 	if c, ok := strings.CutPrefix(k, "ctrl+"); ok {
 		return tea.KeyPressMsg{Code: rune(c[0]), Mod: tea.ModCtrl}

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
+	"slices"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
@@ -35,6 +37,15 @@ var promptLabels = map[promptKind]string{
 	promptRenameSession: "rename session: ",
 }
 
+// listMode is what the list rows are: sessions, or git worktrees grouping
+// panes by their directory. ctrl+w switches; the picker opens on sessions.
+type listMode int
+
+const (
+	modeSessions listMode = iota
+	modeWorktrees
+)
+
 // actionMsg reports a finished stay-open action and the reloaded snapshot.
 type actionMsg struct {
 	snap *state.Snapshot
@@ -54,7 +65,13 @@ type model struct {
 	query  textinput.Model
 	prompt textinput.Model
 
-	matches []int   // indexes into snap.Sessions, display order
+	mode      listMode
+	rows      []state.Row // the mode's rows: snap.Sessions or snap.Worktrees
+	repo      string      // worktree repo filter, "" for All; kept across modes
+	dirLabels bool        // worktree rows show their directory name, not the branch
+
+	matches []int   // indexes into rows, display order
+	total   int     // rows that pass the repo filter
 	pos     [][]int // highlight positions per match
 	cur     int     // cursor in matches
 	top     int     // first visible match when more match than the list shows
@@ -67,6 +84,7 @@ type model struct {
 	pending   promptKind
 	target    *state.Session // session a prompt or confirmation acts on
 	targetWin *state.Window
+	targetDir string // start directory of a new window or session, "" for the default
 	err       error
 	quitting  bool
 }
@@ -86,15 +104,40 @@ func newModel(a state.Actions, snap *state.Snapshot, err error) model {
 		err:    err,
 	}
 	m.query.Focus()
+	m.setRows()
+	m.resetList()
+	return m
+}
+
+// setRows points rows at the current mode's rows.
+func (m *model) setRows() {
+	if m.mode == modeWorktrees {
+		m.rows = make([]state.Row, 0, len(m.snap.Worktrees))
+		for _, t := range m.snap.Worktrees {
+			m.rows = append(m.rows, t)
+		}
+		return
+	}
+	m.rows = make([]state.Row, 0, len(m.snap.Sessions))
+	for _, s := range m.snap.Sessions {
+		m.rows = append(m.rows, s)
+	}
+}
+
+// resetList refilters and puts the list and grid at their defaults, as on
+// open: the cursor on the previous row (D13), the list bottom-anchored so
+// the current row shows.
+func (m *model) resetList() {
 	m.refilter()
 	n := len(m.matches)
-	if n > 1 {
-		m.cur = n - 2 // the previous session (D13)
+	// With a query the cursor stays on the bottom match, as after typing.
+	// A worktree list without a current row at the bottom starts there too.
+	if n > 1 && m.query.Value() == "" && (m.mode == modeSessions || m.rows[m.matches[n-1]].IsCurrent()) {
+		m.cur = n - 2
 	}
-	m.top = max(0, n-m.listHeight()) // bottom-anchored: the current session shows
+	m.top = max(0, n-m.listHeight())
 	m.listFollow()
 	m.resetCards()
-	return m
 }
 
 // newInput is a textinput whose keymap leaves the picker's control keys
@@ -137,12 +180,26 @@ func newInput(prompt bool) textinput.Model {
 
 func (m model) Init() tea.Cmd { return nil }
 
-// session is the session under the cursor, or nil when nothing matches.
-func (m model) session() *state.Session {
+// row is the row under the cursor, or nil when nothing matches.
+func (m model) row() state.Row {
 	if m.cur < 0 || m.cur >= len(m.matches) {
 		return nil
 	}
-	return m.snap.Sessions[m.matches[m.cur]]
+	return m.rows[m.matches[m.cur]]
+}
+
+// session is the session under the cursor, nil when nothing matches or in
+// worktree mode.
+func (m model) session() *state.Session {
+	s, _ := m.row().(*state.Session)
+	return s
+}
+
+// worktree is the worktree under the cursor, nil when nothing matches or
+// in session mode.
+func (m model) worktree() *state.Worktree {
+	t, _ := m.row().(*state.Worktree)
+	return t
 }
 
 func (m model) card() (card, bool) {
@@ -152,17 +209,77 @@ func (m model) card() (card, bool) {
 	return m.cards[m.sel], true
 }
 
-// refilter recomputes matches for the current query.
+// refilter recomputes matches for the repo filter, then the query. Matches
+// keep the rows' order: a match never re-ranks.
 func (m *model) refilter() {
 	m.matches, m.pos = m.matches[:0], m.pos[:0]
+	m.total = 0
 	q := m.query.Value()
-	for i, s := range m.snap.Sessions {
-		if ok, pos := m.m.match(q, s.Name); ok {
+	for i, r := range m.rows {
+		if !m.inFilter(r) {
+			continue
+		}
+		m.total++
+		if ok, pos := m.m.match(q, rowLabel(r)); ok {
 			m.matches = append(m.matches, i)
 			m.pos = append(m.pos, pos)
 		}
 	}
 	m.cur = len(m.matches) - 1
+}
+
+// rowLabel is the text the query matches: a session's name, a worktree's
+// branch or, when detached, its commit id, whatever the row labels show.
+func rowLabel(r state.Row) string {
+	switch r := r.(type) {
+	case *state.Session:
+		return r.Name
+	case *state.Worktree:
+		if r.Detached() {
+			return r.Head
+		}
+		return r.Branch
+	}
+	return ""
+}
+
+// inFilter applies the repo filter, which only worktree rows have.
+func (m model) inFilter(r state.Row) bool {
+	t, ok := r.(*state.Worktree)
+	return !ok || m.repo == "" || t.Repo == m.repo
+}
+
+// repos are the filter's repos in the order tab steps through them: first
+// appearance from the bottom worktree row (the highest priority) up.
+func (m model) repos() []string {
+	var out []string
+	for i := len(m.snap.Worktrees) - 1; i >= 0; i-- {
+		if r := m.snap.Worktrees[i].Repo; !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// cycleRepo steps the repo filter d places through All and the repos,
+// wrapping both ways, and resets the list as on open.
+func (m *model) cycleRepo(d int) {
+	opts := append([]string{""}, m.repos()...)
+	i := max(slices.Index(opts, m.repo), 0)
+	m.repo = opts[((i+d)%len(opts)+len(opts))%len(opts)]
+	m.resetList()
+}
+
+// toggleMode switches between session and worktree rows. The query and
+// the repo filter stay; the cursor and the card go to their defaults.
+func (m *model) toggleMode() {
+	if m.mode == modeSessions {
+		m.mode = modeWorktrees
+	} else {
+		m.mode = modeSessions
+	}
+	m.setRows()
+	m.resetList()
 }
 
 // listFollow keeps the cursor inside the visible list rows.
@@ -181,12 +298,14 @@ func (m *model) listFollow() {
 	}
 }
 
-// resetCards rebuilds the grid for the session under the cursor and
-// selects the default card.
+// resetCards rebuilds the grid for the row under the cursor and selects
+// the default card.
 func (m *model) resetCards() {
-	s := m.session()
-	m.cards = buildCards(s)
-	m.sel = defaultCard(s, m.cards)
+	m.cards, m.sel = nil, 0
+	if r := m.row(); r != nil {
+		m.cards = rowCards(r)
+		m.sel = defaultCard(m.cards, defaultPane(r))
+	}
 	m.gridTop = 0
 	m.gridFollow()
 }
@@ -342,6 +461,20 @@ func (m model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.moveCardRow(1)
 	case "ctrl+k":
 		m.moveCardRow(-1)
+	case "ctrl+w":
+		m.toggleMode()
+	case "ctrl+t":
+		if m.mode == modeWorktrees {
+			m.dirLabels = !m.dirLabels
+		}
+	case "tab":
+		if m.mode == modeWorktrees {
+			m.cycleRepo(1)
+		}
+	case "shift+tab":
+		if m.mode == modeWorktrees {
+			m.cycleRepo(-1)
+		}
 	case "enter":
 		return m, m.enter()
 	default:
@@ -367,6 +500,15 @@ func (m model) editQuery(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) enter() tea.Cmd {
 	s := m.session()
+	if s == nil && m.mode == modeWorktrees {
+		// A worktree row is no session: switch by its card, and an
+		// unmatched query creates nothing.
+		if c, ok := m.card(); ok {
+			s = c.win.Session
+		} else {
+			return nil
+		}
+	}
 	if s == nil {
 		name := m.query.Value()
 		if name == "" {
@@ -386,23 +528,36 @@ func (m model) enter() tea.Cmd {
 }
 
 // prefixKey handles the key after C-a (D16). ok is false for keys that are
-// not prefix actions; those do their normal job.
+// not prefix actions; those do their normal job. In worktree mode new
+// windows and sessions start in the worktree's root, and the session
+// actions (R, Q) do nothing: a worktree row is no session.
 func (m *model) prefixKey(k string) (tea.Cmd, bool) {
-	s := m.session()
+	s, t := m.session(), m.worktree()
 	c, hasCard := m.card()
 	switch k {
 	case "C":
-		m.startPrompt(promptNewSession, m.query.Value())
+		switch {
+		case m.mode == modeSessions:
+			m.targetDir = ""
+			m.startPrompt(promptNewSession, m.query.Value())
+		case t != nil:
+			m.targetDir = t.Root
+			m.startPrompt(promptNewSession, filepath.Base(t.Root))
+		}
 		return nil, true
 	case "c":
-		if s != nil {
-			m.target = s
+		switch {
+		case s != nil:
+			m.target, m.targetDir = s, ""
+			m.startPrompt(promptNewWindow, "")
+		case t != nil && hasCard:
+			m.target, m.targetDir = c.win.Session, t.Root
 			m.startPrompt(promptNewWindow, "")
 		}
 		return nil, true
 	case "r":
 		if hasCard {
-			m.target, m.targetWin = s, c.win
+			m.target, m.targetWin = c.win.Session, c.win
 			m.startPrompt(promptRenameWindow, c.win.Name)
 		}
 		return nil, true
@@ -444,7 +599,7 @@ func (m *model) endPrompt() {
 }
 
 func (m model) promptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	kind, s, w := m.pending, m.target, m.targetWin
+	kind, s, w, dir := m.pending, m.target, m.targetWin, m.targetDir
 	if kind == confirmKillSession {
 		m.endPrompt()
 		if msg.String() == "y" || msg.String() == "Y" {
@@ -462,12 +617,12 @@ func (m model) promptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch kind {
 		case promptNewWindow:
 			// An empty name keeps tmux's automatic naming.
-			return m, m.run(func() error { return m.act.NewWindow(s, name) })
+			return m, m.run(func() error { return m.act.NewWindow(s, dir, name) })
 		case promptNewSession:
 			if name == "" {
 				return m, nil
 			}
-			return m, m.run(func() error { return m.act.NewSession(name) })
+			return m, m.run(func() error { return m.act.NewSession(name, dir) })
 		case promptRenameWindow:
 			if name == "" {
 				return m, nil
@@ -504,16 +659,17 @@ func (m model) run(f func() error) tea.Cmd {
 	}
 }
 
-// applyReload swaps in a fresh snapshot, keeping the selected session and
-// card by id when they still exist.
+// applyReload swaps in a fresh snapshot, keeping the selected row (a
+// session id or a worktree root) and card by id when they still exist. A
+// repo filter whose repo is gone goes back to All.
 func (m *model) applyReload(msg actionMsg) {
 	m.err = msg.err
 	if msg.snap == nil {
 		return
 	}
-	var sid, cid string
-	if s := m.session(); s != nil {
-		sid = s.ID
+	var rid, cid string
+	if r := m.row(); r != nil {
+		rid = r.RowID()
 	}
 	if c, ok := m.card(); ok {
 		cid = c.id()
@@ -521,18 +677,22 @@ func (m *model) applyReload(msg actionMsg) {
 	oldCur, oldSel := m.cur, m.sel
 
 	m.snap = msg.snap
+	m.setRows()
+	if m.repo != "" && !slices.Contains(m.repos(), m.repo) {
+		m.repo = ""
+	}
 	m.refilter()
 	m.cur = min(max(oldCur, 0), len(m.matches)-1)
-	sameSession := false
+	sameRow := false
 	for i, idx := range m.matches {
-		if m.snap.Sessions[idx].ID == sid {
-			m.cur, sameSession = i, true
+		if m.rows[idx].RowID() == rid {
+			m.cur, sameRow = i, true
 			break
 		}
 	}
 	m.listFollow()
 	m.resetCards()
-	if !sameSession {
+	if !sameRow {
 		return
 	}
 	found := false
@@ -554,6 +714,18 @@ func (m model) View() tea.View {
 	return v
 }
 
+// countText is matches over the rows that pass the repo filter.
 func (m model) countText() string {
-	return fmt.Sprintf("%d/%d", len(m.matches), len(m.snap.Sessions))
+	return fmt.Sprintf("%d/%d", len(m.matches), m.total)
+}
+
+// filterText is the repo filter's indicator, shown in worktree mode only.
+func (m model) filterText() string {
+	switch {
+	case m.mode != modeWorktrees:
+		return ""
+	case m.repo == "":
+		return "All"
+	}
+	return m.repo
 }

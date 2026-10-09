@@ -132,9 +132,11 @@ func (f *fakeActions) Switch(s *state.Session, w *state.Window, p *state.Pane) e
 	return f.rec("switch %s %s %s", s.ID, wid, pid)
 }
 func (f *fakeActions) CreateSession(name string) error { return f.rec("create %s", name) }
-func (f *fakeActions) NewSession(name string) error    { return f.rec("new-session %s", name) }
-func (f *fakeActions) NewWindow(s *state.Session, name string) error {
-	return f.rec("new-window %s %q", s.ID, name)
+func (f *fakeActions) NewSession(name, dir string) error {
+	return f.rec("new-session %s%s", name, dirArg(dir))
+}
+func (f *fakeActions) NewWindow(s *state.Session, dir, name string) error {
+	return f.rec("new-window %s %q%s", s.ID, name, dirArg(dir))
 }
 func (f *fakeActions) RenameWindow(w *state.Window, name string) error {
 	return f.rec("rename-window %s %s", w.ID, name)
@@ -145,3 +147,11 @@ func (f *fakeActions) RenameSession(s *state.Session, name string) error {
 func (f *fakeActions) KillPane(p *state.Pane) error       { return f.rec("kill-pane %s", p.ID) }
 func (f *fakeActions) KillWindow(w *state.Window) error   { return f.rec("kill-window %s", w.ID) }
 func (f *fakeActions) KillSession(s *state.Session) error { return f.rec("kill-session %s", s.ID) }
+
+// dirArg is " -c DIR" for a start directory, nothing for the default.
+func dirArg(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return " -c " + dir
+}

@@ -127,7 +127,7 @@ func TestCreateSessionDuplicate(t *testing.T) {
 func TestNewWindowNamed(t *testing.T) {
 	reset(t)
 	fixture(t, "out-display-message", "/src/proj\n")
-	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, " build "))
+	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, "", " build "))
 	expectCalls(t, tmuxLog,
 		argv("display-message", "-p", "-t", "$2", "#{pane_current_path}"),
 		argv("new-window", "-d", "-t", "$2:", "-c", "/src/proj", "-n", "build"))
@@ -136,7 +136,7 @@ func TestNewWindowNamed(t *testing.T) {
 func TestNewWindowAutomaticName(t *testing.T) {
 	reset(t)
 	fixture(t, "out-display-message", "/src/proj\n")
-	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, ""))
+	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, "", ""))
 	expectCalls(t, tmuxLog,
 		argv("display-message", "-p", "-t", "$2", "#{pane_current_path}"),
 		argv("new-window", "-d", "-t", "$2:", "-c", "/src/proj"))
@@ -145,16 +145,23 @@ func TestNewWindowAutomaticName(t *testing.T) {
 func TestNewWindowNoPathUsesHome(t *testing.T) {
 	reset(t)
 	fixture(t, "out-display-message", "\n")
-	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, ""))
+	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, "", ""))
 	expectCalls(t, tmuxLog,
 		argv("display-message", "-p", "-t", "$2", "#{pane_current_path}"),
 		argv("new-window", "-d", "-t", "$2:", "-c", homeDir))
 }
 
+// A start directory (a worktree root) skips the active pane lookup.
+func TestNewWindowInDir(t *testing.T) {
+	reset(t)
+	expectOK(t, New(client).NewWindow(&state.Session{ID: "$2"}, "/src/wt two", "x"))
+	expectCalls(t, tmuxLog, argv("new-window", "-d", "-t", "$2:", "-c", "/src/wt two", "-n", "x"))
+}
+
 func TestNewWindowReadError(t *testing.T) {
 	reset(t)
 	fixture(t, "fail-display-message", "can't find session: $2\n")
-	expectErr(t, New(client).NewWindow(&state.Session{ID: "$2"}, "x"), "tmux display-message: can't find session: $2")
+	expectErr(t, New(client).NewWindow(&state.Session{ID: "$2"}, "", "x"), "tmux display-message: can't find session: $2")
 	expectCalls(t, tmuxLog, argv("display-message", "-p", "-t", "$2", "#{pane_current_path}"))
 }
 
@@ -162,19 +169,25 @@ func TestNewWindowReadError(t *testing.T) {
 
 func TestNewSession(t *testing.T) {
 	reset(t)
-	expectOK(t, New(client).NewSession("proj"))
+	expectOK(t, New(client).NewSession("proj", ""))
 	expectCalls(t, tmuxLog, argv("new-session", "-d", "-s", "proj", "-c", homeDir))
+}
+
+func TestNewSessionInDir(t *testing.T) {
+	reset(t)
+	expectOK(t, New(client).NewSession("wt", "/src/wt"))
+	expectCalls(t, tmuxLog, argv("new-session", "-d", "-s", "wt", "-c", "/src/wt"))
 }
 
 func TestNewSessionEmptyCancels(t *testing.T) {
 	reset(t)
-	expectOK(t, New(client).NewSession("  "))
+	expectOK(t, New(client).NewSession("  ", ""))
 	expectCalls(t, tmuxLog)
 }
 
 func TestNewSessionRejectsDotted(t *testing.T) {
 	reset(t)
-	expectErr(t, New(client).NewSession("x.y"), "cannot contain")
+	expectErr(t, New(client).NewSession("x.y", ""), "cannot contain")
 	expectCalls(t, tmuxLog)
 }
 

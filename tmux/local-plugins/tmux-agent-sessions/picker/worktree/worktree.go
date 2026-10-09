@@ -18,11 +18,11 @@ package worktree
 import (
 	"bytes"
 	"errors"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Info describes the worktree that holds a directory.
@@ -215,17 +215,32 @@ func repoName(root, common string, viaCommondir bool) string {
 	}
 }
 
-// readSmall reads up to 4 KiB of a file with open+read+close (no fstat)
-// into the resolver's scratch buffer, valid until the next call. .git files,
-// commondir and HEAD are all one short line.
+// readSmall reads up to 4 KiB of a file into the resolver's scratch buffer,
+// valid until the next call. .git files, commondir and HEAD are all one
+// short line. It uses raw open, one read and close: os.Open adds an fstat
+// on darwin and io.ReadFull a second read to see EOF, and syscalls are
+// nearly all of a load's resolve cost.
 func (r *Resolver) readSmall(path string) ([]byte, bool) {
-	f, err := os.Open(path)
+	var fd int
+	var err error
+	for {
+		fd, err = syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+		if err != syscall.EINTR {
+			break
+		}
+	}
 	if err != nil {
 		return nil, false
 	}
-	defer f.Close()
-	n, err := io.ReadFull(f, r.buf)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+	defer syscall.Close(fd)
+	var n int
+	for {
+		n, err = syscall.Read(fd, r.buf)
+		if err != syscall.EINTR {
+			break
+		}
+	}
+	if err != nil || n < 0 {
 		return nil, false
 	}
 	return r.buf[:n], true

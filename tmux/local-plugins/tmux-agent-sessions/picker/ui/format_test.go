@@ -84,7 +84,7 @@ func TestMemLabel(t *testing.T) {
 	}
 	for _, s := range snap.Sessions {
 		if want, ok := tests[s.Name]; ok {
-			if got := memLabel(sessionPanes(s)); got != want {
+			if got := memLabel(s.Members()); got != want {
 				t.Errorf("memLabel(%s) = %q, want %q", s.Name, got, want)
 			}
 		}
@@ -96,7 +96,7 @@ func TestMemLabel(t *testing.T) {
 
 func TestAggregate(t *testing.T) {
 	s := fixture().Sessions[3] // roll-web-funnel-changes
-	got := aggregate(sessionPanes(s), rowOrder)
+	got := aggregate(s.Members(), rowOrder)
 	want := []agg{
 		{state.StateWorking, 1, now - 120},
 		{state.StateDone, 1, now - 40},

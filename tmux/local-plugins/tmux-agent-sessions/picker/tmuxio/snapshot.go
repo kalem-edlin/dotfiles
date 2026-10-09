@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"agentpicker/state"
+	"agentpicker/worktree"
 )
 
 // sep is U+241E. tmux may rewrite control characters in format values, and
@@ -24,8 +25,8 @@ import (
 const sep = "␞"
 
 // fields is the list-panes format, in column order. The first 19 are v1's.
-// The two paths are kept raw (no clean) and sit before a numeric last
-// column, so a path with a line break in it is joined back up by
+// The two paths are kept raw (no clean) and sit before numeric last
+// columns, so a path with a line break in it is joined back up by
 // parseRows like a multi-line command line is.
 var fields = []string{
 	"#{session_id}",
@@ -53,6 +54,7 @@ var fields = []string{
 	"#{pane_current_path}",
 	"#{@agent_cwd}",
 	"#{@pane_focus_at}",
+	"#{session_attached}",
 }
 
 // Column indexes into a row.
@@ -82,6 +84,7 @@ const (
 	fPath
 	fAgentCwd
 	fFocusAt
+	fAttached
 	nFields
 )
 
@@ -243,9 +246,10 @@ func locatePaneMem() (string, error) {
 	return filepath.Join(plugin, "scripts", "pane-mem"), nil
 }
 
-// buildSnapshot turns rows into the session tree. Rules from v1: an agent
-// whose @agent_pid is not alive is no agent; remote panes get no memory and
-// no agent; an unknown agent state reads as idle.
+// buildSnapshot turns rows into the session tree and groups the panes into
+// worktrees. Rules from v1: an agent whose @agent_pid is not alive is no
+// agent; remote panes get no memory and no agent; an unknown agent state
+// reads as idle.
 func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64) *state.Snapshot {
 	current := cl.session
 	snap := &state.Snapshot{CurrentID: current, CurrentPane: cl.pane, Now: now}
@@ -259,6 +263,7 @@ func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64)
 				ID:           f[fSessionID],
 				Name:         clean(f[fSessionName]),
 				LastAttached: atoi64(f[fLastAttached]),
+				Attached:     atoi(f[fAttached]) > 0,
 				Current:      current != "" && f[fSessionID] == current,
 			}
 			sessions[s.ID] = s
@@ -282,39 +287,85 @@ func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64)
 		w.Panes = append(w.Panes, buildPane(f, mem, w))
 	}
 
-	sortSessions(snap)
 	for _, s := range snap.Sessions {
 		sort.SliceStable(s.Windows, func(i, j int) bool { return s.Windows[i].Index < s.Windows[j].Index })
 		for _, w := range s.Windows {
 			sort.SliceStable(w.Panes, func(i, j int) bool { return w.Panes[i].Index < w.Panes[j].Index })
 		}
 	}
+	// Worktrees are grouped in tmux's session order, before the sort, so
+	// their windows and full ties do not depend on agent states.
+	snap.Worktrees = buildWorktrees(snap.Sessions, cl.pane, worktree.NewResolver().Resolve)
+	sortRows(snap.Sessions)
+	sortRows(snap.Worktrees)
 	return snap
 }
 
-// sortSessions orders snap.Sessions for display.
-func sortSessions(snap *state.Snapshot) {
+// buildWorktrees groups panes by the worktree holding their effective
+// directory, resolving each directory once (one resolver per load). Every
+// pane's Worktree is set, nil outside a repository. A window linked into
+// several sessions counts once, under the first session that has it.
+// currentPane's worktree is the current one. The result is in first
+// appearance order, unsorted.
+func buildWorktrees(sessions []*state.Session, currentPane string, resolve func(dir string) (worktree.Info, bool)) []*state.Worktree {
+	var out []*state.Worktree
+	byRoot := map[string]*state.Worktree{}
+	seen := map[string]bool{} // window ids already grouped
+	for _, s := range sessions {
+		for _, w := range s.Windows {
+			first := !seen[w.ID]
+			seen[w.ID] = true
+			for _, p := range w.Panes {
+				info, ok := resolve(p.Dir())
+				if !ok {
+					continue
+				}
+				t := byRoot[info.Root]
+				if t == nil {
+					t = &state.Worktree{Root: info.Root, Repo: info.Repo, Branch: info.Branch, Head: info.Head}
+					byRoot[info.Root] = t
+					out = append(out, t)
+				}
+				p.Worktree = t
+				if currentPane != "" && p.ID == currentPane {
+					t.Current = true
+				}
+				if !first {
+					continue
+				}
+				if n := len(t.Windows); n == 0 || t.Windows[n-1] != w {
+					t.Windows = append(t.Windows, w)
+				}
+				t.Panes = append(t.Panes, p)
+			}
+		}
+	}
+	return out
+}
+
+// sortRows orders rows for display.
+func sortRows[R state.Row](rows []R) {
 	// Top to bottom, so the highest priority sits nearest the cursor at
-	// the bottom: the client's own session last, the others by awaiting
+	// the bottom: the client's own row last, the others by awaiting
 	// agents, then done, then working, then the newest agent state change,
-	// then the latest attach, each higher value lower. Stable, so full ties
-	// keep tmux's order.
+	// then recency (a session's latest attach, a worktree's latest focus),
+	// each higher value lower. Stable, so full ties keep tmux's order.
 	type rank struct {
 		awaiting, done, working int
-		at, attached            int64
+		at, recent              int64
 	}
-	ranks := make(map[*state.Session]rank, len(snap.Sessions))
-	for _, s := range snap.Sessions {
-		r := rank{attached: s.LastAttached}
-		r.awaiting, r.done, r.working, r.at = s.AgentCounts()
-		ranks[s] = r
+	ranks := make(map[string]rank, len(rows))
+	for _, r := range rows {
+		k := rank{recent: r.Recency()}
+		k.awaiting, k.done, k.working, k.at = state.AgentCounts(r.Members())
+		ranks[r.RowID()] = k
 	}
-	sort.SliceStable(snap.Sessions, func(i, j int) bool {
-		a, b := snap.Sessions[i], snap.Sessions[j]
-		if a.Current != b.Current {
-			return b.Current
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.IsCurrent() != b.IsCurrent() {
+			return b.IsCurrent()
 		}
-		x, y := ranks[a], ranks[b]
+		x, y := ranks[a.RowID()], ranks[b.RowID()]
 		switch {
 		case x.awaiting != y.awaiting:
 			return x.awaiting < y.awaiting
@@ -325,7 +376,7 @@ func sortSessions(snap *state.Snapshot) {
 		case x.at != y.at:
 			return x.at < y.at
 		}
-		return x.attached < y.attached
+		return x.recent < y.recent
 	})
 }
 

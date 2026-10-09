@@ -47,7 +47,7 @@ func TestSessionRowSections(t *testing.T) {
 	var agentsCol, memCol = -1, -1
 	for i, s := range fixture().Sessions {
 		r := newSessionRow(s, nil)
-		line := renderSessionRow(r, memW, w, i == 3, now)
+		line := renderRow(r, memW, w, i == 3, now)
 		got := ansi.Strip(line)
 		if width(line) != w {
 			t.Fatalf("row %d is %d columns", i, width(line))
@@ -89,7 +89,7 @@ func TestRowAlignmentAndAgents(t *testing.T) {
 	snap := fixture()
 	rows := map[string]string{}
 	for _, s := range snap.Sessions {
-		rows[s.Name] = ansi.Strip(renderSessionRow(newSessionRow(s, nil), memW, w, false, now))
+		rows[s.Name] = ansi.Strip(renderRow(newSessionRow(s, nil), memW, w, false, now))
 	}
 	botCols := map[int]bool{}
 	for name, r := range rows {
@@ -126,7 +126,7 @@ func TestRowChipOrderAndIcons(t *testing.T) {
 		agent("claude", "d", state.StateAwaiting, 60, 1),
 		agent("pi", "e", state.StateIdle, 30, 1)))
 	r := newSessionRow(s, nil)
-	row := ansi.Strip(renderSessionRow(r, 5, 140, false, now))
+	row := ansi.Strip(renderRow(r, 5, 140, false, now))
 	iw := col(row, "2 "+stateIcon[state.StateWorking]+" 2m")
 	ww := col(row, "1 "+stateIcon[state.StateAwaiting]+" 1m")
 	dw := col(row, "1 "+stateIcon[state.StateDone]+" 10m")
@@ -189,7 +189,7 @@ func TestListShowsSixRows(t *testing.T) {
 // Two columns of half the width each, or one full-width column under 61
 // columns (D41).
 func TestGridColumnsRender(t *testing.T) {
-	cards := buildCards(fixture().Sessions[3])
+	cards := sessionCards(fixture().Sessions[3])
 	for _, tt := range []struct{ w, cols int }{{60, 1}, {61, 2}, {180, 2}} {
 		lines := renderGrid(cards, 0, 0, tt.w, 5, now)
 		top := ansi.Strip(lines[0])
@@ -211,7 +211,7 @@ func TestGridPeek(t *testing.T) {
 	blank := func(l string) bool { return strings.TrimSpace(ansi.Strip(l)) == "" }
 
 	// 9 cards: 5 rows, 3 full and a peek of the 4th.
-	cards := buildCards(manyPanes(9))
+	cards := sessionCards(manyPanes(9))
 	lines := renderGrid(cards, 0, 0, w, 30, now)
 	for r := range 3 {
 		if !isTop(lines[r*5]) || !isBottom(lines[r*5+4]) {
@@ -234,7 +234,7 @@ func TestGridPeek(t *testing.T) {
 	}
 
 	// Exactly 3 rows: no peek.
-	lines = renderGrid(buildCards(manyPanes(6)), 0, 0, w, 30, now)
+	lines = renderGrid(sessionCards(manyPanes(6)), 0, 0, w, 30, now)
 	if !isBottom(lines[14]) || !blank(lines[15]) {
 		t.Errorf("no peek expected with 3 rows: %q", ansi.Strip(lines[15]))
 	}
@@ -348,7 +348,7 @@ func TestCardMemoryPlain(t *testing.T) {
 // card each (D51, D52, D58).
 func TestSplitCards(t *testing.T) {
 	s := fixture().Sessions[3] // funnel
-	cards := buildCards(s)
+	cards := sessionCards(s)
 	if len(cards) != 5 {
 		t.Fatalf("%d cards, want 5", len(cards))
 	}
@@ -393,7 +393,7 @@ func TestSplitCards(t *testing.T) {
 // agent shows the dimmed placeholder (D53, D59).
 func TestCardSubtitles(t *testing.T) {
 	s := fixture().Sessions[3]
-	cards := buildCards(s)
+	cards := sessionCards(s)
 	build := cardContent(cards[3], 56, true, now)
 	if ansi.Strip(build[0]) != "3 build" || ansi.Strip(build[1]) != "zsh" {
 		t.Errorf("no-agent window card: %q %q", ansi.Strip(build[0]), ansi.Strip(build[1]))

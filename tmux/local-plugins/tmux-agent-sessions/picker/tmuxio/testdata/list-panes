@@ -1,15 +1,15 @@
-$1|api|3000|@1|1|editor|1|%2|1|0|102|node||claude|working|fix tests|1799999000|201|2|claude --resume|1799998000|1|/src/api|/src/api wt/feature x|1799999900
-$1|api|3000|@1|1|editor|1|%1|0|1|101|nvim||||||||nvim .|||/src/my proj/a;b 日本||
-$1|api|3000|@2|2|deploy|0|%3|0|1|103|node||pi|awaiting|dead agent|1799999500|202|0||1799999400||/src/api|/stale/dead agent|1799999800
-$1|api|3000|@2|2|deploy|0|%4|1|0|104|node||claude|bogus|weird state|1799999100|203|0||||/src/api||
-$1|api|3000|@3|3|ops|0|%5|0|1|105|node||claude|awaiting|plan|1799999200|204|1|pnpm branch|1799999150||/src/api|/src/api|1799999700
-$1|api|3000|@3|3|ops|0|%6|1|0|106|node||pi|finished|done|1799999300|205|0||1799999250||/src/api||
-$1|api|3000|@3|3|ops|0|%7|2|0|107|zsh||claude||no state|1799999400|206|0||||/src/api||
-$1|api|3000|@10|10|ten|0|%20|0|1|120|zsh|||||||||||/home/u||
-$2|client sess|500|@4|1|main|1|%8|0|1|111|zsh||||||||cat <<X\nline two\nX|||/home/u||1799999950
-$3|mixed|2000|@5|1|local|1|%9|0|1|121|zsh||||||||ls -la|||/home/u||
-$3|mixed|2000|@6|2|remote|0|%10|0|1|122|ssh|box|claude|working|ghost|1799999999|222|3|rw attach|1799999990||/home/u|/remote/cwd|1799999960
-$4|allremote|1500|@7|1|r|1|%11|0|1|131|ssh|box2|||||||rw attach|||/home/u||
-$5|never|0|@8|1|w|1|%12|0|1|141|zsh|||||||||||||
-$6|tab\tname|100|@9|1|win\tdow|1|%13|0|1|151|cmd\rx||claude|working|agent\tna\rme|1799990000|251|0||||/tmp/line\nbreak|/tmp/agent\tcwd|1799990001
-$7|we;ird "n'ame" ✔ 日本 $HOME|1500|@11|1|a b; c|1|%14|0|1|161|zsh||claude|idle|no pid agent|1799990100||0||||/home/u||
+$1|api|3000|@1|1|editor|1|%2|1|0|102|node||claude|working|fix tests|1799999000|201|2|claude --resume|1799998000|1|/src/api|/src/api wt/feature x|1799999900|1
+$1|api|3000|@1|1|editor|1|%1|0|1|101|nvim||||||||nvim .|||/src/my proj/a;b 日本|||1
+$1|api|3000|@2|2|deploy|0|%3|0|1|103|node||pi|awaiting|dead agent|1799999500|202|0||1799999400||/src/api|/stale/dead agent|1799999800|1
+$1|api|3000|@2|2|deploy|0|%4|1|0|104|node||claude|bogus|weird state|1799999100|203|0||||/src/api|||1
+$1|api|3000|@3|3|ops|0|%5|0|1|105|node||claude|awaiting|plan|1799999200|204|1|pnpm branch|1799999150||/src/api|/src/api|1799999700|1
+$1|api|3000|@3|3|ops|0|%6|1|0|106|node||pi|finished|done|1799999300|205|0||1799999250||/src/api|||1
+$1|api|3000|@3|3|ops|0|%7|2|0|107|zsh||claude||no state|1799999400|206|0||||/src/api|||1
+$1|api|3000|@10|10|ten|0|%20|0|1|120|zsh|||||||||||/home/u|||1
+$2|client sess|500|@4|1|main|1|%8|0|1|111|zsh||||||||cat <<X\nline two\nX|||/home/u||1799999950|1
+$3|mixed|2000|@5|1|local|1|%9|0|1|121|zsh||||||||ls -la|||/home/u|||2
+$3|mixed|2000|@6|2|remote|0|%10|0|1|122|ssh|box|claude|working|ghost|1799999999|222|3|rw attach|1799999990||/home/u|/remote/cwd|1799999960|2
+$4|allremote|1500|@7|1|r|1|%11|0|1|131|ssh|box2|||||||rw attach|||/home/u|||0
+$5|never|0|@8|1|w|1|%12|0|1|141|zsh||||||||||||||0
+$6|tab\tname|100|@9|1|win\tdow|1|%13|0|1|151|cmd\rx||claude|working|agent\tna\rme|1799990000|251|0||||/tmp/line\nbreak|/tmp/agent\tcwd|1799990001|0
+$7|we;ird "n'ame" ✔ 日本 $HOME|1500|@11|1|a b; c|1|%14|0|1|161|zsh||claude|idle|no pid agent|1799990100||0||||/home/u|||0

@@ -14,10 +14,13 @@ const (
 // card is one grid cell (D51). A window with two or more agent panes has
 // one split card per agent pane (pane set, split true). Any other window
 // has one window card; its pane is the window's single agent pane, or nil
-// when it has none.
+// when it has none. In worktree mode only member panes count: a window
+// shows when one of its panes is a member, and a member agent pane is the
+// only kind that gets a card or fills pane.
 type card struct {
 	win   *state.Window
 	pane  *state.Pane
+	lead  *state.Pane // the window's first member pane, the subtitle of a card without an agent
 	split bool
 }
 
@@ -29,37 +32,59 @@ func (c card) id() string {
 	return c.win.ID
 }
 
-// agentPanes are the window's panes with a live agent, in pane order.
-func agentPanes(w *state.Window) []*state.Pane {
-	var out []*state.Pane
-	for _, p := range w.Panes {
-		if paneState(p) != state.StateNone {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func buildCards(s *state.Session) []card {
-	if s == nil {
-		return nil
-	}
+// buildCards lays out the cards of windows, counting only the panes member
+// accepts. A window with panes but no member pane gets no card.
+func buildCards(windows []*state.Window, member func(*state.Pane) bool) []card {
 	var out []card
-	for _, w := range s.Windows {
-		agents := agentPanes(w)
+	for _, w := range windows {
+		var lead *state.Pane
+		var agents []*state.Pane
+		for _, p := range w.Panes {
+			if !member(p) {
+				continue
+			}
+			if lead == nil {
+				lead = p
+			}
+			if paneState(p) != state.StateNone {
+				agents = append(agents, p)
+			}
+		}
+		if lead == nil && len(w.Panes) > 0 {
+			continue
+		}
 		if len(agents) >= 2 {
 			for _, p := range agents {
-				out = append(out, card{win: w, pane: p, split: true})
+				out = append(out, card{win: w, pane: p, lead: lead, split: true})
 			}
 			continue
 		}
-		c := card{win: w}
+		c := card{win: w, lead: lead}
 		if len(agents) == 1 {
 			c.pane = agents[0]
 		}
 		out = append(out, c)
 	}
 	return out
+}
+
+func anyPane(*state.Pane) bool { return true }
+
+func sessionCards(s *state.Session) []card { return buildCards(s.Windows, anyPane) }
+
+func worktreeCards(t *state.Worktree) []card {
+	return buildCards(t.Windows, func(p *state.Pane) bool { return p.Worktree == t })
+}
+
+// rowCards is the grid for a list row, nil for none.
+func rowCards(r state.Row) []card {
+	switch r := r.(type) {
+	case *state.Session:
+		return sessionCards(r)
+	case *state.Worktree:
+		return worktreeCards(r)
+	}
+	return nil
 }
 
 // lastFocusedPane is the pane with the newest @pane_focus_at, or nil when
@@ -101,26 +126,33 @@ func activeWindow(s *state.Session) *state.Window {
 	return nil
 }
 
-// defaultPane is the pane the grid starts on: the session's most recently
-// focused pane, else the active window's active pane.
-func defaultPane(s *state.Session) *state.Pane {
-	if p := lastFocusedPane(sessionPanes(s)); p != nil {
+// defaultPane is the pane the grid starts on: the row's most recently
+// focused member pane. Without one, a session falls back to its active
+// window's active pane, and a worktree to a member pane that is active in
+// an active window of an attached session.
+func defaultPane(r state.Row) *state.Pane {
+	if p := lastFocusedPane(r.Members()); p != nil {
 		return p
 	}
-	if w := activeWindow(s); w != nil {
-		return activePane(w)
+	switch r := r.(type) {
+	case *state.Session:
+		if w := activeWindow(r); w != nil {
+			return activePane(w)
+		}
+	case *state.Worktree:
+		for _, p := range r.Panes {
+			if p.Active && p.Window.Active && p.Window.Session.Attached {
+				return p
+			}
+		}
 	}
 	return nil
 }
 
-// defaultCard returns the index in cards of the card holding defaultPane.
-// A pane without a card of its own (a shell beside split agent cards) falls
-// to its window's first card.
-func defaultCard(s *state.Session, cards []card) int {
-	if s == nil {
-		return 0
-	}
-	p := defaultPane(s)
+// defaultCard returns the index in cards of the card holding p, or 0 when
+// p is nil or has no card. A pane without a card of its own (a shell
+// beside split agent cards) falls to its window's first card.
+func defaultCard(cards []card, p *state.Pane) int {
 	if p == nil {
 		return 0
 	}
