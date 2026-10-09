@@ -47,7 +47,7 @@ func TestSessionRowSections(t *testing.T) {
 	var agentsCol, memCol = -1, -1
 	for i, s := range fixture().Sessions {
 		r := newSessionRow(s, nil)
-		line := renderSessionRow(r, memW, w, false, i == 3, now)
+		line := renderSessionRow(r, memW, w, i == 3, now)
 		got := ansi.Strip(line)
 		if width(line) != w {
 			t.Fatalf("row %d is %d columns", i, width(line))
@@ -89,7 +89,7 @@ func TestRowAlignmentAndAgents(t *testing.T) {
 	snap := fixture()
 	rows := map[string]string{}
 	for _, s := range snap.Sessions {
-		rows[s.Name] = ansi.Strip(renderSessionRow(newSessionRow(s, nil), memW, w, false, false, now))
+		rows[s.Name] = ansi.Strip(renderSessionRow(newSessionRow(s, nil), memW, w, false, now))
 	}
 	botCols := map[int]bool{}
 	for name, r := range rows {
@@ -101,7 +101,7 @@ func TestRowAlignmentAndAgents(t *testing.T) {
 	if len(botCols) != 1 {
 		t.Errorf("agents glyph at different columns: %v", botCols)
 	}
-	if got := rows["infra"]; !strings.Contains(got, " "+botIcon+" 0      ") || strings.Contains(got, "Working") {
+	if got := rows["infra"]; !strings.Contains(got, " "+botIcon+" 0      ") || strings.Contains(got, stateIcon[state.StateWorking]) {
 		t.Errorf("no-agent row: %q", got)
 	}
 	// funnel: 3 agents (working 120s, done 40s, idle 2d); newest change 40s.
@@ -117,7 +117,7 @@ func TestRowAlignmentAndAgents(t *testing.T) {
 }
 
 // Chips go Working, Awaiting, Done, only when the count is above zero; no
-// Idle chip on rows. ctrl+w switches the words for icons (D55, D57).
+// Idle chip on rows. Row chips show icons (D55).
 func TestRowChipOrderAndIcons(t *testing.T) {
 	s := sess("$7", "mix", now, win(1, "a", true,
 		active(agent("claude", "a", state.StateDone, 600, 1)),
@@ -126,46 +126,23 @@ func TestRowChipOrderAndIcons(t *testing.T) {
 		agent("claude", "d", state.StateAwaiting, 60, 1),
 		agent("pi", "e", state.StateIdle, 30, 1)))
 	r := newSessionRow(s, nil)
-	words := ansi.Strip(renderSessionRow(r, 5, 140, false, false, now))
-	iw, ww, dw := col(words, "2 Working 2m"), col(words, "1 Awaiting 1m"), col(words, "1 Done 10m")
+	row := ansi.Strip(renderSessionRow(r, 5, 140, false, now))
+	iw := col(row, "2 "+stateIcon[state.StateWorking]+" 2m")
+	ww := col(row, "1 "+stateIcon[state.StateAwaiting]+" 1m")
+	dw := col(row, "1 "+stateIcon[state.StateDone]+" 10m")
 	if iw < 0 || ww < iw || dw < ww {
-		t.Errorf("chip order wrong (working %d awaiting %d done %d): %q", iw, ww, dw, words)
+		t.Errorf("chip order wrong (working %d awaiting %d done %d): %q", iw, ww, dw, row)
 	}
-	if strings.Contains(words, "Idle") || strings.Contains(words, stateIcon[state.StateIdle]) {
-		t.Errorf("idle chip on a row: %q", words)
+	if strings.Contains(row, "Working") || strings.Contains(row, "Idle") || strings.Contains(row, stateIcon[state.StateIdle]) {
+		t.Errorf("word or idle chip on a row: %q", row)
 	}
-	if !strings.Contains(words, " "+botIcon+" 5 30s") {
-		t.Errorf("agents section: %q", words)
-	}
-	icons := ansi.Strip(renderSessionRow(r, 5, 140, true, false, now))
-	if !strings.Contains(icons, "2 "+stateIcon[state.StateWorking]+" 2m") ||
-		!strings.Contains(icons, "1 "+stateIcon[state.StateAwaiting]+" 1m") ||
-		!strings.Contains(icons, "1 "+stateIcon[state.StateDone]+" 10m") || strings.Contains(icons, "Working") {
-		t.Errorf("icon chips: %q", icons)
+	if !strings.Contains(row, " "+botIcon+" 5 30s") {
+		t.Errorf("agents section: %q", row)
 	}
 	// Zero counts are omitted.
 	only := newSessionRow(sess("$8", "one", now, win(1, "a", true, active(agent("claude", "a", state.StateDone, 60, 1)))), nil)
 	if len(only.chips) != 1 || only.chips[0].state != state.StateDone {
 		t.Errorf("chips = %+v", only.chips)
-	}
-}
-
-// ctrl+w toggles the row chips between words and icons for the run, and is
-// not word-delete in the query.
-func TestCtrlWTogglesChips(t *testing.T) {
-	m, _ := newTest(t)
-	m = send(t, m, "x", "ctrl+w")
-	if !m.chipIcons || m.query.Value() != "x" {
-		t.Fatalf("chipIcons=%v query=%q", m.chipIcons, m.query.Value())
-	}
-	m = send(t, m, "backspace")
-	list := ansi.Strip(strings.Join(m.renderList(), "\n"))
-	if strings.Contains(list, "Working") || !strings.Contains(list, stateIcon[state.StateWorking]) {
-		t.Errorf("icons expected:\n%s", list)
-	}
-	m = send(t, m, "ctrl+w")
-	if m.chipIcons || !strings.Contains(ansi.Strip(strings.Join(m.renderList(), "\n")), "Working") {
-		t.Error("second ctrl+w should restore words")
 	}
 }
 
@@ -271,7 +248,7 @@ func TestGridPeek(t *testing.T) {
 	// The model never leaves the selection in the peek.
 	m := resize(newModel(&fakeActions{}, &state.Snapshot{Sessions: []*state.Session{manyPanes(9)}, Now: now}, nil), w, 45)
 	m.sel, m.gridTop = 0, 0
-	m = send(t, m, "ctrl+d", "ctrl+d", "ctrl+d") // row 3, the peek row at top 0
+	m = send(t, m, "ctrl+j", "ctrl+j", "ctrl+j") // row 3, the peek row at top 0
 	if m.gridTop != 1 {
 		t.Errorf("gridTop = %d, want 1", m.gridTop)
 	}
@@ -329,8 +306,7 @@ func TestChipColours(t *testing.T) {
 		state.StateIdle:     "#4a4d5c",
 	}
 	for st, b := range want {
-		c := aggChip(agg{state: st, count: 2, at: now - 300}, now, false, true)
-		icon := aggChip(agg{state: st, count: 2, at: now - 300}, now, true, true)
+		c := aggChip(agg{state: st, count: 2, at: now - 300}, now, true)
 		for _, part := range []string{fg(text[st]), fg(age[st]), bg(b)} {
 			if !strings.Contains(c, part) {
 				t.Errorf("%s chip lacks %s: %q", st, part, c)
@@ -339,16 +315,13 @@ func TestChipColours(t *testing.T) {
 		if strings.Contains(c, fg("#ffffff")) {
 			t.Errorf("%s chip has white text", st)
 		}
-		if !strings.Contains(icon, fg(text[st])) || !strings.Contains(icon, fg(age[st])) {
-			t.Errorf("%s icon chip lacks the text or age colour: %q", st, icon)
-		}
 		p := agent("claude", "x", st, 300, 1)
 		if s := statusChip(p, now, true); !strings.Contains(s, fg(text[st])) || !strings.Contains(s, fg(age[st])) ||
 			strings.Contains(s, fg(cBase)) {
 			t.Errorf("%s card chip: %q", st, s)
 		}
 		// Without an age there is no dim part.
-		if c := aggChip(agg{state: st, count: 1}, now, false, true); strings.Contains(c, fg(age[st])) {
+		if c := aggChip(agg{state: st, count: 1}, now, true); strings.Contains(c, fg(age[st])) {
 			t.Errorf("%s chip without age has an age colour", st)
 		}
 	}

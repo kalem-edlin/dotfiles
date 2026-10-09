@@ -31,21 +31,9 @@ func statusChip(p *state.Pane, now int64, selected bool) string {
 	return stateChip(runtimeLabel(p.AgentKind)+" "+stateIcon[st], fmtAge(now, stateAt(p)), st, selected)
 }
 
-// rowChipLabel is the word on a row's status chip (D57).
-var rowChipLabel = map[state.State]string{
-	state.StateWorking:  "Working",
-	state.StateAwaiting: "Awaiting",
-	state.StateDone:     "Done",
-}
-
-// aggChip is a row's status chip: `2 Working 5m`, or `2 <icon> 5m` when
-// icons is set.
-func aggChip(a agg, now int64, icons, selected bool) string {
-	label := rowChipLabel[a.state]
-	if icons || label == "" {
-		label = stateIcon[a.state]
-	}
-	return stateChip(fmt.Sprintf("%d %s", a.count, label), fmtAge(now, a.at), a.state, selected)
+// aggChip is a row's status chip: `2 <icon> 5m`.
+func aggChip(a agg, now int64, selected bool) string {
+	return stateChip(fmt.Sprintf("%d %s", a.count, stateIcon[a.state]), fmtAge(now, a.at), a.state, selected)
 }
 
 // Fixed widths of a row's agents section and the separator around it.
@@ -342,9 +330,8 @@ func highlightName(name string, pos []int, fg, bg string, bold bool) string {
 // the left, then three sections pushed to the right edge, divided by thin
 // rules (D55): the status chips (the only variable width), the agents
 // section and the memory, both of fixed width so they line up on every
-// row. A long name is truncated before chips are dropped. icons shows the
-// chips as icons instead of words (D57).
-func renderSessionRow(r sessionRow, memW, w int, icons, selected bool, now int64) string {
+// row. A long name is truncated before chips are dropped.
+func renderSessionRow(r sessionRow, memW, w int, selected bool, now int64) string {
 	bg := panelBg
 	if selected {
 		bg = selectBg
@@ -358,7 +345,7 @@ func renderSessionRow(r sessionRow, memW, w int, icons, selected bool, now int64
 
 	chips := make([]string, len(r.chips))
 	for i, a := range r.chips {
-		chips[i] = aggChip(a, now, icons, true)
+		chips[i] = aggChip(a, now, true)
 	}
 	chipsW := func(n int) int {
 		total := max(0, n-1)

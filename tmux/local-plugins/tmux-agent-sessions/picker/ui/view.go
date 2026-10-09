@@ -45,7 +45,7 @@ func (m model) renderList() []string {
 	}
 	for i := first; i < first+shown; i++ {
 		s := m.snap.Sessions[m.matches[i]]
-		out = append(out, renderSessionRow(newSessionRow(s, m.pos[i]), memW, m.w, m.chipIcons, i == m.cur, m.snap.Now))
+		out = append(out, renderSessionRow(newSessionRow(s, m.pos[i]), memW, m.w, i == m.cur, m.snap.Now))
 	}
 	return out
 }

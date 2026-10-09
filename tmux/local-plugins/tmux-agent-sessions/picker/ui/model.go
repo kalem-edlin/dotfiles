@@ -59,10 +59,9 @@ type model struct {
 	cur     int     // cursor in matches
 	top     int     // first visible match when more match than the list shows
 
-	chipIcons bool // ctrl+w: row status chips show icons, not words (D57)
-	cards     []card
-	sel       int // selected card
-	gridTop   int // first visible grid row
+	cards   []card
+	sel     int // selected card
+	gridTop int // first visible grid row
 
 	armed     bool
 	pending   promptKind
@@ -100,7 +99,8 @@ func newModel(a state.Actions, snap *state.Snapshot, err error) model {
 
 // newInput is a textinput whose keymap leaves the picker's control keys
 // alone: typing, backspace, delete, left/right, home/end and word moves
-// still edit. Prompts (rename, new window, new session) have no picker
+// still edit. The query drops ctrl-h from backspace, since the grid uses
+// it. Prompts (rename, new window, new session) have no picker
 // keys to protect, so they also get ctrl-u, ctrl-w, ctrl-a and ctrl-k as in
 // tmux's own command prompt, which is how a prefilled name gets cleared.
 func newInput(prompt bool) textinput.Model {
@@ -109,6 +109,7 @@ func newInput(prompt bool) textinput.Model {
 	km := textinput.DefaultKeyMap()
 	none := key.NewBinding(key.WithDisabled())
 	km.DeleteWordBackward = key.NewBinding(key.WithKeys("alt+backspace", "ctrl+backspace"))
+	km.DeleteCharacterBackward = key.NewBinding(key.WithKeys("backspace"))
 	km.DeleteAfterCursor = none
 	km.DeleteBeforeCursor = none
 	km.DeleteCharacterForward = key.NewBinding(key.WithKeys("delete"))
@@ -118,6 +119,7 @@ func newInput(prompt bool) textinput.Model {
 	km.NextSuggestion = none
 	km.PrevSuggestion = none
 	if prompt {
+		km.DeleteCharacterBackward = key.NewBinding(key.WithKeys("backspace", "ctrl+h"))
 		km.DeleteWordBackward = key.NewBinding(key.WithKeys("alt+backspace", "ctrl+backspace", "ctrl+w"))
 		km.DeleteBeforeCursor = key.NewBinding(key.WithKeys("ctrl+u"))
 		km.DeleteAfterCursor = key.NewBinding(key.WithKeys("ctrl+k"))
@@ -243,16 +245,23 @@ func (m *model) moveSession(d int) {
 	m.resetCards()
 }
 
-func (m *model) moveCard(d int) {
+// moveCardCol moves one card left or right within its grid row, stopping
+// at the row's edges.
+func (m *model) moveCardCol(d int) {
 	if len(m.cards) == 0 {
 		return
 	}
-	m.sel = min(max(m.sel+d, 0), len(m.cards)-1)
+	cols := gridCols(m.w)
+	c, i := m.sel%cols+d, m.sel+d
+	if c < 0 || c >= cols || i >= len(m.cards) {
+		return
+	}
+	m.sel = i
 	m.gridFollow()
 }
 
 // moveCardRow moves one grid row, keeping the column; on a short last row
-// it lands on the last card (D30).
+// it lands on the last card (D30). It stops at the top and bottom rows.
 func (m *model) moveCardRow(d int) {
 	if len(m.cards) == 0 {
 		return
@@ -325,16 +334,14 @@ func (m model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.moveSession(1)
 	case "ctrl+p", "up":
 		m.moveSession(-1)
+	case "ctrl+h":
+		m.moveCardCol(-1)
+	case "ctrl+l":
+		m.moveCardCol(1)
 	case "ctrl+j":
-		m.moveCard(1)
-	case "ctrl+k":
-		m.moveCard(-1)
-	case "ctrl+d":
 		m.moveCardRow(1)
-	case "ctrl+u":
+	case "ctrl+k":
 		m.moveCardRow(-1)
-	case "ctrl+w":
-		m.chipIcons = !m.chipIcons
 	case "enter":
 		return m, m.enter()
 	default:

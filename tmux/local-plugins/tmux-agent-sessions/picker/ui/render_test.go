@@ -64,7 +64,7 @@ func TestGoldenSessionRows(t *testing.T) {
 		var lines []string
 		for i, s := range snap.Sessions {
 			_, pos := m.match("roll", s.Name)
-			lines = append(lines, renderSessionRow(newSessionRow(s, pos), 11, w, false, i == 3, now))
+			lines = append(lines, renderSessionRow(newSessionRow(s, pos), 11, w, i == 3, now))
 		}
 		lines = append(lines, renderEmptyRow(w))
 		checkWidths(t, "rows", lines, w)
@@ -109,22 +109,17 @@ func TestGoldenInputLine(t *testing.T) {
 }
 
 // TestGoldenScreen renders the whole picker at 120x36 with the cursor on
-// roll-web-funnel-changes, with word chips and then icon chips.
+// roll-web-funnel-changes.
 func TestGoldenScreen(t *testing.T) {
 	m := newModel(&fakeActions{}, fixture(), nil)
 	m = resize(m, 120, 36)
 	m = send(t, m, "ctrl+p")
-	words := strings.Split(m.render(), "\n")
-	if len(words) != 36 {
-		t.Fatalf("screen has %d lines", len(words))
+	lines := strings.Split(m.render(), "\n")
+	if len(lines) != 36 {
+		t.Fatalf("screen has %d lines", len(lines))
 	}
-	checkWidths(t, "screen", words, 120)
-	golden(t, "screen_120x36", plain(words))
-
-	m = send(t, m, "ctrl+w")
-	icons := strings.Split(m.render(), "\n")
-	checkWidths(t, "screen", icons, 120)
-	golden(t, "screen_icons_120x36", plain(icons))
+	checkWidths(t, "screen", lines, 120)
+	golden(t, "screen_120x36", plain(lines))
 }
 
 // 13 rows leave 4 for the grid (6 list rows, 2 rules, the input line):

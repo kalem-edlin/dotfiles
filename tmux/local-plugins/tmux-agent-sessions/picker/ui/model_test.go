@@ -120,37 +120,40 @@ func TestD15Default(t *testing.T) {
 	}
 }
 
-func TestCardStepping(t *testing.T) {
+// ctrl+h/l move within a grid row and ctrl+j/k between rows keeping the
+// column, all stopping at the grid's edges.
+func TestCardSpatialMoves(t *testing.T) {
 	m, _ := newTest(t)
-	m = send(t, m, "ctrl+p") // funnel: 5 cards, 2 columns at 120
+	m = send(t, m, "ctrl+p") // funnel: 5 cards, 2 columns at 120: [0 1] [2 3] [4]
 	m.sel = 0
-	m = send(t, m, "ctrl+k") // clamps at the first card
+	steps := []struct {
+		key  string
+		want int
+	}{
+		{"ctrl+h", 0}, // left edge
+		{"ctrl+k", 0}, // top row
+		{"ctrl+l", 1},
+		{"ctrl+l", 1}, // right edge: no wrap to the next row
+		{"ctrl+j", 3}, // same column
+		{"ctrl+h", 2},
+		{"ctrl+h", 2},
+		{"ctrl+l", 3},
+		{"ctrl+j", 4}, // short last row: its last card
+		{"ctrl+j", 4}, // bottom row
+		{"ctrl+l", 4}, // no card to the right
+		{"ctrl+k", 2}, // back up in column 0
+		{"ctrl+k", 0},
+	}
+	for i, st := range steps {
+		m = send(t, m, st.key)
+		if m.sel != st.want {
+			t.Fatalf("step %d %s: sel = %d, want %d", i+1, st.key, m.sel, st.want)
+		}
+	}
+	// ctrl+d and ctrl+u no longer move.
+	m = send(t, m, "ctrl+d", "ctrl+u")
 	if m.sel != 0 {
-		t.Errorf("ctrl+k at start = %d", m.sel)
-	}
-	m = send(t, m, "ctrl+j", "ctrl+j") // wraps to row 2
-	if m.sel != 2 {
-		t.Errorf("ctrl+j x2 = %d", m.sel)
-	}
-	m = send(t, m, "ctrl+k")
-	if m.sel != 1 {
-		t.Errorf("ctrl+k back over the row edge = %d", m.sel)
-	}
-	m = send(t, m, "ctrl+d", "ctrl+d") // same column, next rows; the last row has one card
-	if m.sel != 4 {
-		t.Errorf("ctrl+d x2 = %d", m.sel)
-	}
-	m = send(t, m, "ctrl+d") // last row: no move
-	if m.sel != 4 {
-		t.Errorf("ctrl+d on last row = %d", m.sel)
-	}
-	m = send(t, m, "ctrl+u", "ctrl+u")
-	if m.sel != 0 {
-		t.Errorf("ctrl+u x2 = %d", m.sel)
-	}
-	m = send(t, m, "ctrl+j", "ctrl+j", "ctrl+j", "ctrl+j", "ctrl+j")
-	if m.sel != 4 {
-		t.Errorf("ctrl+j clamps at the last card: %d", m.sel)
+		t.Errorf("ctrl+d/u moved to %d", m.sel)
 	}
 }
 
@@ -161,27 +164,47 @@ func TestCardRowToShortRow(t *testing.T) {
 	m := resize(newModel(&fakeActions{}, snap, nil), 120, 36)
 	m = send(t, m, "ctrl+p") // 3 cards (2 split + notes): rows [0 1] [2]
 	m.sel = 1
-	m = send(t, m, "ctrl+d")
+	m = send(t, m, "ctrl+j")
 	if m.sel != 2 {
-		t.Errorf("ctrl+d onto the short row = %d", m.sel)
+		t.Errorf("ctrl+j onto the short row = %d", m.sel)
 	}
-	m = send(t, m, "ctrl+d")
+	m = send(t, m, "ctrl+j")
 	if m.sel != 2 {
-		t.Errorf("ctrl+d on the last row = %d", m.sel)
+		t.Errorf("ctrl+j on the last row = %d", m.sel)
 	}
 	funnel.Windows = funnel.Windows[:1] // 2 split cards, one row
 	m = resize(newModel(&fakeActions{}, snap, nil), 120, 36)
 	m = send(t, m, "ctrl+p")
 	m.sel = 1
-	m = send(t, m, "ctrl+d")
+	m = send(t, m, "ctrl+j")
 	if m.sel != 1 {
-		t.Errorf("ctrl+d with one row = %d", m.sel)
+		t.Errorf("ctrl+j with one row = %d", m.sel)
 	}
 	m = resize(m, 60, 36) // 1 column: rows [0] [1]
 	m.sel = 0
-	m = send(t, m, "ctrl+d")
+	m = send(t, m, "ctrl+l")
+	if m.sel != 0 {
+		t.Errorf("ctrl+l in one column = %d", m.sel)
+	}
+	m = send(t, m, "ctrl+j")
 	if m.sel != 1 {
-		t.Errorf("ctrl+d in one column = %d", m.sel)
+		t.Errorf("ctrl+j in one column = %d", m.sel)
+	}
+}
+
+// ctrl+h moves the card selection and leaves the query alone; backspace
+// still deletes.
+func TestCtrlHIsNotBackspace(t *testing.T) {
+	m, _ := newTest(t)
+	m = send(t, m, "r", "o", "l", "l") // the cursor goes to funnel, the bottom match
+	m.sel = 1
+	m = send(t, m, "ctrl+h")
+	if m.query.Value() != "roll" || m.sel != 0 {
+		t.Errorf("ctrl+h: query=%q sel=%d", m.query.Value(), m.sel)
+	}
+	m = send(t, m, "backspace")
+	if m.query.Value() != "rol" {
+		t.Errorf("backspace: query=%q", m.query.Value())
 	}
 }
 
@@ -217,7 +240,7 @@ func TestPrefixArmDisarm(t *testing.T) {
 		t.Errorf("C-a x: armed=%v query=%q", m.armed, m.query.Value())
 	}
 	m = send(t, m, "backspace", "ctrl+p", "ctrl+p", "ctrl+a", "ctrl+j") // disarms and moves
-	if m.armed || m.sel != 2 {
+	if m.armed || m.sel != 3 {
 		t.Errorf("C-a ctrl+j: armed=%v sel=%d", m.armed, m.sel)
 	}
 	m = send(t, m, "q") // not armed: types
@@ -345,8 +368,8 @@ func TestKillSessionConfirm(t *testing.T) {
 
 func TestKillPaneAndWindow(t *testing.T) {
 	m, f := newTest(t)
-	m = send(t, m, "ctrl+p", "ctrl+a", "q") // split card: the pane
-	m = send(t, m, "ctrl+j", "ctrl+a", "q") // window card (notes): the window
+	m = send(t, m, "ctrl+p", "ctrl+a", "q")           // split card: the pane
+	m = send(t, m, "ctrl+j", "ctrl+h", "ctrl+a", "q") // window card (notes): the window
 	want := []string{"kill-pane %special-feature-flags.2", "kill-window $4@w2-notes"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("calls = %v", f.calls)
@@ -355,7 +378,7 @@ func TestKillPaneAndWindow(t *testing.T) {
 
 func TestReloadKeepsSelection(t *testing.T) {
 	m, f := newTest(t)
-	m = send(t, m, "ctrl+p", "ctrl+j", "ctrl+j") // funnel, window card 3 build
+	m = send(t, m, "ctrl+p", "ctrl+j") // funnel, window card 3 build
 	if cardID(m) != "$4@w3-build" {
 		t.Fatalf("setup = %q", cardID(m))
 	}
@@ -423,8 +446,7 @@ func TestFallbackSize(t *testing.T) {
 	}
 }
 
-// A prefilled prompt clears with ctrl-u, as in tmux's own rename prompt,
-// while the query keeps ctrl-u for moving a card row.
+// A prefilled prompt clears with ctrl-u, as in tmux's own rename prompt.
 func TestPromptEditingKeys(t *testing.T) {
 	m, f := newTest(t)
 	m = send(t, m, "ctrl+p", "ctrl+a", "r", "ctrl+u", "Z", "enter")
