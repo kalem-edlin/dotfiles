@@ -334,8 +334,8 @@ no_marker_state="$(join if -F -t "$PANE" "$SUBS_GT0" "$(st working)" \
 no_marker_call="$(join "$CWD_W" \; "$no_marker_state")"
 
 hook Stop "$FIXTURES/stop-marker.json"
-assert_calls "Stop with marker: subs>0 working, else awaiting" \
-  "$(join "$CWD_W" \; if -F -t "$PANE" "$SUBS_GT0" "$(st working)" "$(st awaiting)")"
+assert_calls "Stop with marker: awaiting, whatever the subagent count" \
+  "$(join "$CWD_W" \; "$(state_calls awaiting)")"
 
 hook Stop "$FIXTURES/stop-plain.json"
 assert_calls "Stop without marker: subs>0 working, else visible idle / finished" "$no_marker_call"
@@ -419,8 +419,8 @@ hook Stop "$FIXTURES/stop-plain.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
 assert_calls "Stop with a background shell under the agent publishes working" \
   "$read_call" "$(join "$CWD_W" \; "$(state_calls working)")"
 hook Stop "$FIXTURES/stop-marker.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
-assert_calls "Stop with a background shell and the marker still publishes working" \
-  "$read_call" "$(join "$CWD_W" \; "$(state_calls working)")"
+assert_calls "Stop with a background shell and the marker publishes awaiting without a ps read" \
+  "$(join "$CWD_W" \; "$(state_calls awaiting)")"
 hook Notification "$FIXTURES/notification-idle-prompt.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
 assert_calls "idle_prompt with a background shell changes nothing" "$read_call"
 
@@ -429,6 +429,30 @@ assert_calls "Stop: other children and another parent's shell are ignored" "$rea
 hook Notification "$FIXTURES/notification-idle-prompt.json" AGENT_STATE_TEST_PS="$scratch/ps-other"
 assert_calls "idle_prompt: other children and another parent's shell are ignored" "$read_call" \
   "$(join if -F -t "$PANE" '#{&&:#{==:#{@agent_state},working},#{==:#{e|>|:#{@agent_subs},0},0}}' "$(st idle)")"
+
+# --- background_tasks (Stop, Claude Code 2.1.29x) -------------------------------------
+
+# With the list present the counter is resynced from it and the ps scan is skipped
+# (no display-message read), even when a shell-snapshots process exists.
+subs_w() { join set -p -t "$PANE" @agent_subs "$1"; }
+hook Stop "$FIXTURES/stop-tasks-subagent.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
+assert_calls "Stop with in-flight subagents and the marker: subs resynced, awaiting wins, no ps read" \
+  "$(join "$CWD_W" \; "$(subs_w 2)" \; "$(state_calls awaiting)")"
+hook Stop "$FIXTURES/stop-tasks-subagent-plain.json" AGENT_STATE_TEST_PS="$scratch/ps-match"
+assert_calls "Stop with in-flight subagents and no marker: subs resynced, working, no ps read" \
+  "$(join "$CWD_W" \; "$(subs_w 2)" \; "$(state_calls working)")"
+hook Stop "$FIXTURES/stop-tasks-shell.json" AGENT_STATE_TEST_PS="$scratch/ps-other"
+assert_calls "Stop with a background shell task and the marker: subs 0, awaiting" \
+  "$(join "$CWD_W" \; "$(subs_w 0)" \; "$(state_calls awaiting)")"
+hook Stop "$FIXTURES/stop-tasks-shell-plain.json" AGENT_STATE_TEST_PS="$scratch/ps-other"
+assert_calls "Stop with a background shell task and no marker: subs 0, working" \
+  "$(join "$CWD_W" \; "$(subs_w 0)" \; "$(state_calls working)")"
+hook Stop "$FIXTURES/stop-tasks-empty-marker.json"
+assert_calls "Stop with no tasks and the marker: subs 0, awaiting without a counter check" \
+  "$(join "$CWD_W" \; "$(subs_w 0)" \; "$(state_calls awaiting)")"
+hook Stop "$FIXTURES/stop-tasks-empty-plain.json"
+assert_calls "Stop with only finished tasks and no marker: subs 0, visible idle / finished" \
+  "$(join "$CWD_W" \; "$(subs_w 0)" \; if -F -t "$PANE" "$VISIBLE" "$(st idle)" "$(st finished)")"
 
 # --- @agent_cwd -----------------------------------------------------------------------
 

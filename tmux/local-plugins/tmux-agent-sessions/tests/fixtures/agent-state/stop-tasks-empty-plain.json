@@ -1,0 +1,1 @@
+{"session_id":"s","transcript_path":"","cwd":"/tmp","hook_event_name":"Stop","stop_hook_active":false,"last_assistant_message":"Done.","background_tasks":[{"id":"a2","type":"subagent","status":"completed","description":"Finished earlier","agent_type":"general-purpose"}],"session_crons":[]}

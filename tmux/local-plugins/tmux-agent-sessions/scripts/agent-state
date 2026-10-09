@@ -285,13 +285,28 @@ case "$event" in
     run
     ;;
   Stop)
+    # background_tasks (Claude Code 2.1.29x) lists the session's in-flight
+    # background work: subagents, background shells, monitors, workflows. It is
+    # the authoritative signal. The SubagentStart/SubagentStop counter drifts:
+    # a subagent resumed with SendMessage fires SubagentStop again at its next
+    # stop but no SubagentStart, so @agent_subs is resynced from this list on
+    # every Stop. Without the field (older Claude) the counter and the ps scan
+    # for background shells decide as before.
     fields="$(jq_get '
+      def inflight: select((.status // "" | tostring | ascii_downcase)
+        | IN("completed", "failed", "killed", "cancelled", "canceled", "stopped", "done") | not);
       (.last_assistant_message // "" | tostring | split("\n")
         | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | last // "")
         as $last
       | (if $last == "Awaiting your input." then "1" else "0" end),
-        (.cwd // "" | path_ok), (.transcript_path // "" | tostring)')" || exit 0
-    { IFS= read -r marker; IFS= read -r cwd; IFS= read -r transcript; } <<<"$fields"
+        (.cwd // "" | path_ok), (.transcript_path // "" | tostring),
+        (if (.background_tasks | type) == "array" then "1" else "0" end),
+        ([.background_tasks[]? | objects | inflight] | length),
+        ([.background_tasks[]? | objects | select(.type == "subagent") | inflight] | length)')" || exit 0
+    {
+      IFS= read -r marker; IFS= read -r cwd; IFS= read -r transcript
+      IFS= read -r has_tasks; IFS= read -r inflight; IFS= read -r sub_tasks
+    } <<<"$fields"
     add_cwd "$cwd"
 
     # Name only, from the transcript title; without one the name is kept.
@@ -299,10 +314,22 @@ case "$event" in
       add set -p -t "$pane" @agent_name "$REPLY"
     fi
 
-    if bg_shells; then
-      add_state working # like subs>0: Working wins over the marker
+    # The marker wins over in-flight background work: a reply that needs the
+    # user is actionable now, whatever subagents or shells are still running.
+    # Without the marker, in-flight work keeps the pane Working.
+    if [ "$has_tasks" = 1 ]; then
+      add set -p -t "$pane" @agent_subs "${sub_tasks:-0}"
+      if [ "$marker" = 1 ]; then
+        add_state awaiting
+      elif [ "${inflight:-0}" -gt 0 ]; then
+        add_state working
+      else
+        add if -F -t "$pane" "$VISIBLE" "$(state_str idle)" "$(state_str finished)"
+      fi
     elif [ "$marker" = 1 ]; then
-      add if -F -t "$pane" "$SUBS_GT0" "$(state_str working)" "$(state_str awaiting)"
+      add_state awaiting
+    elif bg_shells; then
+      add_state working
     else
       add if -F -t "$pane" "$SUBS_GT0" "$(state_str working)" \
         "if -F -t $pane '$VISIBLE' '$(state_str idle)' '$(state_str finished)'"
