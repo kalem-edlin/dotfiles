@@ -4,7 +4,7 @@ The tmux agent sessions picker is complete. It replaces the sessionx popup behin
 
 The plugin directory has no README of its own, so this note is the reference for its files, options and keys.
 
-The full planning history (user intent, findings, decisions D1-D70) is in commit 44c0a44, `docs/tasks/sessionx-improvements.md`, removed after this note replaced it. Decisions D71-D81 come from the worktree mode build (commits 6dc081b to be1fdea, 2026-10-08). Its plan was never committed, so this note is their only record.
+The full planning history (user intent, findings, decisions D1-D70) is in commit 44c0a44, `docs/tasks/sessionx-improvements.md`, removed after this note replaced it. Decisions D71-D83 come from the worktree mode build (commits 6dc081b to be1fdea, 2026-10-08). Its plan was never committed, so this note is their only record.
 
 ## Why it exists
 
@@ -55,13 +55,13 @@ Pane options are written only by the publishers and the focus hook.
 | `@agent_kind` | publisher at session start | `claude` or `pi` |
 | `@agent_pid` | publisher at session start | The agent process. The picker treats a dead pid as no agent |
 | `@agent_state` | publisher, focus hook | `idle`, `working`, `awaiting` or `finished` (shown as Done) |
-| `@agent_at` | publisher on every transition except the focus-to-Idle one | Epoch of the last agent event. Fallback for `@agent_state_at` in row ordering, so a visit must not move it. It no longer picks the initial card (D79) |
+| `@agent_at` | publisher on every transition except the focus-to-Idle one | Epoch of the last agent event. Fallback for `@agent_state_at` in chip and agent ages, so a visit must not move it. It no longer orders rows or picks the initial card (D79) |
 | `@agent_state_at` | publisher, focus hook | Epoch when the current state began. A repeat of the same state keeps the stamp. Drives the age shown on chips |
 | `@agent_name` | publisher | Session title (see Titles) |
 | `@agent_subs` | publisher | Running subagent count. Reset to 0 at session start. pi publishes its running `/sub` count |
 | `@agent_empty` | publisher | `1` from session start (startup, `/new`, `/clear`) while the chat has no prompt. Unset on the first prompt, on resume and on compaction |
 | `@agent_cwd` | publisher | The agent's own working directory (D73). Claude writes the hook input's `cwd` at `SessionStart`, `UserPromptSubmit` and `Stop`, and `new_cwd` on `CwdChanged`. pi writes `ctx.cwd` at `session_start` only, since it is fixed per process. Worktree mode uses it in place of the pane directory |
-| `@pane_focus_at` | focus hook | Epoch when the pane last gained focus, on every pane, agent or not (D74). Picks the initial card in both modes and is a worktree's last ordering key |
+| `@pane_focus_at` | focus hook | Epoch when the pane last gained focus, on every pane, agent or not (D74). Picks the initial card in both modes and is the row ordering key: a row's last access is the newest stamp among its panes (sessions also count `session_last_attached`). Stamps are per pane, so a window shared by several worktrees only refreshes the focused pane's worktree |
 
 Rules for the publishers:
 
@@ -80,7 +80,7 @@ The four states and what the user means by them:
 
 | State | Meaning |
 |---|---|
-| Working | Running or processing, or subagents or background shells still running |
+| Working | Running or processing, or subagents or background shells still running and the last reply did not end with the marker |
 | Awaiting | The agent is waiting for a human answer |
 | Done (`finished`) | A reply finished with no awaiting indication and the user has not visited the pane |
 | Idle | The agent is up and nothing is pending. Also a Done pane after the user focused it, or an agent that has produced no response yet |
@@ -99,8 +99,8 @@ The four states and what the user means by them:
 | Claude `Notification` `idle_prompt` while working | idle, only when `@agent_subs` is 0 and no background shell exists |
 | Claude `SubagentStart` and `SubagentStop` | `@agent_subs` plus one and minus one. State unchanged |
 | Claude `CwdChanged` (Bash `cd`, entering a worktree) | `@agent_cwd` set from `new_cwd`. State unchanged |
-| Claude `Stop` with an in-flight entry in the hook's `background_tasks` (subagent, background shell, monitor or workflow). Without that field (older Claude): `@agent_subs` above 0, or a background shell | working. `@agent_subs` is resynced to the in-flight subagent count from the list |
-| `Stop` or pi `agent_settled`, marker present, no subagents | awaiting |
+| `Stop` or pi `agent_settled`, marker present | awaiting, whatever is in flight |
+| Claude `Stop`, no marker, with an in-flight entry in the hook's `background_tasks` (subagent, background shell, monitor or workflow). Without that field (older Claude): `@agent_subs` above 0, or a background shell | working. `@agent_subs` is resynced to the in-flight subagent count from the list |
 | `Stop` or `agent_settled`, no marker, pane visible | idle |
 | `Stop` or `agent_settled`, no marker, pane not visible | finished |
 | tmux `pane-focus-in` while finished | idle |
@@ -112,7 +112,7 @@ Details that matter when changing this:
 - The focus transition is a tmux hook (`pane-focus-in[41]`, a fixed array index so reloads stay idempotent and other hooks are left alone) with an `if -F` check, so a focus change spawns no process. The epoch comes from `set -g @agent_clock '%s'` expanded with `#{T:@agent_clock}`. It touches `@agent_state` and `@agent_state_at` only, never `@agent_at`. It also fires when the terminal regains focus, which counts as a visit.
 - The same hook first runs `set -pF @pane_focus_at "#{T:@agent_clock}"` unconditionally, ahead of the `if -F` (D74). tmux keeps no per-pane focus time (`window_activity` is last output), and a stamp inside the server costs no process. Checked on an isolated tmux 3.7b server: it fires on attach, `select-window` and `switch-client` in both directions, and on `select-pane` when the pane's window is visible, so no `client-session-changed` hook is needed.
 - Awaiting is never cleared by a visit (D56). It lasts until the next prompt, `/clear` or the agent exiting. The focus hook only turns Done into Idle.
-- Working wins over the marker when subagents or background shells are running. When a background Claude subagent finishes, Claude Code resumes the main agent, whose next `Stop` sets the final state. `SubagentStop` reaching zero does not change state by itself.
+- The marker wins over in-flight work (changed 2026-10-09, it was the other way round for Claude). A reply ending in the marker needs the user now, whatever subagents or shells are still running, and a Working chip hid that for over an hour on a session whose subagents had each left a hung background shell. pi's `agent_settled` already checked the marker before the held Working. When a background subagent finishes later, Claude Code resumes the main agent, whose next `Stop` recomputes the state from that reply. `SubagentStop` reaching zero does not change state by itself.
 - `AskUserQuestion` counts as Awaiting when it happens. The user rarely uses it, and `claudef` runs with `bypassPermissions`, so permission prompts almost never occur and `permission_prompt` is deliberately not hooked.
 
 ### The Awaiting marker
@@ -130,7 +130,8 @@ An agent ends a reply that needs the user's answer or decision with the exact fi
 - pi: `subagent-widget.ts` emits the running count on `pif:subagents`. `agent-state.ts` publishes it as `@agent_subs`, and a settle with subagents running publishes Working. A finished subagent starts a parent turn, which settles as usual. If no turn starts within 2 s (after `/subrm` or `/subclear`), the held Working settles on its own.
 - `idle_prompt` arrives about 60 s after the prompt goes idle, including while background subagents run, so the Esc-recovery rule applies only when `@agent_subs` is 0 (D69). Recovery after a real Esc interrupt therefore takes about 60 s and the pane shows Working until then.
 - Background shell detection (D70). A subagent that backgrounds a command and ends its turn fires `SubagentStop` at once and `SubagentStart` only when it resumes, and a main-agent `run_in_background` shell fires no hook at all. `background_tasks` covers both as `shell` or `subagent` entries, so `Stop` skips the ps scan when the field is present. Without it, and always at `idle_prompt` (whose input has no task list), the publisher calls `bg_shells`, which runs one `ps -A` and looks for a direct child of the agent process whose command line contains `/.claude/shell-snapshots/`. At those two points no foreground tool runs, so any such child is background work and the state stays Working. The tmux read for the agent pid happens only if some shell-snapshots process exists at all. Cost is about 40 ms per `Stop`.
-- Known tradeoff: a dev server started as a Claude background shell keeps its agent Working. This is accepted because persistent jobs belong in tmux panes.
+- Known tradeoff: a dev server started as a Claude background shell keeps its agent Working unless the reply ends with the marker. This is accepted because persistent jobs belong in tmux panes.
+- A subagent that ends its turn with a background shell of its own (typically a Bash call that hit the 120 s tool timeout and was moved to the background) has already reported to the parent, but Claude Code keeps its row in the agents list as running until that shell exits, and the parent's `Stop` input then lists only the shell, not the subagent. So `@agent_subs` reads 0 while the Claude UI still shows the subagent row, and the pane stays Working on the shell entry. Captured on 2.1.295 with a headless session: `SubagentStop` listed the subagent and its shell, the parent's next `Stop` listed the shell alone.
 - A subagent that dies without `SubagentStop` leaves the pane Working until the next `Stop` resyncs the count from `background_tasks`.
 
 ## Titles
@@ -209,9 +210,9 @@ The text input keymap is trimmed so it does not take `ctrl-a`, `ctrl-d`, `ctrl-h
 
 ### Session order and initial cursor
 
-Session order, top to bottom (D63): the invoking client's session is always last (bottom). The others are sorted so higher priority sits lower, comparing in turn the Awaiting count, the Done count, the Working count, the newest agent state change (`@agent_state_at`, else `@agent_at`), then `session_last_attached`. Counts compare one after another (two Awaiting beats one Awaiting plus five Done) and not as a weighted sum. Ties keep tmux's order. Worktree rows use the same sort (`sortRows`) with their own last key (D78).
+Session order, top to bottom (D63, changed 2026-10-09): the invoking client's session is always last (bottom). The others are sorted by last access only, oldest at the top, so the most recently accessed sits lowest. A session's last access is the newest `@pane_focus_at` among its panes, or its `session_last_attached` when that is newer or no pane is stamped. Agent states no longer reorder rows: Awaiting, Done and Working counts and agent state changes play no part, so an agent finishing in another session does not move it. Ties keep tmux's order. Worktree rows use the same sort (`sortRows`) with their own last access (D78).
 
-The cursor starts one row above the bottom (D13), which is the highest priority session other than the current one. With a single session it sits on that session. The window of the list is anchored at the bottom so the current session shows.
+The cursor starts one row above the bottom (D13), which is the most recently accessed session other than the current one. With a single session it sits on that session. The window of the list is anchored at the bottom so the current session shows.
 
 ### Session rows
 
@@ -265,7 +266,7 @@ Resolution (D75). `picker/worktree` maps a directory to its worktree by reading 
 Identity and labels (D76):
 
 - A worktree's id is its root directory. Its repo is the source repo's local directory name, not the remote: the basename of the main worktree (the parent of a `.git` common dir), the name of a bare `<name>.git` common dir without the suffix, the common dir's basename when it was reached through a `commondir` file, else the worktree root's basename (submodules, `--separate-git-dir`). Examples: `content-engine-1`, `search-primitives`, `dotfiles`.
-- The row label is the branch from `HEAD` (`refs/heads/` stripped, other refs with `refs/` stripped). A detached `HEAD` shows the 7-character commit id, dimmed. Worktree directory names are never shown as labels, since branches are what is read and searched. Search matches the branch (or commit id) and match highlights always show.
+- The row label is the branch from `HEAD` (`refs/heads/` stripped, other refs with `refs/` stripped). A detached `HEAD` shows the 7-character commit id, dimmed. Worktree directory names are never shown as labels, since branches are what is read and searched. Search matches the branch (or commit id) or the repo name, and match highlights always show (D82).
 - A repo badge sits immediately left of the label, after the gutter and its leading space: exactly 2 columns holding the repo's code, bold, on the repo's shade, then one plain space and the label. It replaces the old repo column on the right.
 - Codes and shades are computed once per snapshot from the distinct repo names of all worktree rows (`assignRepoBadges` in `picker/ui/badge.go`), independent of the filter and of row order, so they stay stable between opens. Names claim in sorted (byte-wise) order. Candidates come from the lowercased name's ASCII letters and digits, in this order: the first two, the initials of the first two segments when split on other characters (`search-primitives` gives `sp`), the first character with each later one in turn, the first character with `1` to `9`, then `00` to `99`. A name without letters or digits starts at `00`. Each name takes its first unclaimed candidate. Examples: `content-engine-1` is `co`, `dotfiles` is `do`, `search-primitives` is `se`, `yap-trial` is `ya`, and with `co` and `content-engine-1` already claiming `co` and `ce`, `content-engine-2` gets `cn`.
 - Shades are five dark greys, darkest first: `#37384b`, `#3e4052` (Surface0 toward Surface1), `#4d4f63` (Surface1 toward Surface2), `#585b70` (Surface2) and `#606379` (Surface2 toward Overlay0). They sit a few levels above the row background so they read without standing out. The band around Surface1 is skipped because it matches the selected row background. The repo at position i in sorted order takes shade i mod 5. Text is `#bac2de` (Subtext1) on all of them. Badges keep full colour on the selected row.
@@ -276,21 +277,28 @@ Membership and cards (D77):
 - A window shows when at least one of its panes is a member, meaning its effective directory resolves to the selected worktree. A window with no member pane gets no card.
 - The split-card rule counts member agent panes only. Two or more give one split card per member agent. One gives a window card for that agent. None gives a window card whose subtitle comes from the first member pane. An agent pane in another worktree gets no card.
 - The `N panes` chip and window memory stay window totals, other worktrees' panes included.
-- A window linked into several sessions is grouped once, under the first session that holds it in tmux's order. Grouping happens before sorting, so it does not depend on agent states.
+- A window linked into several sessions is grouped once, under the first session that holds it in tmux's order. Grouping happens before sorting, so it does not depend on the row order.
 
 Rows and order (D78):
 
 - Status chips and the agents cell count member agent panes only.
 - There is no memory or repo column. The right side ends with the agents section and one space, or with the status chips in full-repo mode, and the repo shows only in the badge (D76).
-- The current worktree is the one holding the invoking client's active pane (its effective directory) and sits at the bottom. The others sort as sessions do (Awaiting, Done and Working counts, then the newest agent state change), with the newest `@pane_focus_at` among member panes in place of `session_last_attached`. Ties keep first-appearance order.
+- The current worktree is the one holding the invoking client's active pane (its effective directory) and sits at the bottom. The others sort as sessions do, by last access only, oldest at the top. A worktree's last access is the newest `@pane_focus_at` among its member panes, and agent states do not reorder rows. Focus stamps are per pane, so visiting a window shared by several worktrees only refreshes the worktree of the pane that took focus, not every worktree with a pane in that window. Ties keep first-appearance order.
 - The cursor starts one row up. When the bottom row is not the current worktree (the client's pane is outside any repo, or the repo filter hides it), the cursor starts on the bottom row.
 
 Repo filter (D80):
 
 - `tab` and `shift-tab` step forward and back through All and each repo, wrapping both ways. The filter starts at All on every open.
-- Repos are ordered by first appearance scanning the worktree rows from the bottom up, so the first `tab` lands on the highest priority repo, normally the current worktree's. Entries are repo names, so two repos with the same directory name share one entry.
-- The filter applies with and without a query, before the branch match. A filter step resets the cursor and card as on open.
+- The tab order is fixed when the picker opens (D83): the current worktree's repo first, then the other repos by last access, newest first. A repo's access is the newest last access among its worktrees (D78), and ties keep first appearance scanning the worktree rows from the bottom up. It is computed from last access directly, not from the row order. Entries are repo names, so two repos with the same directory name share one entry.
+- A stay-open action reloads the snapshot but not the tab order: repos still present keep their place, repos that no longer exist drop out, and repos that are new are appended at the end in last-access order. A repo filter whose repo is gone goes back to All.
+- The filter applies with and without a query, before the query match. A filter step resets the cursor and card as on open.
 - The input line shows the filter as a chip between the match count and the prefix cell, one space from each. It reads `All` (`#cdd6f4` on `#45475a`, the panes chip colours) or the repo name on that repo's badge shade and text colour. The query has priority: the chip takes whatever room is left, is truncated, and is dropped below 3 columns. Prompts and errors replace the query and show no chip.
+
+Query on repo names (D82):
+
+- In worktree mode a row matches the query when its label (branch, or commit id when detached) matches or its repo name does, with the same fzf matcher. Session mode is unchanged. Rows keep their order, and a match never re-ranks.
+- When the repo name matched, the whole badge text is painted in the match colour (the red used for name highlights), bold, on the badge's own shade. This holds for the 2-letter badge and for the full-repo badge. The branch keeps its own per-character highlights, so a row can show both, and a repo-only match highlights nothing in the branch. An empty query highlights nothing.
+- Because every row of a repo matches when its name does, a short query can match many rows. The match count and the repo filter work as before.
 
 Mode switch:
 
@@ -321,7 +329,7 @@ The text on each chip is a darker shade of its own pastel (D64, D67), and the ag
 | `ctrl-j` / `ctrl-k` | Card row down / up, keeping the column | same |
 | `ctrl-w` | Switch to worktree mode | Switch to session mode |
 | `ctrl-t` | Nothing | Toggle full-repo mode: badges show full repo names and rows show only their status chips on the right |
-| `tab` / `shift-tab` | Nothing | Next / previous repo filter |
+| `tab` / `shift-tab` | Nothing | Next / previous repo filter, in the order fixed at open (D83) |
 | `enter` | Go to the selected card, or create a session from an unmatched query | Go to the selected card. Nothing without a card |
 | `esc`, `ctrl-c` | Close | same |
 | `C-a c` | New window in the selected session, in its active pane's directory, name prompted (empty keeps automatic naming) | New window in the selected card's session, started in the worktree root. Nothing without a card |
@@ -409,7 +417,8 @@ Maintenance cautions:
 - Remote (rw) panes show `remote` and no agent state, since their agents run inside the worker's tmux server. Pulling state over ssh was deliberately not built, and ssh must never be polled from a `#()`.
 - A reply that asks a question without the marker shows as Done. A "last line ends with ?" fallback was deliberately not added.
 - After an Esc interrupt the pane shows Working until `idle_prompt` arrives, about 60 s later.
-- A Claude background dev server keeps its agent Working (D70).
+- A Claude background dev server keeps its agent Working (D70), unless the reply ends with the marker.
+- A background shell whose zsh wrapper hangs never exits, so its agent stays Working (no marker) and its subagent row stays in Claude's list. Seen 2026-10-09: three timed-out commands of two reader subagents, output complete, wrappers sleeping in zsh `waitjobs` with no children for over an hour. Killing the wrapper (`kill <pid>` of the `/bin/zsh -c source .../shell-snapshots/...` process under the agent pid) lets Claude Code finish the task and resume the subagent.
 - A subagent that dies without `SubagentStop` leaves the pane Working until the next `Stop` resyncs the count from `background_tasks` (or until `SessionStart` on an older Claude without that field).
 - Memory is footprint on macOS, so totals overcount shared and graphics memory.
 - Pane option writes do not trigger resurrect saves. Autosave runs from a separate 300 s timer.
