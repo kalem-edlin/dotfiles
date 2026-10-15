@@ -74,6 +74,27 @@ flag is print-only in the Claude versions against which this profile was
 designed. Test subagent prompt inheritance as its own change if that behavior
 is needed later.
 
+### Agent Bash stdin
+
+Claude Code gives each agent Bash call a socket as stdin, and that socket never
+reaches EOF. A command that reads stdin blocks until the 120 s tool timeout,
+then Claude Code moves it to the background and the agent waits on a task that
+will never finish. The original case was `cat > file` with `cat` aliased to
+`bat`: a subagent waited 3.4 hours.
+
+Two fixes cover this:
+
+- The `PreToolUse` hook `hooks/bash-close-stdin.sh` prepends
+  `exec </dev/null` to every Bash command, so reads get EOF at once. Heredocs
+  and pipes carry their own input and still work.
+- `zsh/.zshrc` skips the `cp -iv`, `mv -iv`, `grep -i`, `find` to `fd`, and
+  `cat` to `bat` aliases when `CLAUDECODE` is set. Agent shells get the plain
+  coreutils, which match the flags agents expect.
+
+The hook lives in the focus profile only. Bare `claude` is intentionally not
+covered, so programs that invoke it keep native behavior. The zsh guard applies
+to any Claude Code shell.
+
 ## Pi profile
 
 Pi couples configuration and runtime state under `PI_CODING_AGENT_DIR`, and it

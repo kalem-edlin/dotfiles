@@ -142,10 +142,14 @@ alias pmpm="pnpm"
 alias pmpn="pnpm"
 
 # Sane defaults for built-ins (verbose and interactive)
-alias cp='cp -iv'
-alias mv='mv -iv'
+# Agent shells (CLAUDECODE set) have no terminal and no stdin: skip aliases
+# that prompt, page, or swap a coreutil for a tool with different flags.
+if [[ -z "${CLAUDECODE:-}" ]]; then
+  alias cp='cp -iv'
+  alias mv='mv -iv'
+  alias grep="grep -i --color=auto"
+fi
 # rm is aliased to 'trash' below - use \rm for real rm
-alias grep="grep -i --color=auto"
 alias mkdir="mkdir -p"
 
 # Enhancements
@@ -156,15 +160,17 @@ alias view="nvim -R"
 alias vimdiff="nvim -d"
 alias nvm="fnm"
 command -v tree >/dev/null 2>&1 && alias la=tree
-if command -v fd >/dev/null 2>&1; then
-  alias find="fd"
-elif command -v fdfind >/dev/null 2>&1; then
-  alias find="fdfind"
-fi
-if command -v bat >/dev/null 2>&1; then
-  alias cat="bat --style=plain"
-elif command -v batcat >/dev/null 2>&1; then
-  alias cat="batcat --style=plain"
+if [[ -z "${CLAUDECODE:-}" ]]; then
+  if command -v fd >/dev/null 2>&1; then
+    alias find="fd"
+  elif command -v fdfind >/dev/null 2>&1; then
+    alias find="fdfind"
+  fi
+  if command -v bat >/dev/null 2>&1; then
+    alias cat="bat --style=plain"
+  elif command -v batcat >/dev/null 2>&1; then
+    alias cat="batcat --style=plain"
+  fi
 fi
 if command -v eza >/dev/null 2>&1; then
   alias ls="eza --no-user --icons=auto --group-directories-first --color-scale=age"

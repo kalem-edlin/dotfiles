@@ -475,7 +475,7 @@ check_stow_target() {
   fi
 }
 
-check_stow_target "stow:claudef" "$TARGET_HOME/.local/bin/claudef" "$TARGET_HOME/.config/claudef/settings.json" "$TARGET_HOME/.config/claudef/communication.md" "$TARGET_HOME/.config/claudef/.claude-plugin/plugin.json"
+check_stow_target "stow:claudef" "$TARGET_HOME/.local/bin/claudef" "$TARGET_HOME/.config/claudef/settings.json" "$TARGET_HOME/.config/claudef/communication.md" "$TARGET_HOME/.config/claudef/.claude-plugin/plugin.json" "$TARGET_HOME/.config/claudef/hooks/bash-close-stdin.sh"
 check_stow_target "stow:claude-global" "$TARGET_HOME/.claude/keybindings.json" "$TARGET_HOME/.claude/commands/plan.md"
 check_stow_target "stow:git" "$TARGET_HOME/.gitconfig"
 check_stow_target "stow:pif" "$TARGET_HOME/.config/pif/settings.json" "$TARGET_HOME/.config/pif/keybindings.json" "$TARGET_HOME/.config/pif/communication.md"
