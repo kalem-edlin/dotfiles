@@ -38,15 +38,15 @@ for sid in $ALLOWED_WORKSPACES; do
   apps=$(aerospace list-windows --workspace "$sid" 2>/dev/null | awk -F'|' '{gsub(/^ *| *$/, "", $2); print $2}')
 
   if [ -n "$apps" ]; then
-    icon_strip=" "
+    icon_strip="  "
     while read -r app; do
       [ -z "$app" ] && continue
       __is_blocked "$app" && continue
-      __icon_map "$app" && icon_strip+=" $icon_result"
+      __icon_map "$app" && icon_strip+="$icon_result"
     done <<<"${apps}"
 
     # Only set if we have icons
-    if [ "$icon_strip" != " " ]; then
+    if [ "$icon_strip" != "  " ]; then
       sketchybar --set space.$sid label="$icon_strip" label.padding_right=14 icon.padding_right=0
     fi
   fi

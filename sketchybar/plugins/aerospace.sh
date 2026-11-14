@@ -22,13 +22,13 @@ apps=$(aerospace list-windows --workspace "$SID" 2>/dev/null | awk -F'|' '{gsub(
 
 if [ -n "$apps" ]; then
     # Workspace has windows - show with icons and add right padding
-    icon_strip=" "
+    icon_strip="  "
     while read -r app; do
         [ -z "$app" ] && continue
         __is_blocked "$app" && continue
-        __icon_map "$app" && icon_strip+=" $icon_result"
+        __icon_map "$app" && icon_strip+="$icon_result"
     done <<< "$apps"
-    if [ "$icon_strip" != " " ]; then
+    if [ "$icon_strip" != "  " ]; then
         sketchybar --set space.$SID label="$icon_strip" label.padding_right=14 icon.padding_right=0
     else
         sketchybar --set space.$SID label="" label.padding_right=0 icon.padding_right=9
