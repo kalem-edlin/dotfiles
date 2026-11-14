@@ -41,7 +41,7 @@ sketchybar --default icon.font="SF Pro:Semibold:12.0"  \
                      padding_left=4                        \
                      padding_right=4                       \
                      label.padding_left=4                  \
-                     label.padding_right=10                \
+                     label.padding_right=6                \
                      icon.padding_left=4                  \
                      icon.padding_right=4
 
@@ -55,8 +55,8 @@ source $ITEM_DIR/front_app.sh
 # -- Right Side Of Notch Items --
 
 # -- Right Side Items --
+source $ITEM_DIR/utc.sh
 source $ITEM_DIR/calendar.sh
-source $ITEM_DIR/volume.sh
 source $ITEM_DIR/battery.sh
 source $ITEM_DIR/cpu.sh
 source $ITEM_DIR/media.sh
