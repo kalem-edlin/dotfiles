@@ -1,6 +1,6 @@
 # Remote-owned directories: handing worktrees and folders to always-on workers
 
-Status: plan confirmed 2026-11-18, ready to implement. Nothing built yet. Opened 2026-11-17 as an investigation ("mini remote sessions"); the design below (P1, directory ownership) was accepted by the user on 2026-11-18 together with Q7, Q8 and Q4. Build order is in "Build order". Findings from two read-only investigation rounds are kept at the end as the evidence base.
+Status: built, reviewed and smoke-tested against the worker on 2026-11-18 (W0-W6 done; the real UC-A/UC-B handoffs are the user's own next step, followed by the manual idol-app path fixes and Ghidra output copy, D16). Opened 2026-11-17 as an investigation; design P1 accepted 2026-11-18. Contracts and the per-wave change notes below are the binding interface description.
 
 Related system docs (current behaviour, not plans):
 
