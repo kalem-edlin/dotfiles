@@ -64,18 +64,18 @@ func (m *model) lifecycleKey(k string, t *state.Worktree) tea.Cmd {
 			m.err = fmt.Errorf("refusing to delete %s: no other session to switch to", t.Name)
 			return nil
 		}
-		if t.Missing && !t.Remote {
+		// Remote now, from the records read at this key (not the
+		// snapshot): a root handed off after the picker loaded still gets
+		// the remote confirm (D11).
+		m.targetRemote = m.act.RootRemote(t.Root)
+		if t.Missing && !m.targetRemote {
 			// Nothing on disk to lose, and wt reads no status for it:
-			// wt rm prunes the registration or says why it cannot. A
-			// worker copy left from an earlier handoff goes first (D11).
+			// wt rm prunes the registration or says why it cannot, and
+			// deletes a worker copy left from an earlier handoff (D11).
 			root, name := t.Root, t.Name
 			return m.wt("rm", func(a state.Actions) tea.Msg {
-				fr, err := a.ForgetRoot(root)
-				if err != nil {
-					return reload(a, err, "")
-				}
-				_, err = a.WorktreeRemove(root, false)
-				msg := reload(a, err, "pruned "+name+forgetStatus(fr))
+				res, err := a.WorktreeRemove(root, false)
+				msg := reload(a, wtRemoveErr(name, err), "pruned "+name+remoteStatus(res.Remote))
 				msg.forget = root
 				return msg
 			})
@@ -223,15 +223,16 @@ func repurposeStatus(name string, r state.WTResult) string {
 }
 
 // delete kills s (when t has a session; remote panes close through rw
-// first), runs rw forget for every worker holding a copy of t (D11), then
-// wt rm, which moves t to the Trash, then starts a background resurrect
-// save. A kill or forget failure stops before wt rm; an unreachable worker
-// does not (rw keeps a pending forget). On the client's own row the client
-// is switched to the next most recent session first (D108), so the kill
-// never leaves it without a session. A remote t was confirmed as such
-// (openDeleteConfirm), so wt rm gets --discard-remote.
+// first), then runs wt rm on t, which deletes every worker copy of it (rw
+// forget, D11) and moves it to the Trash, then starts a background
+// resurrect save. A kill failure stops before wt rm. On the client's own
+// row the client is switched to the next most recent session first (D108),
+// so the kill never leaves it without a session. wt rm gets
+// --discard-remote only when the user confirmed a root that was remote at
+// key time (openDeleteConfirm); a root that became remote since is refused
+// by wt and nothing is deleted.
 func (m *model) delete(t *state.Worktree, s *state.Session) tea.Cmd {
-	root, name, repo, remote := t.Root, t.Name, t.Repo, t.Remote
+	root, name, repo, remote := t.Root, t.Name, t.Repo, m.targetRemote
 	var next *state.Session
 	if t.Current {
 		next = m.nextSession(s)
@@ -247,13 +248,9 @@ func (m *model) delete(t *state.Worktree, s *state.Session) tea.Cmd {
 				return reload(a, err, "")
 			}
 		}
-		fr, err := a.ForgetRoot(root)
-		if err != nil {
-			return reload(a, err, "")
-		}
 		res, err := a.WorktreeRemove(root, remote)
 		if err != nil {
-			return reload(a, err, "")
+			return reload(a, wtRemoveErr(name, err), "")
 		}
 		status := "deleted " + name
 		if res.Main {
@@ -262,7 +259,7 @@ func (m *model) delete(t *state.Worktree, s *state.Session) tea.Cmd {
 		if res.Pruned != "" {
 			status = "pruned " + name
 		}
-		status += forgetStatus(fr)
+		status += remoteStatus(res.Remote)
 		if err := a.SaveLayout(); err != nil {
 			status += " (" + err.Error() + ")"
 		}
@@ -272,29 +269,30 @@ func (m *model) delete(t *state.Worktree, s *state.Session) tea.Cmd {
 	})
 }
 
-// forgetStatus is the result line's tail for rw forget: how many remote
-// copies went, or will go on next contact. Workers are never named (D10).
-func forgetStatus(r state.RWForget) string {
-	copies := func(n int) string {
-		if n == 1 {
-			return "remote copy"
-		}
-		return fmt.Sprintf("%d remote copies", n)
+// remoteStatus is the result line's tail for wt rm's rw forget (its
+// "remote" reply). Workers are never named (D10).
+func remoteStatus(remote string) string {
+	switch remote {
+	case "deleted":
+		return ", remote copy deleted"
+	case "pending":
+		return ", remote copy deleted on next contact"
+	case "kept":
+		return ", rw missing, remote copy kept"
 	}
-	var parts []string
-	if n := len(r.Forgotten); n > 0 {
-		parts = append(parts, copies(n)+" deleted")
+	return ""
+}
+
+// wtRemoveErr turns wt rm's remote refusal (exit 5, "is remote": the root
+// became remote after the confirm) into what to do next; nothing was
+// deleted. Other errors pass through; wt's own text says what rw forget
+// already did.
+func wtRemoveErr(name string, err error) error {
+	var we *state.WTError
+	if errors.As(err, &we) && we.Code == state.WTRefused && strings.Contains(we.Msg, "is remote") {
+		return fmt.Errorf("%s is remote; nothing deleted. C-a D again to confirm deleting its remote copy too", name)
 	}
-	if n := len(r.Pending); n > 0 {
-		parts = append(parts, copies(n)+" deleted on next contact")
-	}
-	if r.NoRW {
-		parts = append(parts, "rw missing, remote copy kept")
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return ", " + strings.Join(parts, ", ")
+	return err
 }
 
 // nextSession is the most recently active session other than s: where the
@@ -320,7 +318,7 @@ func (m *model) openDeleteConfirm(t *state.Worktree) {
 	if t.Main {
 		m.label = "delete repo " + t.Repo + " to Trash? "
 	}
-	if t.Remote {
+	if m.targetRemote {
 		// Question first: a narrow input line truncates the tail.
 		m.label = "delete " + t.Name + "? it is remote; its remote copy, the only current one, goes too "
 	}

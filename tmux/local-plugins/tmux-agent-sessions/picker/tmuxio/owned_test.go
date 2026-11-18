@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"agentpicker/state"
 	"agentpicker/worktree"
@@ -19,17 +22,6 @@ func writeRecord(t *testing.T, id, body string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "record.json"), []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func writeHeld(t *testing.T, worker, id, body string) {
-	t.Helper()
-	dir := filepath.Join(rwState, "held", worker)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, id+".json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -204,53 +196,63 @@ func TestCreateSessionFocusOwned(t *testing.T) {
 	expectCalls(t, rwCmdLog)
 }
 
-// ForgetRoot: one `rw forget <root> --worker <w>` per holder, from the
-// record and the held/ index (D11); exit 6 is pending, not an error.
-func TestForgetRoot(t *testing.T) {
-	root := filepath.Join(homeDir, "dev/x")
-	rec := `{"root_id":"1","root_rel":"dev/x","root_local":"` + root + `","worker":"w1","owner":"worker"}`
-	setup := func() {
-		reset(t)
-		writeRecord(t, "1", rec)
-		writeHeld(t, "w2", "1", `{"worker":"w2","root_id":"1","root_rel":"dev/x"}`)
-		writeHeld(t, "w3", "2", `{"worker":"w3","root_id":"2","root_rel":"dev/y"}`)
+// A pending forget means the root was deleted here: not remote any more.
+func TestPendingForgetNotRemote(t *testing.T) {
+	reset(t)
+	writeRecord(t, "999", `{"root_id":"999","root_rel":"dev/parked","root_local":"/dev/parked","worker":"w1","owner":"worker","endpoints":[],"pending":{"action":"forget","reason":"remote was unreachable","at":"x"}}`)
+	writeRecord(t, "888", `{"root_id":"888","root_rel":"dev/rec","root_local":"/dev/rec","worker":"w1","owner":"worker","endpoints":[],"pending":{"action":"reconcile","reason":"x","at":"x"}}`)
+	o := readOwnership()
+	if o.byID["999"] || !o.byID["888"] {
+		t.Errorf("ownership %v", o.byID)
 	}
 	a := New(client)
-
-	setup()
-	r, err := a.ForgetRoot(root)
-	if err != nil || !reflect.DeepEqual(r, state.RWForget{Forgotten: []string{"w1", "w2"}}) {
-		t.Errorf("ok: %+v %v", r, err)
+	if a.RootRemote("/dev/parked/x") || !a.RootRemote("/dev/rec/x") || a.RootRemote("/elsewhere") {
+		t.Error("RootRemote disagrees with the records")
 	}
-	expectCalls(t, rwCmdLog, argv("forget", root, "--worker", "w1"), argv("forget", root, "--worker", "w2"))
+}
 
-	setup()
-	fixture(t, "rw-exit-forget", "6")
-	r, err = a.ForgetRoot(root)
-	if err != nil || !reflect.DeepEqual(r, state.RWForget{Pending: []string{"w1", "w2"}}) {
-		t.Errorf("unreachable: %+v %v", r, err)
+// The error text is rw's last "rw: " line: earlier ones are progress.
+func TestRWDetail(t *testing.T) {
+	for out, want := range map[string]string{
+		"rw: preflight ok\nrw: rw open: that root is remote on 'w2'.\n": ": rw open: that root is remote on 'w2'.",
+		"progress\nrw: refused\ntrailing noise\n":                       ": refused",
+		"plain failure\n\n": ": plain failure",
+		"":                  "",
+	} {
+		if got := rwDetail(out); got != want {
+			t.Errorf("rwDetail(%q) = %q, want %q", out, got, want)
+		}
 	}
+}
 
-	setup()
-	fixture(t, "rw-exit-forget", "1")
-	fixture(t, "rw-out-forget", "rw: rw forget: lost contact\n")
-	_, err = a.ForgetRoot(root)
-	expectErr(t, err, "rw forget x failed: rw forget: lost contact; not deleted")
-	expectCalls(t, rwCmdLog, argv("forget", root, "--worker", "w1"))
-
-	// Nobody holds it: no rw call at all.
+// A timed-out rw dies with its whole process group (an ssh child would
+// otherwise hold the pipes past the timeout).
+func TestRunRWKillsGroup(t *testing.T) {
 	reset(t)
-	r, err = a.ForgetRoot(filepath.Join(homeDir, "dev/z"))
-	if err != nil || !reflect.DeepEqual(r, state.RWForget{}) {
-		t.Errorf("none: %+v %v", r, err)
+	defer func(d time.Duration) { rwTimeout = d }(rwTimeout)
+	rwTimeout = 300 * time.Millisecond
+	pidFile := filepath.Join(t.TempDir(), "child")
+	script := filepath.Join(t.TempDir(), "rw-hang")
+	body := "#!/bin/sh\n/bin/sleep 30 &\necho $! >'" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	expectCalls(t, rwCmdLog)
-
-	// rw not installed: skipped with a note, not an error.
-	setup()
-	t.Setenv("PATH", "/bin:/usr/bin")
-	r, err = a.ForgetRoot(root)
-	if err != nil || !r.NoRW {
-		t.Errorf("no rw: %+v %v", r, err)
+	start := time.Now()
+	_, code, err := runRW(script, "open")
+	if code != -1 || err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("code %d err %v", code, err)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("took %s", d)
+	}
+	b, _ := os.ReadFile(pidFile)
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	if pid <= 0 {
+		t.Fatalf("no child pid: %q", b)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if syscall.Kill(pid, 0) == nil {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Errorf("child %d outlived the timeout", pid)
 	}
 }

@@ -111,9 +111,12 @@ func TestWorktreeRemoveArgv(t *testing.T) {
 
 	// A remote root the user confirmed losing (D11).
 	reset(t)
-	fixture(t, "out-wt-rm", `{"ok":true,"removed":"/r/x","branch":"wt/x","trashed_to":"/h/.Trash/x","main":false}`)
-	_, err = a.WorktreeRemove("/r/x", true)
+	fixture(t, "out-wt-rm", `{"ok":true,"removed":"/r/x","branch":"wt/x","trashed_to":"/h/.Trash/x","main":false,"remote":"deleted"}`)
+	res, err = a.WorktreeRemove("/r/x", true)
 	expectOK(t, err)
+	if res.Remote != "deleted" {
+		t.Errorf("remote %q", res.Remote)
+	}
 	expectCalls(t, wtLog, argv("rm", "/r/x", "--discard-remote", "--json"))
 
 	// The linked-worktrees refusal keeps wt's code and message.

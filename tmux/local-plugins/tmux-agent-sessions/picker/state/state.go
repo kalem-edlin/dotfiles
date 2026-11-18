@@ -328,9 +328,10 @@ type Actions interface {
 	// prunes its registration (never its branch, D105). A main checkout
 	// with no linked worktrees moves there too; a missing directory's
 	// registration is pruned (D102). A locked worktree is refused. wt rm
-	// itself runs rw forget for the workers holding root (D11) and refuses
-	// a root that is remote right now unless discardRemote (wt rm
-	// --discard-remote): the user confirmed losing the only current copy.
+	// owns the remote side (D11): it runs rw forget when a worker holds a
+	// copy of root, and refuses a root that is remote right now (exit 5,
+	// "is remote") unless discardRemote (--discard-remote): the user
+	// confirmed losing the only current copy.
 	WorktreeRemove(root string, discardRemote bool) (WTResult, error)
 	// WorktreeEnvRefresh pulls the env renders afresh in the main checkout
 	// of root's repo (its `wt.envPull` git config, when set) and copies
@@ -342,22 +343,11 @@ type Actions interface {
 	// detached, and does not wait for it.
 	SaveLayout() error
 
-	// ForgetRoot runs `rw forget <root> --worker <alias>` for every worker
-	// that holds a copy of root, as rw's records say (D11): the worker
-	// copies and their remote sessions go before the root is deleted
-	// here. Nothing runs when no worker holds it. An unreachable worker
-	// (rw exit 6) is no error: rw keeps a pending forget for the next
-	// contact, and the worker is listed in Pending. Any other failure is
-	// an error and the delete must stop.
-	ForgetRoot(root string) (RWForget, error)
-}
-
-// RWForget is what ForgetRoot did. Workers are never named in the UI (D10);
-// the counts are.
-type RWForget struct {
-	Forgotten []string // workers whose copy was deleted
-	Pending   []string // unreachable workers, deleted on next contact
-	NoRW      bool     // workers hold the root but rw is not installed
+	// RootRemote reports whether a worker owns the directory root holding
+	// dir right now (rw's ownership records, read fresh, a pending forget
+	// not counting). Delete asks it at key time, not from the snapshot, so a
+	// root handed off after the picker loaded still gets the remote confirm.
+	RootRemote(dir string) bool
 }
 
 // wt exit codes (git/.local/bin/wt).
@@ -412,6 +402,10 @@ type WTResult struct {
 	StashedChanges int    `json:"stashed_changes"` // repurpose: changed plus untracked files stashed
 	NeedsInstall   bool   `json:"needs_install"`   // repurpose: pnpm-lock.yaml changed
 	NeedsPods      bool   `json:"needs_pods"`      // repurpose: app.config or a Podfile changed
+	// Remote is rm's rw forget outcome: "deleted", "pending" (a worker was
+	// unreachable; rw deletes its copy on next contact), "kept" (rw is not
+	// installed) or "" when no worker held a copy.
+	Remote string `json:"remote"`
 }
 
 // WTEnvResult is `wt env-refresh --json` (D109).

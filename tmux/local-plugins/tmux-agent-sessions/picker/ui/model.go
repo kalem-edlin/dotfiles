@@ -142,7 +142,11 @@ type model struct {
 	targetFrom string          // C-a C: the base ref, "" for wt's default (main)
 	label      string          // a lifecycle prompt's or confirm's text
 	busy       string          // "running wt ..." while a wt call runs; keys wait
-	status     string          // the last lifecycle result, until the next key
+	// targetRemote: the delete target's root was remote when C-a D was
+	// pressed (Actions.RootRemote), so the confirm says so and wt rm gets
+	// --discard-remote.
+	targetRemote bool
+	status       string // the last lifecycle result, until the next key
 
 	// async enables the off-frame work: the heavy probe from Init and the
 	// git read when the cursor rests (Run sets it; model tests drive the
@@ -725,7 +729,8 @@ func (m model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.cycleRepo(-1)
 		}
 	case "enter":
-		return m, m.enter()
+		cmd := m.enter() // before m is copied out: enter may set busy
+		return m, cmd
 	default:
 		return m.editQuery(msg)
 	}
@@ -771,7 +776,7 @@ func (m model) editQuery(msg tea.Msg) (tea.Model, tea.Cmd) {
 //
 // The worktree lifecycle keys (C-a c/C/x/D) are in letterAction; the tmuxio
 // actions rescan the worktrees after each wt call that changes them.
-func (m model) enter() tea.Cmd {
+func (m *model) enter() tea.Cmd {
 	if c, ok := m.card(); ok {
 		var p *state.Pane
 		if c.split { // a window card keeps the window's active pane (Q27)
@@ -789,7 +794,10 @@ func (m model) enter() tea.Cmd {
 			return func() tea.Msg { return exitMsg{fmt.Errorf("worktree directory is missing: %s", root)} }
 		}
 		name, root := state.SessionName(t.Name), t.Root
-		return func() tea.Msg { return exitMsg{m.act.CreateSession(name, root)} }
+		// A remote root opens through rw open (ssh): keys wait meanwhile.
+		m.busy = opening(m.act, root, name)
+		a := m.act
+		return func() tea.Msg { return exitMsg{a.CreateSession(name, root)} }
 	}
 	name := m.query.Value()
 	if name == "" {
@@ -929,12 +937,15 @@ func (m model) promptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			cmd := m.repurpose(t, name)
 			return m, cmd
 		case promptNewWindow:
-			// An empty name keeps tmux's automatic naming.
+			// An empty name keeps tmux's automatic naming. In a remote
+			// root rw open runs (ssh): keys wait meanwhile.
+			m.busy = opening(m.act, dir, "window")
 			return m, m.run(func() error { return m.act.NewWindow(s, dir, name) })
 		case promptNewSession:
 			if name == "" {
 				return m, nil
 			}
+			m.busy = opening(m.act, dir, name)
 			return m, m.run(func() error { return m.act.NewSession(name, dir) })
 		case promptRenameWindow:
 			if name == "" {
@@ -952,6 +963,17 @@ func (m model) promptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.prompt, cmd = m.prompt.Update(msg)
 	return m, cmd
+}
+
+// opening is the busy line while a window or session is created: "opening
+// NAME remote …" when dir is in a remote root (rw open runs over ssh), else
+// "opening NAME …". dir "" (a session's active pane directory) is resolved
+// by the action itself, so it reads as local here.
+func opening(a state.Actions, dir, name string) string {
+	if dir != "" && a.RootRemote(dir) {
+		return "opening " + name + " remote …"
+	}
+	return "opening " + name + " …"
 }
 
 // run performs a stay-open action, then reloads even when the action

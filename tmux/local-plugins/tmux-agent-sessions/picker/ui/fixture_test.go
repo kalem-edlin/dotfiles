@@ -110,9 +110,8 @@ type fakeActions struct {
 	wtErrs   map[string][]error
 	saveErr  error
 
-	// rw forget: the reply and error ForgetRoot returns.
-	forget    state.RWForget
-	forgetErr error
+	// remote: roots RootRemote reports as remote now (rw's records).
+	remote map[string]bool
 }
 
 func (f *fakeActions) wtErr(op string) error {
@@ -144,10 +143,9 @@ func (f *fakeActions) WorktreeRemove(root string, discardRemote bool) (state.WTR
 	f.calls = append(f.calls, call)
 	return f.wtResult["rm"], f.wtErr("rm")
 }
-func (f *fakeActions) ForgetRoot(root string) (state.RWForget, error) {
-	f.calls = append(f.calls, "rw forget "+root)
-	return f.forget, f.forgetErr
-}
+
+// RootRemote is a read, not an action: it is not logged in calls.
+func (f *fakeActions) RootRemote(dir string) bool { return f.remote[dir] }
 func (f *fakeActions) WorktreeEnvRefresh(root string, here bool) (state.WTEnvResult, error) {
 	call := "wt env-refresh " + root
 	if here {

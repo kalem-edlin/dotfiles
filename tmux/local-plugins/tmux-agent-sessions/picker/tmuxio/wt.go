@@ -17,7 +17,12 @@ import (
 )
 
 // wtTimeout bounds one wt call; the picker shows "running wt ..." meanwhile.
-var wtTimeout = 60 * time.Second
+// wt rm gets wtRmTimeout: it runs rw forget, which may wait out an
+// unreachable worker's ssh timeout and delete a large worker copy.
+var (
+	wtTimeout   = 60 * time.Second
+	wtRmTimeout = 5 * time.Minute
+)
 
 // wtBinary is the wt script (git/.local/bin/wt, stowed to ~/.local/bin):
 // AGENT_SESSIONS_WT, else wt on PATH, else ~/.local/bin/wt, since the tmux
@@ -46,16 +51,20 @@ func resurrectSavePath() string {
 // its one JSON object into out. A non-zero exit is a *state.WTError with
 // wt's code and its JSON "error", else the first line of stderr.
 func runWT(op string, out any, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), wtTimeout)
+	timeout := wtTimeout
+	if op == "rm" {
+		timeout = max(timeout, wtRmTimeout)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, wtBinary(), append(append([]string{op}, args...), "--json")...)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.WaitDelay = time.Second // a child holding the pipes cannot outlast the timeout
+	killGroupOnCancel(cmd) // a child holding the pipes (rw's ssh) cannot outlast the timeout
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		return &state.WTError{Op: op, Code: -1, Msg: fmt.Sprintf("timed out after %s", wtTimeout)}
+		return &state.WTError{Op: op, Code: -1, Msg: fmt.Sprintf("timed out after %s", timeout)}
 	}
 	if err != nil {
 		var exitErr *exec.ExitError

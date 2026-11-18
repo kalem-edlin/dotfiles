@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"agentpicker/state"
 )
 
@@ -63,51 +65,95 @@ func TestGoldenRemote(t *testing.T) {
 	}
 }
 
-// D11: delete on a remote worktree confirms the loss of the only current
-// copy, runs rw forget before wt rm, and passes --discard-remote; an
-// unreachable worker leaves a pending forget and the delete goes on; a
-// forget failure stops before wt rm.
+// D11: whether the root is remote is read at C-a D (Actions.RootRemote),
+// not from the snapshot. A remote root confirms the loss of the only
+// current copy and wt rm gets --discard-remote; wt rm owns rw forget, and
+// its "remote" reply lands on the status line.
 func TestDeleteRemote(t *testing.T) {
-	setup := func() (model, *fakeActions) {
-		m, f := wtAt(t, 5) // yap-trial, bare
-		m.worktree().Remote = true
-		return m, f
-	}
-	m, f := setup()
-	f.forget = state.RWForget{Forgotten: []string{"w1"}}
+	m, f := wtAt(t, 5) // yap-trial, bare; the snapshot says local
+	f.remote = map[string]bool{"/dev/yap-trial": true}
+	f.wtResult = map[string]state.WTResult{"rm": {Removed: "/dev/yap-trial", Remote: "deleted"}}
 	m = send(t, m, "ctrl+a", "D")
 	if want := "delete yap-trial? it is remote; its remote copy, the only current one, goes too [y/N]"; m.pending != confirmDelete || confirmText(m) != want {
 		t.Fatalf("confirm %v\n %q\nwant %q", m.pending, confirmText(m), want)
 	}
 	m = send(t, m, "y")
-	expectCallList(t, f, "rw forget /dev/yap-trial", "wt rm /dev/yap-trial --discard-remote", "save")
-	if got := input(m); !strings.Contains(got, "deleted yap-trial, remote copy deleted") || strings.Contains(got, "w1") {
+	expectCallList(t, f, "wt rm /dev/yap-trial --discard-remote", "save")
+	if got := input(m); !strings.Contains(got, "deleted yap-trial, remote copy deleted") {
 		t.Errorf("status %q", got)
 	}
 
-	m, f = setup()
-	f.forget = state.RWForget{Pending: []string{"w1"}}
+	// An unreachable worker: deleted here, the copy on next contact.
+	m, f = wtAt(t, 5)
+	f.remote = map[string]bool{"/dev/yap-trial": true}
+	f.wtResult = map[string]state.WTResult{"rm": {Removed: "/dev/yap-trial", Remote: "pending"}}
 	m = send(t, m, "ctrl+a", "D", "y")
-	expectCallList(t, f, "rw forget /dev/yap-trial", "wt rm /dev/yap-trial --discard-remote", "save")
 	if got := input(m); !strings.Contains(got, "remote copy deleted on next contact") {
 		t.Errorf("pending status %q", got)
 	}
 
-	m, f = setup()
-	f.forgetErr = errFake
-	m = send(t, m, "ctrl+a", "D", "y")
-	expectCallList(t, f, "rw forget /dev/yap-trial")
-	if got := input(m); !strings.Contains(got, "boom") {
-		t.Errorf("forget failure %q", got)
+	// Local at the key, handed off before wt ran: wt refuses (exit 5, "is
+	// remote"), nothing is deleted, and the line says what to do.
+	m, f = wtAt(t, 5)
+	f.wtErrs = map[string][]error{"rm": {wtErr("rm", state.WTRefused, "/dev/yap-trial is remote and its remote copy is the only current one: hand it back first (rw handback), or pass --discard-remote")}}
+	m = send(t, m, "ctrl+a", "D")
+	if confirmText(m) != "delete yap-trial to Trash? [y/N]" {
+		t.Errorf("local confirm %q", confirmText(m))
+	}
+	m = send(t, m, "y")
+	expectCallList(t, f, "wt rm /dev/yap-trial")
+	if got := input(m); !strings.Contains(got, "yap-trial is remote; nothing deleted. C-a D again to confirm") {
+		t.Errorf("race %q", got)
 	}
 
 	// A local worktree a worker still holds a copy of (handed back
-	// earlier): no remote confirm, the copy still goes.
+	// earlier): the plain confirm, and wt's reply on the line.
 	m, f = wtAt(t, 5)
-	f.forget = state.RWForget{Forgotten: []string{"w1", "w2"}}
+	f.wtResult = map[string]state.WTResult{"rm": {Removed: "/dev/yap-trial", Remote: "kept"}}
 	m = send(t, m, "ctrl+a", "D", "y")
-	expectCallList(t, f, "rw forget /dev/yap-trial", "wt rm /dev/yap-trial", "save")
-	if got := input(m); !strings.Contains(got, "2 remote copies deleted") {
-		t.Errorf("held status %q", got)
+	expectCallList(t, f, "wt rm /dev/yap-trial", "save")
+	if got := input(m); !strings.Contains(got, "rw missing, remote copy kept") {
+		t.Errorf("kept status %q", got)
 	}
+
+	// A missing row that is remote is confirmed too, not pruned at once.
+	m, f = wtAt(t, 6) // content-engine-9, missing
+	f.remote = map[string]bool{"/dev/content-engine-9": true}
+	if m = send(t, m, "ctrl+a", "D"); m.pending != confirmDelete {
+		t.Fatalf("missing remote: no confirm (%q)", input(m))
+	}
+	expectCallList(t, f)
+	m = send(t, m, "y")
+	expectCallList(t, f, "wt rm /dev/content-engine-9 --discard-remote", "save")
+}
+
+// Opening a window or a bare row's session shows a busy line and ignores
+// keys until it answers: in a remote root rw open runs over ssh.
+func TestOpenBusy(t *testing.T) {
+	m, f := wtAt(t, 5) // yap-trial, bare
+	f.remote = map[string]bool{"/dev/yap-trial": true}
+	m, cmd := sendKey(m, "enter")
+	if cmd == nil || m.busy != "opening yap-trial remote …" {
+		t.Fatalf("busy %q", m.busy)
+	}
+	m, _ = sendKey(m, "x")
+	if m.query.Value() != "" {
+		t.Errorf("a key went through while busy: %q", m.query.Value())
+	}
+	if got := input(m); !strings.Contains(got, "opening yap-trial remote") {
+		t.Errorf("line %q", got)
+	}
+
+	m, _ = wtAt(t, 0) // roll-hiring, local
+	m = send(t, m, "ctrl+a", "w")
+	m, _ = sendKey(m, "enter")
+	if m.busy != "opening window …" {
+		t.Errorf("window busy %q", m.busy)
+	}
+}
+
+// sendKey feeds one key and returns the command unrun.
+func sendKey(m model, k string) (model, tea.Cmd) {
+	nm, cmd := m.Update(keyMsg(k))
+	return nm.(model), cmd
 }

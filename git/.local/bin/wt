@@ -13,10 +13,12 @@
 #
 # Git only: never runs tmux, installs, or touches DerivedData or remote
 # endpoints (the picker owns those), with one exception: rm runs
-# `rw forget <root> --worker <alias>` for every worker that holds a copy of
-# the root (tmux-remote-workspaces, docs/tasks/mini-remote-sessions.md D11)
-# before deleting it here, and refuses a root that is remote right now
-# unless confirmed (a prompt on a terminal, else --discard-remote).
+# `rw forget <root>` once when any worker holds a copy of the root
+# (tmux-remote-workspaces, docs/tasks/mini-remote-sessions.md D11) before
+# deleting it here, and refuses a root that is remote right now unless
+# confirmed (a prompt on a terminal, else --discard-remote, which also
+# passes rw --force). The rm reply's "remote" is deleted, pending, kept or
+# null.
 # content-engine conventions (port keys, heavy paths, LFS models path) are
 # hard-coded until a second repo differs.
 # Spec: docs/tasks/worktree-native-tmux.md (V9-V12, R5-R10).
@@ -65,6 +67,11 @@ jarr() {
 die() {
   local code=$1
   shift
+  # A failure after rw forget ran says what happened to the remote copies.
+  case ${WT_REMOTE:-} in
+    deleted) set -- "$* (its remote copies were already deleted)" ;;
+    pending) set -- "$* (its remote copies are deleted on next contact)" ;;
+  esac
   if [ "$json" = 1 ]; then
     printf '{"ok":false,"code":%d,"error":%s}\n' "$code" "$(jstr "$*")"
   fi
@@ -413,13 +420,22 @@ rw_binary() {
 }
 
 # rw_forget_copies: before ROOT is deleted here, delete every worker copy of
-# it. A root the worker owns right now is refused unless confirmed: its
-# remote copy is the only current one. An unreachable worker (rw exit 6)
-# does not block the delete: rw keeps a pending forget for the next contact.
-# A copy whose forget is already pending is left to rw. rw missing: skipped
-# with a note. Notes go to stderr (stdout carries the one JSON reply).
+# it with ONE `rw forget <root>`: rw itself combines the record's worker and
+# the held/ index, and skips an alias no longer in config.json (a per-alias
+# --worker call would exit 64 there and block the delete forever). A root
+# the worker owns right now is refused unless confirmed (a prompt on a
+# terminal, else --discard-remote): its remote copy is the only current
+# one; rw gets --force only then (or when a forget of it is already
+# pending, which was confirmed earlier). A copy whose forget is already
+# pending is rw's to finish: with nothing else held, rw is not called.
+# An unreachable worker (rw exit 6) does not block the delete: rw keeps a
+# pending forget for the next contact. rw missing: skipped with a note.
+# Notes go to stderr (stdout carries the one JSON reply). Sets WT_REMOTE to
+# deleted, pending or kept for the reply and for any later error.
+WT_REMOTE=""
 rw_forget_copies() {
-  local home rel id state rec="" owner="" w workers="" f rw st answer
+  local home rel id state rec="" owner="" pending_owner=0 active=0 f rw st out answer
+  local -a force=()
   [ -n "${HOME:-}" ] || return 0
   home=$(canon "$HOME")
   case ${ROOT%/} in "$home"/?*) rel=${ROOT%/} rel=${rel#"$home"/} ;; *) return 0 ;; esac
@@ -428,14 +444,16 @@ rw_forget_copies() {
   if [ -f "$state/owned/$id/record.json" ]; then
     rec="$state/owned/$id/record.json"
     owner=$(json_str "$rec" owner)
-    w=$(json_str "$rec" worker)
-    if [ -n "$w" ] && ! forget_pending "$rec"; then workers=" $w"; fi
+    if forget_pending "$rec"; then
+      [ "$owner" = worker ] && pending_owner=1
+      owner=""
+    elif [ -n "$(json_str "$rec" worker)" ]; then
+      active=1
+    fi
   fi
   for f in "$state/held"/*/"$id.json"; do
     [ -f "$f" ] || continue
-    forget_pending "$f" && continue
-    w=$(basename "$(dirname "$f")")
-    case "$workers " in *" $w "*) ;; *) workers="$workers $w" ;; esac
+    forget_pending "$f" || active=1
   done
   if [ "$owner" = worker ] && [ "$ARG_DISCARD_REMOTE" != 1 ]; then
     if [ "$json" != 1 ] && [ -t 0 ] && [ -t 2 ]; then
@@ -446,20 +464,30 @@ rw_forget_copies() {
       die 5 "$ROOT is remote and its remote copy is the only current one: hand it back first (rw handback), or pass --discard-remote"
     fi
   fi
-  [ -n "$workers" ] || return 0
+  [ "$active" = 1 ] || return 0
   if ! rw=$(rw_binary); then
+    WT_REMOTE=kept
     printf 'wt: rw is not installed; the remote copies of %s were not deleted\n' "$ROOT" >&2
     return 0
   fi
-  for w in $workers; do
-    "$rw" forget "$ROOT" --worker "$w" </dev/null >&2
-    st=$?
-    case $st in
-      0) printf 'wt: deleted the remote copy of %s\n' "${ROOT##*/}" >&2 ;;
-      6) printf 'wt: remote unreachable; its copy of %s is deleted on next contact\n' "${ROOT##*/}" >&2 ;;
-      *) die 1 "rw forget failed for $ROOT (exit $st); nothing deleted" ;;
-    esac
-  done
+  if [ "$owner" = worker ] || [ "$pending_owner" = 1 ]; then force=(--force); fi
+  out=$("$rw" forget "$ROOT" ${force[@]+"${force[@]}"} 2>&1 </dev/null)
+  st=$?
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+  case $st in
+    0)
+      WT_REMOTE=deleted
+      printf 'wt: deleted the remote copies of %s\n' "${ROOT##*/}" >&2
+      ;;
+    6)
+      WT_REMOTE=pending
+      printf 'wt: a remote is unreachable; its copy of %s is deleted on next contact\n' "${ROOT##*/}" >&2
+      ;;
+    *)
+      out=$(printf '%s\n' "$out" | grep '^rw: ' | tail -n 1)
+      die 1 "rw forget failed for $ROOT (exit $st${out:+: ${out#rw: }}); nothing deleted"
+      ;;
+  esac
 }
 
 # arg parsing shared by subcommands
@@ -676,7 +704,7 @@ rm_missing() {
   git -C "$MAIN" worktree prune >/dev/null 2>&1
   record_for "$ROOT" >/dev/null && die 1 "git worktree prune left $ROOT registered"
   if [ "$json" = 1 ]; then
-    printf '{"ok":true,"pruned":%s,"branch":%s}\n' "$(jstr "$ROOT")" "$(jnull "$branch")"
+    printf '{"ok":true,"pruned":%s,"branch":%s,"remote":%s}\n' "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jnull "$WT_REMOTE")"
   else
     printf 'pruned %s (its directory was already gone)%s\n' "$ROOT" "${branch:+, branch $branch kept}"
   fi
@@ -708,8 +736,8 @@ rm_main() {
   rw_forget_copies
   trash_root
   if [ "$json" = 1 ]; then
-    printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":true}\n' \
-      "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jstr "$dest")"
+    printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":true,"remote":%s}\n' \
+      "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jstr "$dest")" "$(jnull "$WT_REMOTE")"
   else
     printf 'moved repo %s to %s\n' "$ROOT" "$dest"
   fi
@@ -749,8 +777,8 @@ cmd_rm() {
   git -C "$MAIN" worktree prune >/dev/null 2>&1
   record_for "$ROOT" >/dev/null && die 1 "moved $ROOT to $dest, but git worktree prune left it registered"
   if [ "$json" = 1 ]; then
-    printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":false}\n' \
-      "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jstr "$dest")"
+    printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":false,"remote":%s}\n' \
+      "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jstr "$dest")" "$(jnull "$WT_REMOTE")"
   else
     printf 'moved %s to %s%s\n' "$ROOT" "$dest" "${branch:+ (branch $branch kept)}"
   fi

@@ -554,13 +554,14 @@ check_true "outside git dir: nothing moved" "[ -d '$scratch/sep/main' ] && [ ! -
 RWP="$HOME/dev/rwproj"
 git init -q "$RWP/main"
 git -C "$RWP/main" commit -q --allow-empty -m base
-for n in a b c d e f; do git -C "$RWP/main" worktree add -q -b "rw/$n" "$RWP/$n" 2>/dev/null; done
+for n in a b c d e f g h; do git -C "$RWP/main" worktree add -q -b "rw/$n" "$RWP/$n" 2>/dev/null; done
 fake_bin="$scratch/fake-rw"
 mkdir -p "$fake_bin"
 cat >"$fake_bin/rw" <<FAKE
 #!/bin/sh
 printf '%s\n' "\$*" >>'$scratch/rw.log'
 echo "rw: fake output on stdout"
+[ -f '$scratch/rw-msg' ] && cat '$scratch/rw-msg' >&2
 [ -f '$scratch/rw-exit' ] && exit "\$(cat '$scratch/rw-exit')"
 exit 0
 FAKE
@@ -582,7 +583,7 @@ rw_held() { # NAME WORKER
   printf '{"worker":"%s","root_id":"%s","root_rel":"dev/rwproj/%s","worker_root":"/w","since":"x"}' \
     "$2" "$(rw_id "$1")" "$1" >"$TMUX_REMOTE_WORKSPACES_STATE_DIR/held/$2/$(rw_id "$1").json"
 }
-rw_reset() { rm -f "$scratch/rw.log" "$scratch/rw-exit"; : >"$scratch/rw.log"; }
+rw_reset() { rm -f "$scratch/rw.log" "$scratch/rw-exit" "$scratch/rw-msg"; : >"$scratch/rw.log"; }
 
 rw_reset
 wt rm "$RWP/a" --json
@@ -595,7 +596,10 @@ rw_held b w1
 wt rm "$RWP/b" --json
 check_rc "rm of a root a worker holds a copy of" 0
 check_json "rm with rw forget (rw's own output kept off stdout)"
-check_eq "rm: rw forget called for the holder" "forget $RWP/b --worker w1" "$(cat "$scratch/rw.log")"
+# One call, no --worker: rw combines the record and held/ itself, so an
+# alias dropped from rw's config cannot block the delete (exit 64).
+check_eq "rm: one rw forget, no --worker, no --force" "forget $RWP/b" "$(cat "$scratch/rw.log")"
+check_eq "rm: reply says the remote copy went" deleted "$(field .remote)"
 check_true "rm: deleted after forget" "[ ! -e '$RWP/b' ]"
 
 # Remote right now: refused without --discard-remote, nothing called.
@@ -610,8 +614,7 @@ check_eq "rm remote refusal: rw not called" "" "$(cat "$scratch/rw.log")"
 check_true "rm remote refusal: kept" "[ -d '$RWP/c' ]"
 wt rm "$RWP/c" --discard-remote --json
 check_rc "rm --discard-remote of a remote root" 0
-check_eq "rm --discard-remote: forget per holder" "forget $RWP/c --worker w1
-forget $RWP/c --worker w2" "$(cat "$scratch/rw.log")"
+check_eq "rm --discard-remote: one forget with --force" "forget $RWP/c --force" "$(cat "$scratch/rw.log")"
 check_true "rm --discard-remote: deleted" "[ ! -e '$RWP/c' ]"
 
 # Unreachable worker (exit 6): the delete goes on, rw keeps a pending forget.
@@ -620,7 +623,8 @@ rw_record d worker w1
 echo 6 >"$scratch/rw-exit"
 wt rm "$RWP/d" --discard-remote --json
 check_rc "rm with an unreachable worker still deletes" 0
-check_eq "rm unreachable: forget was called" "forget $RWP/d --worker w1" "$(cat "$scratch/rw.log")"
+check_eq "rm unreachable: forget was called" "forget $RWP/d --force" "$(cat "$scratch/rw.log")"
+check_eq "rm unreachable: reply says pending" pending "$(field .remote)"
 check_true "rm unreachable: deleted" "[ ! -e '$RWP/d' ]"
 check_true "rm unreachable: noted" "printf '%s' \"\$err\" | grep -q 'deleted on next contact'"
 
@@ -628,10 +632,11 @@ check_true "rm unreachable: noted" "printf '%s' \"\$err\" | grep -q 'deleted on 
 rw_reset
 rw_held e w1
 echo 1 >"$scratch/rw-exit"
+echo "rw: rw forget: lost contact while deleting" >"$scratch/rw-msg"
 wt rm "$RWP/e" --json
 check_rc "rm with a failing rw forget" 1
 check_true "rm failing forget: kept" "[ -d '$RWP/e' ]"
-check_true "rm failing forget: says so" "printf '%s' \"\$(field .error)\" | grep -q 'rw forget failed'"
+check_eq "rm failing forget: rw's last line in the error" "rw forget failed for $RWP/e (exit 1: rw forget: lost contact while deleting); nothing deleted" "$(field .error)"
 
 # A forget already pending is rw's to finish: not called again.
 rw_reset
@@ -640,6 +645,27 @@ rm -f "$TMUX_REMOTE_WORKSPACES_STATE_DIR/held/w1/$(rw_id e).json"
 wt rm "$RWP/e" --json
 check_rc "rm with a pending forget" 0
 check_eq "rm pending forget: rw not called" "" "$(cat "$scratch/rw.log")"
+check_eq "rm pending forget: nothing to report" null "$(field .remote)"
+
+# A pending forget of a root that was remote counts as confirmed (no
+# refusal); another copy still held makes rw run, with --force.
+rw_reset
+rw_record g worker w1 forget
+rw_held g w2
+wt rm "$RWP/g" --json
+check_rc "rm of a pending-forget remote root with another holder" 0
+check_eq "rm pending remote root: one forget with --force" "forget $RWP/g --force" "$(cat "$scratch/rw.log")"
+
+# A failure after the forget says the remote copies are already gone.
+rw_reset
+rw_held h w1
+mkdir -p "$HOME/.Trash"
+chmod 555 "$HOME/.Trash"
+wt rm "$RWP/h" --json
+chmod 755 "$HOME/.Trash"
+check_rc "rm whose trash move fails after the forget" 1
+check_true "rm failing after forget: error says the remote copies went" "printf '%s' \"\$(field .error)\" | grep -q 'its remote copies were already deleted'"
+check_true "rm failing after forget: local copy kept" "[ -d '$RWP/h' ]"
 
 # rw not installed: skipped with a note, the delete goes on.
 rw_reset
@@ -658,6 +684,7 @@ check_rc "rm without rw installed" 0
 check_true "rm without rw: deleted" "[ ! -e '$RWP/f' ]"
 check_true "rm without rw: noted" "printf '%s' \"\$err\" | grep -q 'rw is not installed'"
 check_eq "rm without rw: fake rw not reached" "" "$(cat "$scratch/rw.log")"
+check_eq "rm without rw: reply says kept" kept "$(field .remote)"
 
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

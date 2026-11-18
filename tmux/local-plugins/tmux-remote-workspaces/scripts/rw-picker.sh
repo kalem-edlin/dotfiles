@@ -23,9 +23,12 @@
 #
 # Exit codes from rw (scripts/rw usage): 5 -> the conflict dialog (the
 # files from rw's `conflict<TAB>path<TAB>kind` stdout lines, a screenful at
-# most, then overwrite / keep both / abort; the first two re-run with
-# --resolve), 6 -> "worker unreachable", 2/3/7 and anything else -> the
-# dismissible failure dialog with one cause line and one action line.
+# most, then abort / keep both / overwrite, abort first so a stray enter
+# moves nothing; the last two re-run with --resolve), 6 -> "worker
+# unreachable", 2/3/7 and anything else -> the dismissible failure dialog
+# with one cause line and one action line. Refusals the picker finds itself
+# are shown the same way, inline: display-popup from inside this popup is
+# a no-op (tmux draws one overlay per client), so rw_dialog cannot be used.
 #
 # Modes (self-invocations; the binding only ever calls `pick`):
 #   pick    act on the focused pane
@@ -126,6 +129,26 @@ rw_pick_plural() {
   if [ "$1" -eq 1 ]; then printf '1 %s' "$2"; else printf '%d %ss' "$1" "$2"; fi
 }
 
+# rw_pick_notice <title> <message> -- an inline dismissible notice in this
+# popup. Not rw_dialog: that opens a display-popup, and tmux keeps one
+# overlay per client (cmd-display-menu.c returns early while
+# c->overlay_draw is set), so from inside this popup it would draw nothing.
+rw_pick_notice() {
+  printf '\n\033[1m%s\033[0m\n' "$1"
+  printf '%s\n' "$2" | fold -s -w "$(rw_pick_cols)" | sed 's/^/  /'
+  printf '\n  [press any key to dismiss]\n'
+  read -r -s -n 1 2>/dev/null </dev/tty || true
+}
+
+# rw_pick_cols -- the popup's width less a margin, for wrapping notices.
+rw_pick_cols() {
+  local cols
+  cols="$(stty size </dev/tty 2>/dev/null | awk '{print $2}')"
+  case "$cols" in '' | *[!0-9]*) cols=80 ;; esac
+  [ "$cols" -gt 20 ] || cols=80
+  printf '%d\n' $((cols - 4))
+}
+
 # Run rw with its output live in the popup and captured in $RW_PICK_OUT.
 # rw's `conflict<TAB>...` stdout lines (exit 5; possibly thousands) are
 # captured but not echoed: the conflict dialog shows a screenful of them.
@@ -146,6 +169,13 @@ rw_pick_transfer() {
   shift
   rw_pick_run "$verb" "$@"
   status=$?
+  if [ "$status" -eq 5 ] && ! grep -q $'^conflict\t' "$RW_PICK_OUT"; then
+    # rw promised a list on exit 5; with none there is nothing to choose
+    # between, so say so and move nothing.
+    \rm -f "$RW_PICK_OUT"
+    rw_pick_notice "rw $verb stopped" "rw reported files changed on the copy being overwritten but listed none; nothing moved. Run 'rw $verb' from a shell to see its output."
+    return 5
+  fi
   if [ "$status" -eq 5 ]; then
     choice="$(rw_pick_conflict_dialog "$verb" "$RW_PICK_OUT")"
     \rm -f "$RW_PICK_OUT"
@@ -191,9 +221,9 @@ rw_pick_conflict_dialog() {
     *) title="$(rw_pick_plural "$total" file) changed in the frozen local copy since the handoff; the remote copy is about to replace it:" ;;
   esac
   sel="$(printf '%s\n' \
-    $'overwrite\toverwrite: the incoming copy wins' \
+    $'abort\tabort: nothing moves' \
     $'keep-both\tkeep both: each losing file is kept as <file>.local-<date>' \
-    $'abort\tabort: nothing moves' |
+    $'overwrite\toverwrite: the incoming copy wins, the listed changes are lost' |
     fzf --layout=reverse --info=hidden --no-multi --no-sort \
       --delimiter=$'\t' --with-nth=2 \
       --prompt='conflict ⇒ ' \
@@ -223,8 +253,8 @@ rw_pick_failure_dialog() {
       action="update the older side, then retry"
       ;;
     7)
-      cause="${refusal:-the root is not in a state this allows}"
-      action="nothing moved; rw status lists remote roots"
+      cause="rw refused this root: ${refusal:-it is not in a state this allows}"
+      action="nothing moved. A root is a git worktree's top or a plain folder under ~ (not ~ itself, not a folder of worktrees); rw status lists remote roots"
       ;;
   esac
   if [ -z "$cause" ]; then
@@ -279,11 +309,15 @@ pick_handback() {
 # --- 2. Local pane in the frozen copy of a remote root: open it remote ------
 pick_open() {
   local origin_pane="$1" origin_cmd="$2" root="$3"
-  if ! rw_is_idle_command "$origin_cmd"; then
-    rw_dialog "$(rw_pick_tilde "$root") is remote, and this pane is busy running '$origin_cmd'. Open a new window for it from the picker instead (prefix o, then w)." \
-      "$origin_pane" "Remote workspace"
-    exit 0
-  fi
+  # Shells only: rw open respawns the pane (-k), which would kill an
+  # editor with its unsaved buffers.
+  case "$origin_cmd" in
+    zsh | bash | sh | fish | dash | ksh | -zsh | -bash) ;;
+    *)
+      rw_pick_notice "Remote workspace" "$(rw_pick_tilde "$root") is remote, and this pane is running '$origin_cmd'; opening it remote would replace that. Quit it first, or open a new window from the picker (prefix o, then w)."
+      exit 0
+      ;;
+  esac
   printf '\n  %s is remote; this local copy is frozen.\n' "$(rw_pick_tilde "$root")"
   rw_pick_yes "open this pane remote in $(rw_pick_tilde "$root")?" || exit 0
   printf '\n'
@@ -306,8 +340,14 @@ pick_handoff() {
 }
 
 pick() {
-  rw_need_jq
-  rw_config_valid || rw_die "config.json ($RW_CONFIG_FILE) is invalid"
+  if ! command -v jq >/dev/null 2>&1 || ! command -v fzf >/dev/null 2>&1; then
+    rw_pick_notice "Remote workspace" "prefix e needs jq and fzf on the tmux server's PATH; one of them is missing."
+    exit 0
+  fi
+  if ! rw_config_valid; then
+    rw_pick_notice "Remote workspace" "config.json ($RW_CONFIG_FILE) is invalid."
+    exit 0
+  fi
 
   # Resolve the invoking pane BEFORE fzf: inside a popup, display-message
   # with no target resolves against the client's active pane, which is
@@ -333,8 +373,7 @@ pick() {
 
   root="$(rw_default_root_for_path "$origin_cwd")"
   if ! rw_root_rel "$root" >/dev/null; then
-    rw_dialog "$(rw_pick_tilde "$root") is not inside your home directory (or is the home directory itself); only directories under ~ can be handed off." \
-      "$origin_pane" "Remote workspace"
+    rw_pick_notice "Remote workspace" "$(rw_pick_tilde "$root") is not inside your home directory (or is the home directory itself); only directories under ~ can be handed off."
     exit 0
   fi
   pick_handoff "$origin_pane" "$root"
