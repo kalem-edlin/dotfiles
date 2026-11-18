@@ -274,6 +274,13 @@ Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
 - C2 the worker checkout gets the laptop branch's upstream (`branch.<b>.remote/.merge`, adding that remote with the laptop's URL). Preflight skips the git-host auth probe for local-path and `file://` remotes.
 - C3 attach loops log `reconnect` / `attached` in events.jsonl at the moment they reattach.
 
+### Changes recorded by the rw agent re-run fix wave (2026-11-18)
+
+- C2 `rw handback [--wait-idle [seconds]]`: refused (exit 1) before anything is stopped while any remote endpoint pane runs an agent whose `@agent_state` is `working`; `--wait-idle` waits (default 300s) for it first.
+- C2 hand-back writes the ownership record as `owner: focus` before the panes get their local shells (a rollback writes `worker` back), so the returned shells never see the root as remote.
+- C5 every adapter installs transcripts 0600 (new directories 0700) on both machines.
+- C6 rw requests a verified worker save after it creates sessions there too (handoff commit, `rw open`), not only after it closes them: the worker save refuses a capture during which the pane set changed ("incomplete pane logical-id coverage"), and this makes the next consistent save immediate.
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: needs a worker-to-laptop push of `@agent_*` (candidate: the attach loop's ssh ControlMaster carrying a tiny state stream into the laptop pane's options). The picker then drops the early return at `snapshot.go:415` and the Working guard covers remote agents.
