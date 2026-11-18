@@ -98,9 +98,55 @@ func fixture() *state.Snapshot {
 type fakeActions struct {
 	next    *state.Snapshot
 	calls   []string
-	err     error // returned by every action
+	err     error // returned by every tmux action
 	loadErr error
 	loads   int
+
+	// wt replies: the result per op, and errors per op returned in turn
+	// (nil once a list runs out).
+	wtResult map[string]state.WTResult
+	wtStatus state.WTStatus
+	wtEnv    state.WTEnvResult
+	wtErrs   map[string][]error
+	saveErr  error
+}
+
+func (f *fakeActions) wtErr(op string) error {
+	if len(f.wtErrs[op]) == 0 {
+		return nil
+	}
+	err := f.wtErrs[op][0]
+	f.wtErrs[op] = f.wtErrs[op][1:]
+	return err
+}
+
+func (f *fakeActions) WorktreeNew(root, branch, from string) (state.WTResult, error) {
+	f.calls = append(f.calls, fmt.Sprintf("wt new %s %s from=%s", root, branch, from))
+	return f.wtResult["new"], f.wtErr("new")
+}
+func (f *fakeActions) WorktreeStatus(root string) (state.WTStatus, error) {
+	f.calls = append(f.calls, "wt status "+root)
+	return f.wtStatus, f.wtErr("status")
+}
+func (f *fakeActions) WorktreeRepurpose(root, branch string) (state.WTResult, error) {
+	f.calls = append(f.calls, fmt.Sprintf("wt repurpose %s %s", root, branch))
+	return f.wtResult["repurpose"], f.wtErr("repurpose")
+}
+func (f *fakeActions) WorktreeRemove(root string) (state.WTResult, error) {
+	f.calls = append(f.calls, "wt rm "+root)
+	return f.wtResult["rm"], f.wtErr("rm")
+}
+func (f *fakeActions) WorktreeEnvRefresh(root string, here bool) (state.WTEnvResult, error) {
+	call := "wt env-refresh " + root
+	if here {
+		call += " --here"
+	}
+	f.calls = append(f.calls, call)
+	return f.wtEnv, f.wtErr("env-refresh")
+}
+func (f *fakeActions) SaveLayout() error {
+	f.calls = append(f.calls, "save")
+	return f.saveErr
 }
 
 var errFake = errors.New("boom")
@@ -131,7 +177,9 @@ func (f *fakeActions) Switch(s *state.Session, w *state.Window, p *state.Pane) e
 	}
 	return f.rec("switch %s %s %s", s.ID, wid, pid)
 }
-func (f *fakeActions) CreateSession(name string) error { return f.rec("create %s", name) }
+func (f *fakeActions) CreateSession(name, dir string) error {
+	return f.rec("create %s%s", name, dirArg(dir))
+}
 func (f *fakeActions) NewSession(name, dir string) error {
 	return f.rec("new-session %s%s", name, dirArg(dir))
 }

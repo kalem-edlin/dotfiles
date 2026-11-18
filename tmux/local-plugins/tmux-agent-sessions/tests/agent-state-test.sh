@@ -42,12 +42,19 @@ cat >"$shim_dir/date" <<'EOF'
 if [ "${1:-}" = "+%s" ]; then echo 1700000000; else exec /bin/date "$@"; fi
 EOF
 # Fake ps: the whole-table listing (-A) prints $AGENT_STATE_TEST_PS (default
-# empty, so nothing matches); the per-pid lookups of find_agent_pid are real.
+# empty, so nothing matches). Per-pid lookups are real unless a case supplies
+# AGENT_STATE_TEST_PARENT to force deterministic ancestry.
 cat >"$shim_dir/ps" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *" -A "*) cat "${AGENT_STATE_TEST_PS:-/dev/null}" 2>/dev/null ;;
-  *) exec /bin/ps "$@" ;;
+  *)
+    if [ -n "${AGENT_STATE_TEST_PARENT:-}" ]; then
+      printf '%s\n' "$AGENT_STATE_TEST_PARENT"
+    else
+      exec /bin/ps "$@"
+    fi
+    ;;
 esac
 EOF
 chmod +x "$shim_dir/tmux" "$shim_dir/date" "$shim_dir/ps"
@@ -79,6 +86,17 @@ not_ok() {
   printf 'FAIL: %s\n' "$1" >&2
   [ $# -lt 2 ] || printf '  expected: %s\n  actual:   %s\n' "$2" "$3" | tr "$SEP" '|' >&2
 }
+
+# Resume recovery must finish before a new prompt can publish Working.
+if jq -e '[.hooks.SessionStart[].hooks[]
+    | select((.command // "" | contains("tmux-agent-sessions/scripts/agent-state"))
+      and (.command // "" | endswith(" claude SessionStart")))]
+    | length == 1 and (.[0].async != true)' \
+    "$PLUGIN_DIR/../../../claude/.config/claudef/settings.json" >/dev/null; then
+  ok
+else
+  not_ok "Claude startup-state hook must be synchronous"
+fi
 
 join() {
   local out="" arg
@@ -261,6 +279,119 @@ assert_calls "SessionStart compact refreshes the name from the transcript" "$ss_
   "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \
     \; set -p -t "$PANE" @agent_name "Renamed session: refactor the agent-state publisher for tmux" \
     \; set -pu -t "$PANE" @agent_empty)"
+
+# --- resumed reply recovery ------------------------------------------------------
+
+# Every case runs the actual hook with a temp hook payload, the fake tmux, and
+# deterministic ps ancestry. Exact argv assertions also enforce one state-write
+# invocation, in addition to SessionStart's existing pane/server guard read.
+resume_case() {
+  local name="$1" state="$2" transcript="$3" source="${4:-resume}" empty
+  jq --arg source "$source" --arg tp "$transcript" \
+    '.source = $source | .transcript_path = $tp' "$FIXTURES/session-start-resume.json" >"$scratch/resume-hook.json"
+  hook SessionStart "$scratch/resume-hook.json" AGENT_STATE_TEST_PARENT=1
+  case "$source" in
+    startup | clear) empty="$(join set -p -t "$PANE" @agent_empty 1)" ;;
+    *) empty="$(join set -pu -t "$PANE" @agent_empty)" ;;
+  esac
+  if [ "$source" = compact ]; then
+    assert_calls "$name" "$ss_read" \
+      "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \; "$empty")"
+  else
+    assert_calls "$name" "$ss_read" \
+      "$(join set -p -t "$PANE" @agent_kind claude \; "$CWD_W" \; set -pu -t "$PANE" @agent_name \
+        \; "$empty" \; set -p -t "$PANE" @agent_subs 0 \; "$(state_calls "$state")")"
+  fi
+}
+
+marker_file="$FIXTURES/transcript-resume-marker.jsonl"
+resume_case "resume recovers a text-block marker with whitespace and blank final lines" awaiting "$marker_file"
+resume_case "resume recovers a string content marker without optional stop_reason" awaiting "$FIXTURES/transcript-resume-string.jsonl"
+resume_case "resume ignores malformed, truncated, progress and title marker matches" idle "$FIXTURES/transcript-resume-noise.jsonl"
+resume_case "startup ignores an old marker" idle "$marker_file" startup
+resume_case "clear ignores an old marker" idle "$marker_file" clear
+resume_case "compact preserves existing state despite a marker" unused "$marker_file" compact
+resume_case "resume with a missing path is idle" idle "$scratch/missing.jsonl"
+resume_case "resume with a directory path is idle" idle "$scratch"
+cp "$marker_file" "$scratch/unreadable.jsonl"
+chmod 000 "$scratch/unreadable.jsonl"
+# Root can still read chmod 000 files, so only assert this where unreadable.
+if [ ! -r "$scratch/unreadable.jsonl" ]; then
+  resume_case "resume with an unreadable transcript is idle" idle "$scratch/unreadable.jsonl"
+fi
+: >"$scratch/empty.jsonl"
+resume_case "resume with an empty transcript is idle" idle "$scratch/empty.jsonl"
+
+# Rewrite or append synthetic records. No local user transcripts are consulted.
+jq -c 'select(.type == "user")' "$marker_file" >"$scratch/turn.jsonl"
+resume_case "resume with only a user and no assistant is idle" idle "$scratch/turn.jsonl"
+for record in \
+  '{"type":"user","uuid":"new-user","parentUuid":"reply","message":{"content":"continue"}}' \
+  '{"type":"user","uuid":"tool-result","parentUuid":"reply","message":{"content":[{"type":"tool_result","content":"Awaiting your input."}]}}' \
+  '{"type":"assistant","uuid":"plain","parentUuid":"reply","message":{"content":"Done.","stop_reason":"end_turn"}}' \
+  '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Awaiting your input.","input":{}}],"stop_reason":"tool_use"}}' \
+  '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Awaiting your input."}],"stop_reason":"end_turn"}}'; do
+  { cat "$marker_file"; printf '%s\n' "$record"; } >"$scratch/turn.jsonl"
+  resume_case "a newer user/tool/plain/thinking turn masks an old marker: $record" idle "$scratch/turn.jsonl"
+done
+
+for reason in null '"tool_use"' '"max_tokens"'; do
+  jq -c --argjson reason "$reason" 'if .type == "assistant" then .message.stop_reason = $reason else . end' \
+    "$marker_file" >"$scratch/turn.jsonl"
+  resume_case "an incomplete response ($reason) cannot recover awaiting" idle "$scratch/turn.jsonl"
+done
+jq -c 'if .type == "assistant" then .message.content += [{type:"tool_use",name:"Bash",input:{}}] else . end' \
+  "$marker_file" >"$scratch/turn.jsonl"
+resume_case "a tool-bearing response is not a completed reply even with marker text" idle "$scratch/turn.jsonl"
+for text in 'Done.' 'prefix Awaiting your input.' 'Awaiting your input. suffix' $'Awaiting your input.\nMore text'; do
+  jq -c --arg text "$text" 'if .type == "assistant" then .message.content = $text else . end' \
+    "$marker_file" >"$scratch/turn.jsonl"
+  resume_case "only the exact final nonempty line counts: $text" idle "$scratch/turn.jsonl"
+done
+jq -c 'if .type == "assistant" then .message = "Awaiting your input." else . end' \
+  "$marker_file" >"$scratch/turn.jsonl"
+resume_case "a legacy string message body is supported" awaiting "$scratch/turn.jsonl"
+
+# Sidechains neither supply the marker nor mask a main-branch marker.
+{ cat "$marker_file"; printf '%s\n' '{"type":"assistant","isSidechain":true,"message":{"content":"Done."}}'; } >"$scratch/turn.jsonl"
+resume_case "a later sidechain plain reply does not mask the main marker" awaiting "$scratch/turn.jsonl"
+jq -c 'if .type == "assistant" then .isSidechain = true else . end' "$marker_file" >"$scratch/turn.jsonl"
+resume_case "a sidechain marker cannot satisfy the main user prompt" idle "$scratch/turn.jsonl"
+{ cat "$marker_file"; printf '%s\n' '{"type":"last-prompt","leafUuid":"missing-sidechain","isSidechain":true}'; } >"$scratch/turn.jsonl"
+resume_case "sidechain checkpoints cannot change the current main branch" awaiting "$scratch/turn.jsonl"
+resume_case "an explicit rewind selects its main branch rather than the last physical reply" awaiting "$FIXTURES/transcript-resume-rewind.jsonl"
+for leaf in root other-reply missing; do
+  jq -c --arg leaf "$leaf" 'if .type == "last-prompt" then .leafUuid = $leaf else . end' \
+    "$FIXTURES/transcript-resume-rewind.jsonl" >"$scratch/turn.jsonl"
+  resume_case "a selected user/plain/missing branch leaf is idle: $leaf" idle "$scratch/turn.jsonl"
+done
+{ cat "$marker_file"; printf '%s\n' '{"type":"last-prompt","leafUuid":null,"explicit":true}'; } >"$scratch/turn.jsonl"
+resume_case "an explicitly cleared branch cannot reuse an old marker" idle "$scratch/turn.jsonl"
+{ cat "$FIXTURES/transcript-resume-rewind.jsonl"; printf '%s\n' '{"type":"user","uuid":"after-checkpoint","parentUuid":"waiting-branch","message":{"content":"continue"}}'; } >"$scratch/turn.jsonl"
+resume_case "a new prompt after a checkpoint masks its marker" idle "$scratch/turn.jsonl"
+printf '%s\n' '{"type":"last-prompt","leafUuid":"waiting-branch"}' >>"$scratch/turn.jsonl"
+resume_case "an implicit stale checkpoint cannot revive a marker after a newer prompt" idle "$scratch/turn.jsonl"
+
+# Push relevant records outside the tail window without shell-variable copies
+# of the conversation. Also exercise a single oversized record cut by tail.
+jq -cn '{type:"progress",data:("x" * 300000)}' >"$scratch/padding.jsonl"
+{ cat "$marker_file"; cat "$scratch/padding.jsonl"; } >"$scratch/long-resume.jsonl"
+resume_case "streaming fallback finds a marker older than the bounded tail" awaiting "$scratch/long-resume.jsonl"
+{ cat "$FIXTURES/transcript-resume-noise.jsonl"; cat "$scratch/padding.jsonl"; } >"$scratch/long-resume.jsonl"
+resume_case "streaming fallback without a marker stays idle" idle "$scratch/long-resume.jsonl"
+jq -cn '{type:"assistant",message:{content:(("x" * 300000) + "\nAwaiting your input."),stop_reason:"end_turn"}}' >"$scratch/long-resume.jsonl"
+resume_case "streaming fallback recovers a marker in an oversized assistant record" awaiting "$scratch/long-resume.jsonl"
+{ cat "$marker_file"; jq -cn '{type:"user",message:{content:("x" * 300000)}}'; } >"$scratch/long-resume.jsonl"
+resume_case "an oversized newer user record still masks an older marker" idle "$scratch/long-resume.jsonl"
+{ cat "$FIXTURES/transcript-resume-rewind.jsonl"; cat "$scratch/padding.jsonl"; printf '%s\n' '{"type":"last-prompt","leafUuid":"waiting-branch","explicit":true}'; } >"$scratch/long-resume.jsonl"
+resume_case "a tail checkpoint resolves an older branch UUID through streaming lookup" awaiting "$scratch/long-resume.jsonl"
+{ cat "$marker_file"; cat "$scratch/padding.jsonl"; printf '%s\n' '{"type":"user","message":{"content":"new prompt"}}'; } >"$scratch/long-resume.jsonl"
+resume_case "the tail fast path sees a newer prompt and never revives an older marker" idle "$scratch/long-resume.jsonl"
+
+# An inherited live server must never be used by these tests. hook always sets
+# the fake socket, and even an explicit stale override is rejected before tmux.
+hook SessionStart "$scratch/resume-hook.json" TMUX="$scratch/never-a-live-socket,$dead_pid,0"
+assert_calls "resumed-session stale inherited server guard remains isolated"
 
 # --- UserPromptSubmit -------------------------------------------------------------
 

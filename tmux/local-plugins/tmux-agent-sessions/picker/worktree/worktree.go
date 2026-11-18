@@ -18,10 +18,12 @@ package worktree
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -173,11 +175,21 @@ func (r *Resolver) fromGitDir(root, gitDir, common string, viaCommondir bool) (I
 		return Info{}, false
 	}
 	info := Info{Root: root, CommonDir: common, Repo: repoName(root, common, viaCommondir)}
+	if !parseHead(head, &info) {
+		return Info{}, false
+	}
+	return info, true
+}
+
+// parseHead fills info's Branch (a ref, refs/heads/ stripped, other refs
+// with refs/ stripped) or Head (a detached 7-char commit id) from the
+// contents of a HEAD file. It reports false for a malformed HEAD.
+func parseHead(head []byte, info *Info) bool {
 	h := bytes.TrimSpace(firstLine(head))
 	if ref, isRef := bytes.CutPrefix(h, []byte("ref:")); isRef {
 		ref = bytes.TrimSpace(ref)
 		if len(ref) == 0 {
-			return Info{}, false
+			return false
 		}
 		s := string(ref)
 		if b, ok := strings.CutPrefix(s, "refs/heads/"); ok {
@@ -185,16 +197,18 @@ func (r *Resolver) fromGitDir(root, gitDir, common string, viaCommondir bool) (I
 		} else {
 			info.Branch = strings.TrimPrefix(s, "refs/")
 		}
-		return info, true
+		return true
 	}
 	if len(h) < 7 || !isHex(h) {
-		return Info{}, false
+		return false
 	}
 	info.Head = string(h[:7])
-	return info, true
+	return true
 }
 
-// repoName returns the source repo's local directory name.
+// repoName returns the repo name: the last path component of
+// remote.origin.url when the repo has an origin (D93), else the source
+// repo's local directory name:
 //   - <main>/.git -> basename(<main>)
 //   - <name>.git (bare) -> <name>
 //   - any other common dir reached through a commondir file (a bare repo
@@ -202,6 +216,9 @@ func (r *Resolver) fromGitDir(root, gitDir, common string, viaCommondir bool) (I
 //     basename
 //   - otherwise (submodule checkout, --separate-git-dir) -> basename(root)
 func repoName(root, common string, viaCommondir bool) string {
+	if name := remoteName(common); name != "" {
+		return name
+	}
 	base := filepath.Base(common)
 	switch {
 	case base == ".git":
@@ -213,6 +230,74 @@ func repoName(root, common string, viaCommondir bool) string {
 	default:
 		return filepath.Base(root)
 	}
+}
+
+// remoteName returns the last path component of remote.origin.url from the
+// common dir's config, without a trailing ".git", or "" when there is no
+// origin. The user wants a repo named after what it is on the remote
+// (content-engine), not after the checkout directory (main). Results are
+// cached per common dir for the life of the process; the picker is
+// short-lived so staleness is not a concern.
+func remoteName(common string) string {
+	remoteMu.Lock()
+	name, ok := remoteCache[common]
+	remoteMu.Unlock()
+	if ok {
+		return name
+	}
+	name = parseOriginName(common)
+	remoteMu.Lock()
+	remoteCache[common] = name
+	remoteMu.Unlock()
+	return name
+}
+
+var (
+	remoteMu    sync.Mutex
+	remoteCache = map[string]string{}
+)
+
+func parseOriginName(common string) string {
+	f, err := os.Open(filepath.Join(common, "config"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return ""
+	}
+	inOrigin := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			inOrigin = line == `[remote "origin"]`
+			continue
+		}
+		if !inOrigin {
+			continue
+		}
+		k, v, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(k) != "url" {
+			continue
+		}
+		return urlBase(strings.TrimSpace(v))
+	}
+	return ""
+}
+
+// urlBase: "git@github.com:org/name.git", "https://host/org/name.git",
+// "ssh://git@host/org/name", "/local/path/name.git" all give "name".
+func urlBase(u string) string {
+	u = strings.TrimRight(u, "/")
+	if i := strings.LastIndexAny(u, "/:"); i >= 0 {
+		u = u[i+1:]
+	}
+	u = strings.TrimSuffix(u, ".git")
+	if u == "" || u == "." || u == ".." {
+		return ""
+	}
+	return u
 }
 
 // readSmall reads up to 4 KiB of a file into the resolver's scratch buffer,

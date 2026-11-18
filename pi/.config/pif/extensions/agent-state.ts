@@ -133,16 +133,27 @@ function textOf(content: string | { type: string; text?: string }[]): string {
     .join("");
 }
 
-function lastAssistantText(ctx: ExtensionContext): string {
-  const branch = ctx.sessionManager.getBranch();
-  for (let i = branch.length - 1; i >= 0; i--) {
-    const entry = branch[i];
-    if (entry.type !== "message") continue;
-    const message = entry.message;
-    if (!("role" in message) || message.role !== "assistant") continue;
-    return textOf(message.content);
+// Only the current response can await input. Metadata and extension notices
+// may follow it, but a newer prompt or tool turn invalidates an older marker.
+function awaitingInput(ctx: ExtensionContext): boolean {
+  try {
+    const branch = ctx.sessionManager.getBranch();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry.type !== "message") continue;
+      const message = entry.message;
+      if (message.role === "user" || message.role === "toolResult" || message.role === "bashExecution") return false;
+      if (message.role !== "assistant") continue;
+      // Failed, interrupted, truncated or deferred output is not a completed
+      // request for input. Older/lightweight payloads may omit stopReason.
+      if (message.stopReason !== undefined && message.stopReason !== "stop") return false;
+      const callsTool = Array.isArray(message.content) && message.content.some((part) => part.type === "toolCall");
+      return !callsTool && hasMarker(textOf(message.content));
+    }
+  } catch {
+    // Session state is best effort, just like publishing it.
   }
-  return "";
+  return false;
 }
 
 function hasMarker(text: string): boolean {
@@ -295,8 +306,27 @@ export default function (pi: ExtensionAPI) {
       set(pane, "@agent_pid", String(process.pid)),
       ...(cwdOk ? [set(pane, "@agent_cwd", cwd)] : []),
       set(pane, "@agent_subs", "0"),
-      ...setState(pane, "idle", now()),
+      ...setState(pane, awaitingInput(ctx) ? "awaiting" : "idle", now()),
       fallback ? set(pane, "@agent_name", fallback) : nameCommand(pane, sessionName),
+      prompt ? unset(pane, "@agent_empty") : set(pane, "@agent_empty", "1"),
+    ]);
+  });
+
+  // /tree keeps the runtime alive, unlike /resume, so restore its new branch
+  // explicitly without resetting the session name or running subagent count.
+  pi.on("session_tree", (_event, ctx) => {
+    const pane = paneTarget();
+    if (!pane) return;
+    const awaiting = awaitingInput(ctx);
+    heldWorking = !awaiting && !turnActive && subs > 0;
+    let prompt = " ";
+    try {
+      prompt = firstPrompt(ctx);
+    } catch {
+      // Do not mark an unreadable branch as empty.
+    }
+    void publish([
+      ...setState(pane, awaiting ? "awaiting" : turnActive || subs > 0 ? "working" : "idle", now()),
       prompt ? unset(pane, "@agent_empty") : set(pane, "@agent_empty", "1"),
     ]);
   });
@@ -336,12 +366,7 @@ export default function (pi: ExtensionAPI) {
     turnActive = false;
     const pane = paneTarget();
     if (!pane) return;
-    let awaiting = false;
-    try {
-      awaiting = hasMarker(lastAssistantText(ctx));
-    } catch {
-      awaiting = false;
-    }
+    const awaiting = awaitingInput(ctx);
     const at = now();
     heldWorking = !awaiting && subs > 0;
     void publish(

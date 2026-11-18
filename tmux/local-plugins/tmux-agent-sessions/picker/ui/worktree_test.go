@@ -8,76 +8,87 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
+	"agentpicker/inspect"
 	"agentpicker/state"
 )
 
-// wtree builds a worktree from member panes already linked into windows,
-// in window and pane order, as tmuxio groups them.
-func wtree(root, repo, branch, head string, panes ...*state.Pane) *state.Worktree {
-	t := &state.Worktree{Root: root, Repo: repo, Branch: branch, Head: head}
-	for _, p := range panes {
-		p.Worktree = t
-		t.Panes = append(t.Panes, p)
-		if n := len(t.Windows); n == 0 || t.Windows[n-1] != p.Window {
-			t.Windows = append(t.Windows, p.Window)
+// wtOf builds a worktree; with a session it has that session's windows and
+// panes, as tmuxio matches them by name (V1).
+func wtOf(root, repo, branch, head string, at int64, s *state.Session) *state.Worktree {
+	name := root[strings.LastIndex(root, "/")+1:]
+	t := &state.Worktree{Root: root, Name: name, Repo: repo, Branch: branch, Head: head, ActiveAt: at, Session: s}
+	if s != nil {
+		t.Current, t.Windows, t.Panes = s.Current, s.Windows, s.Members()
+		for _, p := range t.Panes {
+			p.Worktree = t
 		}
 	}
 	return t
 }
 
-// wtFixture is three sessions whose panes sit in five worktrees of three
-// repos, plus one pane in no repo. Worktrees in display order, the
-// client's own (dotfiles) last:
+// wtFixture is seven worktrees of three repos and one plain session, in
+// display order (oldest at the top, the client's own last):
 //
-//	yap-trial         main             yap shell
-//	content-engine-5  detached         ce5 agent
-//	content-engine-1  main             1 agent in the shared "agents" window
-//	roll-hiring       exp/roll-hiring  2 agents and a shell in "agents", nvim in "edit"
-//	dotfiles          main             picker window, the edit window's agent
+//	content-engine-9  exp/gone         missing, no session
+//	yap-trial         main             no session
+//	misc              (plain session, named after no worktree)
+//	content-engine-7  exp/heavy        locked, no session (heavy in tests)
+//	content-engine-5  detached         session $5, a done agent
+//	content-engine-1  main             session $4, a working agent
+//	roll-hiring       exp/roll-hiring  session $2: 2 agents and nvim in "agents", nvim in "edit"
+//	dotfiles          main             session $1, current
 func wtFixture() *state.Snapshot {
 	cur := active(focused(5, agent("claude", "picker worktrees", state.StateWorking, 15, 800)))
 	dotShell := shell("zsh", "go test ./...", 10)
-	editAgent := agent("claude", "dotfiles docs", state.StateIdle, 3600, 300)
-	editNvim := active(shell("nvim", "nvim roll.ts", 80))
 	rhA := active(agent("claude", "hiring copy", state.StateAwaiting, 300, 500))
 	rhB := focused(30, agent("pi", "hiring review", state.StateDone, 60, 300))
-	ceA := agent("claude", "engine refactor", state.StateWorking, 120, 600)
 	rhShell := shell("nvim", "nvim hiring.md", 100)
+	editNvim := active(shell("nvim", "nvim roll.ts", 80))
+	ceA := active(agent("claude", "engine refactor", state.StateWorking, 120, 600))
 	ce5 := active(agent("claude", "ce5 audit", state.StateDone, 900, 400))
-	yap := active(shell("zsh", "pnpm dev", 50))
-	home := shell("zsh", "", 5)
+	home := active(shell("zsh", "", 5))
 
-	content := sess("$2", "content", now-60,
-		win(1, "agents", true, rhA, rhB, ceA, rhShell),
-		win(2, "ce5", false, ce5))
-	content.Attached = true
-	dot := sess("$1", "dotfiles", now,
-		win(1, "picker", true, cur, dotShell),
-		win(2, "edit", false, editAgent, editNvim))
+	dot := sess("$1", "dotfiles", now, win(1, "picker", true, cur, dotShell))
 	dot.Current, dot.Attached = true, true
-	misc := sess("$3", "misc", now-600, win(1, "yap", true, yap, home))
+	rh := sess("$2", "roll-hiring", now-60,
+		win(1, "agents", true, rhA, rhB, rhShell),
+		win(2, "edit", false, editNvim))
+	rh.Attached = true
+	misc := sess("$3", "misc", now-20000, win(1, "home", true, home))
+	ce1 := sess("$4", "content-engine-1", now-1000, win(1, "agents", true, ceA))
+	ce5s := sess("$5", "content-engine-5", now-3000, win(1, "ce5", true, ce5))
 
 	wts := []*state.Worktree{
-		wtree("/dev/yap-trial", "yap-trial", "main", "", yap),
-		wtree("/dev/content-engine-5", "content-engine-1", "", "1a2b3c4", ce5),
-		wtree("/dev/content-engine-1", "content-engine-1", "main", "", ceA),
-		wtree("/dev/roll-hiring", "content-engine-1", "exp/roll-hiring", "", rhA, rhB, rhShell, editNvim),
-		wtree("/dev/dotfiles", "dotfiles", "main", "", cur, dotShell, editAgent),
+		wtOf("/dev/content-engine-9", "content-engine-1", "exp/gone", "", now-90000, nil),
+		wtOf("/dev/yap-trial", "yap-trial", "main", "", now-50000, nil),
+		wtOf("/dev/content-engine-7", "content-engine-1", "exp/heavy", "", now-5000, nil),
+		wtOf("/dev/content-engine-5", "content-engine-1", "", "1a2b3c4", 0, ce5s),
+		wtOf("/dev/content-engine-1", "content-engine-1", "main", "", 0, ce1),
+		wtOf("/dev/roll-hiring", "content-engine-1", "exp/roll-hiring", "", 0, rh),
+		wtOf("/dev/dotfiles", "dotfiles", "main", "", 0, dot),
 	}
-	wts[4].Current = true
+	wts[0].Missing = true
+	wts[2].Locked = true
 	return &state.Snapshot{CurrentID: "$1", CurrentPane: cur.ID,
-		Sessions: []*state.Session{misc, content, dot}, Worktrees: wts, Now: now}
+		Sessions: []*state.Session{misc, ce5s, ce1, rh, dot}, Worktrees: wts, Now: now}
+}
+
+// wtRoots is the fixture's list order, top to bottom.
+var wtRoots = []string{
+	"/dev/content-engine-9", "/dev/yap-trial", "$3", "/dev/content-engine-7",
+	"/dev/content-engine-5", "/dev/content-engine-1", "/dev/roll-hiring", "/dev/dotfiles",
 }
 
 func newWTTest(t *testing.T) (model, *fakeActions) {
 	f := &fakeActions{next: wtFixture()}
 	m := resize(newModel(f, wtFixture(), nil), 120, 36)
-	return send(t, m, "ctrl+w"), f
+	m.heavy["/dev/content-engine-7"] = []string{"ios", "lfs"}
+	return m, f
 }
 
 func rowRoot(m model) string {
-	if t := m.worktree(); t != nil {
-		return t.Root
+	if r := m.row(); r != nil {
+		return r.RowID()
 	}
 	return ""
 }
@@ -90,20 +101,16 @@ func matchRoots(m model) []string {
 	return out
 }
 
-// wtRows renders the fixture's worktree rows with "ain" highlighted and
-// the cursor on roll-hiring, abbreviated or in full-repo mode.
+// wtRows renders every row of the fixture with "ain" highlighted and the
+// cursor on roll-hiring, abbreviated or in full-repo mode.
 func wtRows(w int, full bool) []string {
-	snap := wtFixture()
-	m := newModel(&fakeActions{}, snap, nil)
-	fullW := 0
-	if full {
-		fullW = m.repoW
-	}
+	m, _ := newWTTest(nil)
+	m.fullRepo = full
 	mm := newMatcher()
 	var lines []string
-	for i, wt := range snap.Worktrees {
-		_, pos := mm.match("ain", rowLabel(wt))
-		lines = append(lines, renderRow(newWorktreeRow(wt, pos, false, m.badges[wt.Repo], fullW), 0, w, i == 3, now))
+	for i, r := range m.rows {
+		_, pos := mm.match("ain", rowLabel(r))
+		lines = append(lines, renderRow(m.listRow(r, pos, false), m.memWidth(), w, i == 6, now))
 	}
 	return lines
 }
@@ -125,51 +132,120 @@ func TestGoldenWorktreeRows(t *testing.T) {
 	}
 }
 
-// A worktree row is the gutter, the 2-column badge on its repo's shade, a
-// space and the label, with no repo column. Full-repo mode widens every
-// badge to the longest repo name, keeps the branch label aligned, and
-// drops the agents section but not the status chips (D76, D78).
-func TestWorktreeRowBadges(t *testing.T) {
+// One list (V5): every worktree, with or without a session, and the plain
+// session, in last-active order; the cursor one above the current row.
+// ctrl-w opens the new window prompt (D104, was unbound in D86).
+func TestOneList(t *testing.T) {
+	m, _ := newWTTest(t)
+	if got := matchRoots(m); !reflect.DeepEqual(got, wtRoots) {
+		t.Fatalf("rows\n got %v\nwant %v", got, wtRoots)
+	}
+	if rowRoot(m) != "/dev/roll-hiring" || cardID(m) != "%agents.2" { // rhB, focused 30s ago
+		t.Fatalf("cursor %q card %q", rowRoot(m), cardID(m))
+	}
+	if got := m.countText(); got != "8/8" {
+		t.Errorf("count = %s", got)
+	}
+	before := strings.Join(m.renderList(), "\n")
+	m = send(t, m, "ctrl+w") // new window since D104, as C-a w
+	if m.pending != promptNewWindow || m.targetDir != "/dev/roll-hiring" {
+		t.Errorf("ctrl+w: pending=%v dir=%q", m.pending, m.targetDir)
+	}
+	m = send(t, m, "esc")
+	if rowRoot(m) != "/dev/roll-hiring" || m.query.Value() != "" || strings.Join(m.renderList(), "\n") != before {
+		t.Errorf("ctrl+w then esc changed something: %q %q", rowRoot(m), m.query.Value())
+	}
+	m = send(t, m, "ctrl+n")
+	if rowRoot(m) != "/dev/dotfiles" || cardID(m) != "$1@w1-picker" {
+		t.Errorf("current row: %q %q", rowRoot(m), cardID(m))
+	}
+}
+
+// A worktree row with a session is the session's row behind the badge:
+// chips, agents and memory. One without is bare: dim badge text and label,
+// its markers, nothing on the right. A plain session row keeps its name,
+// lined up with the labels behind a blank badge.
+func TestWorktreeRowContent(t *testing.T) {
 	const w = 120
-	snap := wtFixture()
-	badges := newModel(&fakeActions{}, snap, nil).badges
-	short, full := wtRows(w, false), wtRows(w, true)
-	for i, wt := range snap.Worktrees {
-		b := badges[wt.Repo]
-		label := wt.Branch
-		if wt.Detached() {
-			label = wt.Head
+	m, _ := newWTTest(t)
+	lines := wtRows(w, false)
+	for i, r := range m.rows {
+		got := ansi.Strip(lines[i])
+		switch x := r.(type) {
+		case *state.Worktree:
+			b := m.badges[x.Repo]
+			label := rowLabel(x)
+			if col(got, label) != 5 || !strings.Contains(got, b.code+" "+label) {
+				t.Errorf("row %d: %q", i, got)
+			}
+			if strings.Contains(got, x.Repo) {
+				t.Errorf("row %d shows the repo name: %q", i, got)
+			}
+			if bare := x.Session == nil; bare == strings.Contains(got, botIcon) {
+				t.Errorf("row %d bare=%v: %q", i, bare, got)
+			}
+			if x.Session == nil && (!strings.Contains(lines[i], fg(dimFg)) || strings.Contains(got, "│")) {
+				t.Errorf("bare row %d not dim: %q", i, lines[i])
+			}
+			if x.Session != nil && !strings.Contains(got, memLabel(x.Panes)) {
+				t.Errorf("row %d lacks memory %s: %q", i, memLabel(x.Panes), got)
+			}
+		case *state.Session:
+			if col(got, x.Name) != 5 || !strings.Contains(got, botIcon) {
+				t.Errorf("session row %d: %q", i, got)
+			}
 		}
-		got := ansi.Strip(short[i])
-		if !strings.HasPrefix(got[len("▌"):], " "+b.code+" "+label) && !strings.HasPrefix(got, "  "+b.code+" "+label) {
-			t.Errorf("row %d: %q", i, got)
+	}
+	// Full-repo mode: badges widen, labels and names stay aligned, the right
+	// side keeps only the chips.
+	full := wtRows(w, true)
+	for i, r := range m.rows {
+		got := ansi.Strip(full[i])
+		at := 2 + len("content-engine-1") + 1
+		if c := col(got, rowLabel(r)); c != at {
+			t.Errorf("full row %d: label at %d: %q", i, c, got)
 		}
-		if !strings.Contains(short[i], bg(b.bg)) || !strings.Contains(full[i], bg(b.bg)) {
-			t.Errorf("row %d: badge shade %s missing", i, b.bg)
-		}
-		if strings.Contains(got, wt.Repo) {
-			t.Errorf("row %d still shows the repo name: %q", i, got)
-		}
-		if !strings.Contains(got, botIcon) {
-			t.Errorf("row %d lacks its agents section: %q", i, got)
-		}
-		f := ansi.Strip(full[i])
-		if col(f, label) != 2+len("content-engine-1")+1 || !strings.Contains(f, wt.Repo) {
-			t.Errorf("full row %d: label at %d: %q", i, col(f, label), f)
-		}
-		if strings.Contains(f, botIcon) || strings.Contains(f, "│") {
-			t.Errorf("full row %d keeps the agents section: %q", i, f)
-		}
-		if n := len(aggregate(wt.Panes, rowOrder)); n > 0 && !strings.Contains(f, "Working") &&
-			!strings.Contains(f, "Done") && !strings.Contains(f, "Awaiting") {
-			t.Errorf("full row %d lost its chips: %q", i, f)
+		if strings.Contains(got, botIcon) || strings.Contains(got, "│") {
+			t.Errorf("full row %d keeps the agents section: %q", i, got)
 		}
 	}
 	// The full badge is truncated at repoFullMaxW.
-	long := wtree("/dev/x", "a-repository-name-longer-than-the-cap", "main", "")
+	long := wtOf("/dev/x", "a-repository-name-longer-than-the-cap", "main", "", 0, nil)
 	r := newWorktreeRow(long, nil, false, repoBadge{code: "ar", fg: cText, bg: cSurface2}, repoFullMaxW)
 	if r.repo != "a-repository-name-longe…" || width(r.repo) != repoFullMaxW {
 		t.Errorf("long repo badge = %q", r.repo)
+	}
+}
+
+// Markers follow the label (V6): heavy symbols once probed, the lock, then
+// missing. A long label truncates before a marker is dropped.
+func TestRowMarkers(t *testing.T) {
+	m, _ := newWTTest(t)
+	lines := wtRows(120, false)
+	if got := ansi.Strip(lines[3]); !strings.Contains(got, "exp/heavy ios lfs "+lockIcon) {
+		t.Errorf("heavy locked row: %q", got)
+	}
+	if !strings.Contains(lines[3], fg(heavyFg)) {
+		t.Errorf("heavy symbols colour: %q", lines[3])
+	}
+	if got := ansi.Strip(lines[0]); !strings.Contains(got, "exp/gone missing") || !strings.Contains(lines[0], fg(errorFg)) {
+		t.Errorf("missing row: %q", lines[0])
+	}
+	for _, i := range []int{1, 4, 5, 6, 7} {
+		if got := ansi.Strip(lines[i]); strings.Contains(got, "ios") || strings.Contains(got, "missing") || strings.Contains(got, lockIcon) {
+			t.Errorf("row %d has markers: %q", i, got)
+		}
+	}
+	// Before the probe answers there are no heavy symbols.
+	delete(m.heavy, "/dev/content-engine-7")
+	if got := ansi.Strip(renderRow(m.listRow(m.rows[3], nil, false), 0, 120, false, now)); strings.Contains(got, "ios") {
+		t.Errorf("unprobed row: %q", got)
+	}
+	t7 := m.rows[3].(*state.Worktree)
+	t7.Branch = strings.Repeat("long-branch-", 6)
+	row := ansi.Strip(renderRow(m.listRow(t7, nil, false), 0, 40, false, now))
+	if !strings.Contains(row, "… "+lockIcon) || width(row) != 40 {
+		t.Errorf("narrow row: %q", row)
 	}
 }
 
@@ -254,14 +330,12 @@ func TestAssignRepoBadges(t *testing.T) {
 	}
 }
 
-// roll-hiring's cards: its two agents split the shared window (the third
-// agent there belongs to content-engine-1 and gets no card), and the edit
-// window, whose only agent is another worktree's, is a window card titled
-// by its member nvim pane. content-engine-1 gets one window card showing
-// its single member agent. Pane counts and memory stay window totals.
+// roll-hiring's cards are its session's: two split agent cards in the
+// agents window and the edit window. content-engine-1 has one window card.
+// A bare row has none.
 func TestGoldenWorktreeCards(t *testing.T) {
 	snap := wtFixture()
-	rh, ce1 := snap.Worktrees[3], snap.Worktrees[2]
+	rh, ce1 := snap.Worktrees[5], snap.Worktrees[4]
 	for _, w := range []int{80, 120} {
 		lines := renderGrid(worktreeCards(rh), 0, 0, w, 10, now)
 		lines = append(lines, renderGrid(worktreeCards(ce1), 0, 0, w, 5, now)...)
@@ -270,6 +344,16 @@ func TestGoldenWorktreeCards(t *testing.T) {
 		if w == 120 {
 			golden(t, "wt_cards_120_styled", strings.Join(lines, "\n")+"\n")
 		}
+	}
+	if c := worktreeCards(snap.Worktrees[1]); c != nil {
+		t.Errorf("bare row cards: %v", c)
+	}
+	var got []string
+	for _, c := range worktreeCards(rh) {
+		got = append(got, fmt.Sprintf("%s split=%v", c.id(), c.split))
+	}
+	if want := []string{"%agents.1 split=true", "%agents.2 split=true", "$2@w2-edit split=false"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("cards %v", got)
 	}
 }
 
@@ -300,106 +384,53 @@ func TestGoldenWorktreeInputLine(t *testing.T) {
 	}
 }
 
-func TestWorktreeCardMembership(t *testing.T) {
-	snap := wtFixture()
-	var got []string
-	for _, c := range worktreeCards(snap.Worktrees[3]) {
-		got = append(got, fmt.Sprintf("%s split=%v pane=%v", c.id(), c.split, c.pane != nil))
-	}
-	want := []string{
-		"%agents.1 split=true pane=true",
-		"%agents.2 split=true pane=true",
-		"$1@w2-edit split=false pane=false",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("cards\n got %v\nwant %v", got, want)
-	}
-	c := worktreeCards(snap.Worktrees[3])[2]
-	if lines := cardContent(c, 56, true, now); ansi.Strip(lines[1]) != "nvim roll.ts" ||
-		!strings.Contains(ansi.Strip(lines[2]), "2 panes") || strings.Contains(ansi.Strip(lines[2]), "claudef") {
-		t.Errorf("edit window card: %q", ansi.Strip(strings.Join(lines, " / ")))
-	}
-	// Session mode still shows every agent.
-	if n := len(sessionCards(snap.Sessions[1])); n != 4 {
-		t.Errorf("content session: %d cards, want 3 split + 1", n)
-	}
-}
-
-// ctrl+w switches to worktree rows with the cursor one above the current
-// worktree and the last focused member pane's card, and back.
-func TestWorktreeModeSwitch(t *testing.T) {
-	m := resize(newModel(&fakeActions{}, wtFixture(), nil), 120, 36)
-	if m.mode != modeSessions || sessionName(m) != "content" {
-		t.Fatalf("opens on %v %q", m.mode, sessionName(m))
-	}
-	m = send(t, m, "ctrl+w")
-	if m.mode != modeWorktrees || rowRoot(m) != "/dev/roll-hiring" {
-		t.Fatalf("worktree mode cursor = %q", rowRoot(m))
-	}
-	if cardID(m) != "%agents.2" { // rhB, focused 30s ago
-		t.Errorf("default card = %q", cardID(m))
-	}
-	if got := m.countText(); got != "5/5" {
-		t.Errorf("count = %s", got)
-	}
-	rows := ansi.Strip(strings.Join(m.renderList(), "\n"))
-	if !strings.Contains(rows, "co exp/roll-hiring") || strings.Contains(rows, "content-engine-1") {
-		t.Errorf("rows:\n%s", rows)
-	}
-	m = send(t, m, "ctrl+n")
-	if rowRoot(m) != "/dev/dotfiles" || cardID(m) != "$1@w1-picker" {
-		t.Errorf("current row: %q %q", rowRoot(m), cardID(m))
-	}
-	m = send(t, m, "ctrl+w")
-	if m.mode != modeSessions || sessionName(m) != "content" {
-		t.Errorf("back to sessions: %v %q", m.mode, sessionName(m))
-	}
-}
-
+// Without focus stamps a worktree's session falls back to its active
+// window's active pane; a bare row has no card.
 func TestWorktreeDefaultCardFallback(t *testing.T) {
-	clear := func(snap *state.Snapshot) {
-		for _, p := range snap.Worktrees[3].Panes {
-			p.FocusAt = 0
-		}
-	}
 	snap := wtFixture()
-	clear(snap)
-	m := send(t, resize(newModel(&fakeActions{}, snap, nil), 120, 36), "ctrl+w")
-	if cardID(m) != "%agents.1" { // active pane of the active window of attached $2
+	for _, p := range snap.Worktrees[5].Panes {
+		p.FocusAt = 0
+	}
+	m := resize(newModel(&fakeActions{}, snap, nil), 120, 36)
+	if cardID(m) != "%agents.1" {
 		t.Errorf("fallback = %q", cardID(m))
 	}
-	snap = wtFixture()
-	clear(snap)
-	snap.Sessions[1].Attached = false // and $1's edit window is not active
-	m = send(t, resize(newModel(&fakeActions{}, snap, nil), 120, 36), "ctrl+w")
-	if m.sel != 0 {
-		t.Errorf("no fallback pane: sel = %d", m.sel)
+	m = send(t, m, "ctrl+p", "ctrl+p", "ctrl+p") // content-engine-7
+	if rowRoot(m) != "/dev/content-engine-7" || len(m.cards) != 0 || m.sel != 0 {
+		t.Errorf("bare row: %q cards %d", rowRoot(m), len(m.cards))
 	}
 }
 
-// Without a current worktree the cursor starts on the bottom row.
+// Without a current row the cursor starts on the bottom row.
 func TestWorktreeNoCurrent(t *testing.T) {
 	snap := wtFixture()
-	snap.Worktrees[4].Current = false
-	m := send(t, resize(newModel(&fakeActions{}, snap, nil), 120, 36), "ctrl+w")
+	snap.Worktrees[6].Current = false
+	snap.Sessions[4].Current = false
+	m := resize(newModel(&fakeActions{}, snap, nil), 120, 36)
 	if rowRoot(m) != "/dev/dotfiles" {
 		t.Errorf("cursor = %q", rowRoot(m))
 	}
 }
 
+// Tab steps through All and the repos in the order fixed at open: the
+// current repo, then by most recently active worktree. A repo shows only
+// its worktrees, bare ones included; plain sessions show under All.
 func TestRepoFilterCycle(t *testing.T) {
 	m, _ := newWTTest(t)
+	if want := []string{"dotfiles", "content-engine-1", "yap-trial"}; !reflect.DeepEqual(m.repoOrder, want) {
+		t.Fatalf("tab order %v", m.repoOrder)
+	}
 	steps := []struct {
 		key, repo, count, cur string
 	}{
 		{"tab", "dotfiles", "1/1", "/dev/dotfiles"},
-		{"tab", "content-engine-1", "3/3", "/dev/roll-hiring"},
+		{"tab", "content-engine-1", "5/5", "/dev/roll-hiring"},
 		{"tab", "yap-trial", "1/1", "/dev/yap-trial"},
-		{"tab", "", "5/5", "/dev/roll-hiring"}, // wraps to All
+		{"tab", "", "8/8", "/dev/roll-hiring"}, // wraps to All
 		{"shift+tab", "yap-trial", "1/1", "/dev/yap-trial"},
-		{"shift+tab", "content-engine-1", "3/3", "/dev/roll-hiring"},
+		{"shift+tab", "content-engine-1", "5/5", "/dev/roll-hiring"},
 		{"shift+tab", "dotfiles", "1/1", "/dev/dotfiles"},
-		{"shift+tab", "", "5/5", "/dev/roll-hiring"},
+		{"shift+tab", "", "8/8", "/dev/roll-hiring"},
 		{"shift+tab", "yap-trial", "1/1", "/dev/yap-trial"}, // wraps back
 	}
 	for i, st := range steps {
@@ -408,23 +439,33 @@ func TestRepoFilterCycle(t *testing.T) {
 			t.Fatalf("step %d %s: repo=%q count=%s cur=%q", i+1, st.key, m.repo, m.countText(), rowRoot(m))
 		}
 	}
+	m = send(t, m, "tab", "tab", "tab") // content-engine-1
+	want := []string{"/dev/content-engine-9", "/dev/content-engine-7", "/dev/content-engine-5", "/dev/content-engine-1", "/dev/roll-hiring"}
+	if got := matchRoots(m); !reflect.DeepEqual(got, want) {
+		t.Errorf("content-engine-1 rows %v", got)
+	}
 	// The filter applies before the query.
-	m = send(t, m, "tab", "tab", "tab", "m", "a", "i", "n")
-	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"/dev/content-engine-1"}) || m.countText() != "1/3" {
+	m = send(t, m, "m", "a", "i", "n")
+	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"/dev/content-engine-1"}) || m.countText() != "1/5" {
 		t.Errorf("filtered query: %v %s", got, m.countText())
 	}
 }
 
-func TestTabDoesNothingInSessionMode(t *testing.T) {
+// With no worktree discovered there is no repo filter or full-repo mode.
+func TestTabWithoutWorktrees(t *testing.T) {
 	m, _ := newTest(t)
 	m = send(t, m, "tab", "shift+tab", "ctrl+t")
 	if m.repo != "" || m.fullRepo || m.query.Value() != "" || sessionName(m) != "dotfiles-agents-with-a-very-long-session-name-for-truncation" {
-		t.Errorf("session mode: repo=%q full=%v query=%q cur=%q", m.repo, m.fullRepo, m.query.Value(), sessionName(m))
+		t.Errorf("repo=%q full=%v query=%q cur=%q", m.repo, m.fullRepo, m.query.Value(), sessionName(m))
+	}
+	if strings.Contains(ansi.Strip(m.renderInput()), "All") {
+		t.Errorf("filter chip without worktrees: %q", ansi.Strip(m.renderInput()))
 	}
 }
 
-// Search matches branches (or a detached commit id) in either repo view,
-// never re-ranks, and always highlights the label.
+// Search matches branches (or a detached commit id), repo names, plain
+// session names, and a worktree's directory name (its session's name)
+// without a highlight. Rows never re-rank.
 func TestWorktreeSearch(t *testing.T) {
 	m, _ := newWTTest(t)
 	m = send(t, m, "m", "a", "i", "n")
@@ -443,38 +484,21 @@ func TestWorktreeSearch(t *testing.T) {
 	if !strings.Contains(list, fg(matchFg)) || !strings.Contains(ansi.Strip(list), "content-engine-1 main") {
 		t.Errorf("full-repo mode: %q", ansi.Strip(list))
 	}
-	// A directory is not searched.
-	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "/", "d", "e", "v")
-	if len(m.matches) != 0 {
-		t.Errorf("directory matched: %v", matchRoots(m))
+	m = send(t, m, "ctrl+t")
+	m.query.SetValue("content-engine-5")
+	m.refilter()
+	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"/dev/content-engine-5"}) || m.pos[0] != nil || m.repoHit[0] {
+		t.Errorf("directory name: %v pos %v hit %v", got, m.pos, m.repoHit)
 	}
-	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "1", "a", "2", "b")
+	m.query.SetValue("misc")
+	m.refilter()
+	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"$3"}) {
+		t.Errorf("plain session: %v", got)
+	}
+	m.query.SetValue("1a2b")
+	m.refilter()
 	if got := matchRoots(m); !reflect.DeepEqual(got, []string{"/dev/content-engine-5"}) {
 		t.Errorf("commit id: %v", got)
-	}
-	m = send(t, m, "ctrl+t")
-	if m.fullRepo {
-		t.Error("ctrl+t should toggle back")
-	}
-}
-
-// Full-repo mode is off on open and survives mode switches within a run.
-func TestFullRepoModeKept(t *testing.T) {
-	m, _ := newWTTest(t)
-	if m.fullRepo || strings.Contains(ansi.Strip(strings.Join(m.renderList(), "\n")), "yap-trial") {
-		t.Fatal("full-repo mode should start off")
-	}
-	m = send(t, m, "ctrl+t", "ctrl+w")
-	if !m.fullRepo {
-		t.Fatal("full-repo mode lost in session mode")
-	}
-	if list := ansi.Strip(strings.Join(m.renderList(), "\n")); !strings.Contains(list, botIcon) {
-		t.Errorf("session rows changed: %q", list)
-	}
-	m = send(t, m, "ctrl+w")
-	list := ansi.Strip(strings.Join(m.renderList(), "\n"))
-	if !m.fullRepo || !strings.Contains(list, "yap-trial        main") || strings.Contains(list, botIcon) {
-		t.Errorf("back in worktree mode: full=%v\n%s", m.fullRepo, list)
 	}
 }
 
@@ -484,12 +508,12 @@ func TestFilterChipPlacement(t *testing.T) {
 	m, _ := newWTTest(t)
 	m = send(t, m, "m", "a")
 	got := ansi.Strip(m.renderInput())
-	if !strings.HasSuffix(got, " 3/5  All    ") {
+	if !strings.HasSuffix(got, " 3/8  All    ") {
 		t.Errorf("All chip: %q", got)
 	}
 	m = send(t, m, "tab", "tab") // content-engine-1
 	line := m.renderInput()
-	if !strings.HasSuffix(ansi.Strip(line), " 1/3  content-engine-1    ") {
+	if !strings.HasSuffix(ansi.Strip(line), " 1/5  content-engine-1    ") {
 		t.Errorf("repo chip: %q", ansi.Strip(line))
 	}
 	b := m.badges["content-engine-1"]
@@ -500,7 +524,7 @@ func TestFilterChipPlacement(t *testing.T) {
 	if b := m.badges["yap-trial"]; b.bg != badgeShades[2].bg || !strings.Contains(m.renderInput(), bg(b.bg)) {
 		t.Errorf("yap-trial chip: %+v %q", b, m.renderInput())
 	}
-	m = send(t, m, "ctrl+a", "C")
+	m = send(t, m, "ctrl+a", "s")
 	if strings.Contains(m.renderInput(), bg(m.badges["yap-trial"].bg)) {
 		t.Errorf("prompt shows the chip: %q", ansi.Strip(m.renderInput()))
 	}
@@ -511,36 +535,31 @@ func TestFilterChipPlacement(t *testing.T) {
 	}
 }
 
-func TestWorktreeModeKeepsFilterAndQuery(t *testing.T) {
-	m, _ := newWTTest(t)
-	m = send(t, m, "tab", "tab", "i")
-	m = send(t, m, "ctrl+w")
-	if m.mode != modeSessions || m.query.Value() != "i" || m.repo != "content-engine-1" {
-		t.Fatalf("sessions: query=%q repo=%q", m.query.Value(), m.repo)
+// The cursor is on roll-hiring (session $2, card %agents.2) after k ups.
+func wtAt(t *testing.T, ups int) (model, *fakeActions) {
+	m, f := newWTTest(t)
+	for range ups {
+		m = send(t, m, "ctrl+p")
 	}
-	// No filter in session mode, and no indicator.
-	if m.countText() != "2/3" || strings.Contains(ansi.Strip(m.renderInput()), "content-engine-1") {
-		t.Errorf("session count %s, input %q", m.countText(), ansi.Strip(m.renderInput()))
-	}
-	m = send(t, m, "ctrl+w")
-	if m.query.Value() != "i" || m.repo != "content-engine-1" || m.countText() != "3/3" { // the repo name matches "i" too
-		t.Errorf("back: query=%q repo=%q count=%s", m.query.Value(), m.repo, m.countText())
-	}
-	// With a query the cursor is the bottom match.
-	if rowRoot(m) != "/dev/roll-hiring" || cardID(m) != "%agents.2" {
-		t.Errorf("cursor %q card %q", rowRoot(m), cardID(m))
-	}
+	return m, f
 }
 
+// Keys on a worktree row with a session act on that session; on a bare
+// row only C-a s and enter (open a session there) do anything; a missing
+// row refuses enter; a plain session row is as session mode always was.
 func TestWorktreeActions(t *testing.T) {
-	m, f := newWTTest(t) // roll-hiring, card %agents.2 (session $2)
+	m, f := wtAt(t, 0) // roll-hiring
 	m = send(t, m, "ctrl+a", "R")
-	m = send(t, m, "ctrl+a", "Q")
-	if m.pending != promptNone || len(f.calls) != 0 {
-		t.Fatalf("R/Q should do nothing: pending=%v calls=%v", m.pending, f.calls)
+	if m.pending != promptRenameSession || m.prompt.Value() != "roll-hiring" {
+		t.Fatalf("R: pending=%v value=%q", m.pending, m.prompt.Value())
 	}
-	m = send(t, m, "ctrl+a", "c", "enter")
-	m = send(t, m, "ctrl+a", "C")
+	m = send(t, m, "esc", "ctrl+a", "Q")
+	if m.pending != confirmKillSession || m.target.ID != "$2" {
+		t.Fatalf("Q: pending=%v", m.pending)
+	}
+	m = send(t, m, "n")
+	m = send(t, m, "ctrl+a", "w", "enter")
+	m = send(t, m, "ctrl+a", "s")
 	if m.prompt.Value() != "roll-hiring" {
 		t.Errorf("new session default = %q", m.prompt.Value())
 	}
@@ -557,80 +576,99 @@ func TestWorktreeActions(t *testing.T) {
 		t.Errorf("calls:\n%v\nwant\n%v", f.calls, want)
 	}
 
-	// Enter on an unmatched query creates nothing and stays.
-	m, f = newWTTest(t)
-	m = send(t, m, "z", "z", "z", "enter")
-	if m.quitting || len(f.calls) != 0 {
-		t.Errorf("unmatched enter: quitting=%v calls=%v", m.quitting, f.calls)
-	}
-	// C-a C without a row does nothing either.
-	m = send(t, m, "ctrl+a", "C")
-	if m.pending != promptNone {
-		t.Error("C-a C without a worktree should not prompt")
-	}
-
-	// Enter switches to the card's session, window and pane.
-	m, f = newWTTest(t)
+	// Enter switches to the card's session, window and pane; a window card
+	// keeps its window's active pane.
+	m, f = wtAt(t, 0)
 	m = send(t, m, "enter")
 	if !m.quitting || len(f.calls) != 1 || f.calls[0] != "switch $2 $2@w1-agents %agents.2" {
 		t.Errorf("enter: %v", f.calls)
 	}
-	// A window card of another session keeps its window's active pane.
-	m, f = newWTTest(t)
+	m, f = wtAt(t, 0)
 	m = send(t, m, "ctrl+j", "enter")
-	if len(f.calls) != 1 || f.calls[0] != "switch $1 $1@w2-edit -" {
+	if len(f.calls) != 1 || f.calls[0] != "switch $2 $2@w2-edit -" {
 		t.Errorf("window card enter: %v", f.calls)
+	}
+
+	// A bare row: no session keys, C-a s prompts its directory name, and
+	// enter opens a session named after it, rooted there.
+	m, f = wtAt(t, 3) // content-engine-7
+	if rowRoot(m) != "/dev/content-engine-7" {
+		t.Fatalf("at %q", rowRoot(m))
+	}
+	for _, k := range []string{"R", "Q", "w", "r", "q"} {
+		if m = send(t, m, "ctrl+a", k); m.pending != promptNone {
+			t.Errorf("C-a %s on a bare row prompts", k)
+		}
+	}
+	m = send(t, m, "ctrl+a", "s")
+	if m.pending != promptNewSession || m.prompt.Value() != "content-engine-7" || m.targetDir != "/dev/content-engine-7" {
+		t.Errorf("bare C-a s: %v %q %q", m.pending, m.prompt.Value(), m.targetDir)
+	}
+	m = send(t, m, "esc", "enter")
+	if !m.quitting || !reflect.DeepEqual(f.calls, []string{"create content-engine-7 -c /dev/content-engine-7"}) {
+		t.Errorf("bare enter: quitting=%v %v", m.quitting, f.calls)
+	}
+
+	// A missing directory refuses enter and C-a s.
+	m, f = wtAt(t, 6) // content-engine-9
+	m = send(t, m, "enter")
+	if m.quitting || len(f.calls) != 0 || m.err == nil || !strings.Contains(ansi.Strip(m.renderInput()), "missing") {
+		t.Errorf("missing: quitting=%v calls=%v err=%v", m.quitting, f.calls, m.err)
+	}
+	if m = send(t, m, "ctrl+a", "s"); m.pending != promptNone {
+		t.Errorf("missing C-a s prompts")
+	}
+
+	// A plain session row: enter switches, C-a s starts at home.
+	m, f = wtAt(t, 4) // misc
+	if rowRoot(m) != "$3" {
+		t.Fatalf("at %q", rowRoot(m))
+	}
+	m = send(t, m, "ctrl+a", "s")
+	if m.targetDir != "" || m.prompt.Value() != "" {
+		t.Errorf("plain C-a s: %q %q", m.targetDir, m.prompt.Value())
+	}
+	m = send(t, m, "esc", "enter")
+	if !reflect.DeepEqual(f.calls, []string{"switch $3 $3@w1-home -"}) {
+		t.Errorf("plain enter: %v", f.calls)
+	}
+
+	// An unmatched query creates a session by that name in home.
+	m, f = newWTTest(t)
+	m = send(t, m, "z", "z", "z", "enter")
+	if !m.quitting || !reflect.DeepEqual(f.calls, []string{"create zzz"}) {
+		t.Errorf("unmatched enter: %v", f.calls)
 	}
 }
 
-// A reload keeps the worktree row by root and the card by id, even when the
-// rows reorder; a filter on a repo that is gone goes back to All.
+// A reload keeps the row by root and the card by id, even when the rows
+// reorder; a filter on a repo that is gone goes back to All.
 func TestWorktreeReload(t *testing.T) {
-	m, f := newWTTest(t)
-	m = send(t, m, "ctrl+p") // content-engine-1
-	if rowRoot(m) != "/dev/content-engine-1" || cardID(m) != "$2@w1-agents" {
+	m, f := wtAt(t, 1) // content-engine-1
+	if rowRoot(m) != "/dev/content-engine-1" || cardID(m) != "$4@w1-agents" {
 		t.Fatalf("setup %q %q", rowRoot(m), cardID(m))
 	}
 	next := wtFixture()
 	w := next.Worktrees
-	next.Worktrees = []*state.Worktree{w[2], w[0], w[1], w[3], w[4]}
+	next.Worktrees = []*state.Worktree{w[4], w[0], w[1], w[2], w[3], w[5], w[6]}
 	f.next = next
-	m = send(t, m, "ctrl+a", "c", "enter")
-	if rowRoot(m) != "/dev/content-engine-1" || cardID(m) != "$2@w1-agents" || m.mode != modeWorktrees {
+	m = send(t, m, "ctrl+a", "w", "enter")
+	if rowRoot(m) != "/dev/content-engine-1" || cardID(m) != "$4@w1-agents" {
 		t.Errorf("after reload: %q %q", rowRoot(m), cardID(m))
 	}
 
 	m = send(t, m, "tab", "tab", "tab") // yap-trial
 	next = wtFixture()
-	next.Worktrees = next.Worktrees[1:]
+	next.Worktrees = append(next.Worktrees[:1:1], next.Worktrees[2:]...)
 	f.next = next
-	m = send(t, m, "ctrl+a", "c", "enter")
-	if m.repo != "" || m.countText() != "4/4" {
+	m = send(t, m, "ctrl+a", "s", "enter")
+	if m.repo != "" || m.countText() != "7/7" {
 		t.Errorf("gone repo: %q %s", m.repo, m.countText())
 	}
 }
 
-// The picker opens on worktrees and ctrl+w goes to sessions; with no
-// worktree rows it opens on sessions.
-func TestOpenMode(t *testing.T) {
-	defer func(o listMode) { openMode = o }(openMode)
-	openMode = modeWorktrees
-	m := resize(newModel(&fakeActions{}, wtFixture(), nil), 120, 36)
-	if m.mode != modeWorktrees {
-		t.Fatalf("opened in mode %d, want worktrees", m.mode)
-	}
-	if m = send(t, m, "ctrl+w"); m.mode != modeSessions {
-		t.Errorf("ctrl+w went to mode %d, want sessions", m.mode)
-	}
-	snap := wtFixture()
-	snap.Worktrees = nil
-	if m := newModel(&fakeActions{}, snap, nil); m.mode != modeSessions {
-		t.Errorf("no worktrees: opened in mode %d, want sessions", m.mode)
-	}
-}
-
-// refilter in worktree mode: a row matches on its branch or its repo name,
-// the repo filter applies first, and rows keep their order (D82).
+// refilter: a row matches on its branch or its repo name, the repo filter
+// applies first, and rows keep their order (D82).
 func TestRefilterRepoMatch(t *testing.T) {
 	m, _ := newWTTest(t)
 	type hit struct {
@@ -650,29 +688,20 @@ func TestRefilterRepoMatch(t *testing.T) {
 		m.refilter()
 		return m
 	}
-
 	// Repo only: "yap" is in yap-trial and in no branch.
 	got := run(set(m, "yap"))
 	if want := []hit{{"/dev/yap-trial", true, nil}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("repo only: %+v", got)
 	}
-	// Branch only: "exp/" is in no repo name.
-	got = run(set(m, "exp/"))
-	if want := []hit{{"/dev/roll-hiring", false, []int{0, 1, 2, 3}}}; !reflect.DeepEqual(got, want) {
+	// Branch only: "roll-" is in no repo name.
+	got = run(set(m, "roll-"))
+	if want := []hit{{"/dev/roll-hiring", false, []int{4, 5, 6, 7, 8}}}; !reflect.DeepEqual(got, want) {
 		t.Errorf("branch only: %+v", got)
 	}
-	// Both: "e" is in the roll-hiring branch and in three repo names.
-	got = run(set(m, "e"))
-	if len(got) != 4 {
-		t.Fatalf("both: %+v", got)
-	}
-	for _, h := range got {
-		if !h.repo || (h.root == "/dev/roll-hiring") != (h.pos != nil) {
-			t.Errorf("both: %+v", h)
-		}
-	}
-	if got := run(set(m, "main")); len(got) != 3 || got[0].repo || got[1].repo || got[2].repo {
-		t.Errorf("main: %+v", got)
+	// Both: "exp" is in three content-engine branches, never in a repo
+	// name; "hiring" is roll-hiring's branch only.
+	if got := run(set(m, "exp/")); len(got) != 3 || got[0].repo {
+		t.Errorf("exp/: %+v", got)
 	}
 	if got := run(set(m, "qqq")); len(got) != 0 {
 		t.Errorf("neither: %+v", got)
@@ -696,7 +725,7 @@ func TestRefilterRepoMatch(t *testing.T) {
 func TestRepoHitBadge(t *testing.T) {
 	snap := wtFixture()
 	m := newModel(&fakeActions{}, snap, nil)
-	wt := snap.Worktrees[0]
+	wt := snap.Worktrees[4] // content-engine-1, with a session
 	b := m.badges[wt.Repo]
 	for _, fullW := range []int{0, m.repoW} {
 		hit := renderRow(newWorktreeRow(wt, nil, true, b, fullW), 0, 120, false, now)
@@ -738,14 +767,14 @@ func TestGoldenWorktreeRepoMatch(t *testing.T) {
 	}
 }
 
-// snapOf is a worktree-only snapshot of one pane per worktree, given as
-// repo and focus stamp pairs in row order; the repo named cur is current.
+// snapOf is a worktree-only snapshot of one bare worktree per pair of repo
+// and last-active stamp, in row order; the repo named cur is current.
 func snapOf(cur string, rows ...[2]string) *state.Snapshot {
 	snap := &state.Snapshot{Now: now}
 	for i, r := range rows {
 		var at int64
 		fmt.Sscan(r[1], &at)
-		t := wtree(fmt.Sprintf("/dev/%s-%d", r[0], i), r[0], "main", "", &state.Pane{ID: fmt.Sprintf("%%%d", i), FocusAt: at})
+		t := wtOf(fmt.Sprintf("/dev/%s-%d", r[0], i), r[0], "main", "", at, nil)
 		t.Current = r[0] == cur
 		snap.Worktrees = append(snap.Worktrees, t)
 	}
@@ -786,5 +815,138 @@ func TestRepoOrder(t *testing.T) {
 	m.applyReload(actionMsg{snap: snapOf("a", [2]string{"a", "1"}, [2]string{"d", "5"})})
 	if want := []string{"a", "d"}; !reflect.DeepEqual(m.repoOrder, want) || m.repo != "" {
 		t.Errorf("vanished: %v repo %q", m.repoOrder, m.repo)
+	}
+}
+
+// Heavy symbols arrive after the first frame (V8): Init probes every
+// present worktree once, off the UI goroutine, and a reload probes only
+// new roots.
+func TestHeavyAsync(t *testing.T) {
+	fakeHeavy["/dev/content-engine-7"] = []string{"ios"}
+	defer delete(fakeHeavy, "/dev/content-engine-7")
+	m := resize(newModel(&fakeActions{next: wtFixture()}, wtFixture(), nil), 120, 36)
+	if m.Init() != nil {
+		t.Error("no async work without async")
+	}
+	m.async = true
+	msg := m.heavyCmd()()
+	hm, ok := msg.(heavyMsg)
+	if !ok || len(hm) != 6 { // the missing one is skipped
+		t.Fatalf("heavy msg %T %v", msg, msg)
+	}
+	nm, _ := m.Update(hm)
+	m = nm.(model)
+	if got := ansi.Strip(strings.Join(wtRowsOf(m), "\n")); !strings.Contains(got, "exp/heavy ios") {
+		t.Errorf("rows: %s", got)
+	}
+	if m.heavyCmd() != nil {
+		t.Error("probed twice")
+	}
+}
+
+func wtRowsOf(m model) []string {
+	var out []string
+	for _, r := range m.rows {
+		out = append(out, renderRow(m.listRow(r, nil, false), 0, 120, false, now))
+	}
+	return out
+}
+
+// Git state is read only when the cursor rests on a worktree row (V7):
+// a move arms a timer; a stale timer does nothing; the reply fills the
+// preview line above the cards, over a rule (D107). A plain session row
+// has no preview line.
+func TestPreviewRest(t *testing.T) {
+	fakeGit["/dev/content-engine-1"] = inspect.Git{Branch: "main", Upstream: true, Ahead: 2, Behind: 1, Dirty: 3, Untracked: 1, Added: 12, Deleted: 4, Port: "3400"}
+	defer delete(fakeGit, "/dev/content-engine-1")
+	m, _ := newWTTest(t)
+	m.async = true
+	if got := ansi.Strip(m.renderPreview()); !strings.Contains(got, "/dev/roll-hiring") || !strings.Contains(got, "git …") {
+		t.Errorf("before the read: %q", got)
+	}
+	nm, cmd := m.Update(keyMsg("ctrl+p"))
+	m = nm.(model)
+	if cmd == nil || rowRoot(m) != "/dev/content-engine-1" {
+		t.Fatalf("no rest timer: %q", rowRoot(m))
+	}
+	// A stale timer (the cursor moved on) and one for another row do nothing.
+	if _, c := m.Update(restMsg{seq: m.restSeq - 1, root: "/dev/content-engine-1"}); c != nil {
+		t.Error("stale timer read git")
+	}
+	if _, c := m.Update(restMsg{seq: m.restSeq, root: "/dev/roll-hiring"}); c != nil {
+		t.Error("timer for another row read git")
+	}
+	nm, c := m.Update(restMsg{seq: m.restSeq, root: "/dev/content-engine-1"})
+	m = nm.(model)
+	if c == nil {
+		t.Fatal("rest did not read git")
+	}
+	nm, _ = m.Update(c())
+	m = nm.(model)
+	got := ansi.Strip(m.renderPreview())
+	for _, want := range []string{"/dev/content-engine-1", "3 dirty", "1 untracked", "+12 -4", "↑2 ↓1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("preview lacks %q: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "main") || strings.Contains(got, "3400") {
+		t.Errorf("preview shows the branch or the ports (D106, D107): %q", got)
+	}
+	// The line heads the grid area, a rule under it, then the cards (D107).
+	screen := strings.Split(ansi.Strip(m.render()), "\n")
+	if !strings.Contains(screen[0], "3 dirty") || strings.Trim(screen[1], "─") != "" || !strings.Contains(screen[2], "╭") {
+		t.Errorf("preview, rule, cards expected:\n%s\n%s\n%s", screen[0], screen[1], screen[2])
+	}
+	if m.previewH() != 2 {
+		t.Errorf("previewH %d, want 2", m.previewH())
+	}
+	// A zero cell is kept, dimmed, so the row keeps its shape.
+	fakeGit["/dev/content-engine-1"] = inspect.Git{Branch: "main"}
+	m.git["/dev/content-engine-1"] = fakeGit["/dev/content-engine-1"]
+	got = ansi.Strip(m.renderPreview())
+	for _, want := range []string{"0 dirty", "0 untracked", "+0 -0", "no upstream"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("zero preview lacks %q: %q", want, got)
+		}
+	}
+	// Read once per run: coming back arms nothing.
+	nm, _ = m.Update(keyMsg("ctrl+n"))
+	m = nm.(model)
+	if _, c := m.Update(keyMsg("ctrl+p")); c != nil {
+		t.Error("cached row re-armed")
+	}
+	// Missing and plain rows.
+	m, _ = wtAt(t, 6)
+	if got := ansi.Strip(m.renderPreview()); !strings.Contains(got, "directory missing") {
+		t.Errorf("missing preview: %q", got)
+	}
+	m, _ = wtAt(t, 4)
+	if m.previewH() != 0 || strings.Contains(ansi.Strip(m.render()), "git …") {
+		t.Error("plain session row has a preview line")
+	}
+}
+
+// --list prints the rows as the picker opens them and the tab order.
+func TestListOutput(t *testing.T) {
+	fakeHeavy["/dev/content-engine-7"] = []string{"ios", "lfs"}
+	defer delete(fakeHeavy, "/dev/content-engine-7")
+	var b strings.Builder
+	if err := List(&fakeActions{next: wtFixture()}, &b); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"wt\tcontent-engine-1\texp/gone\tcontent-engine-9\t-\tmissing",
+		"wt\tyap-trial\tmain\tyap-trial\t-\t-",
+		"sess\tmisc",
+		"wt\tcontent-engine-1\texp/heavy\tcontent-engine-7\t-\tios,lfs,locked",
+		"wt\tcontent-engine-1\t1a2b3c4\tcontent-engine-5\tcontent-engine-5\t-",
+		"wt\tcontent-engine-1\tmain\tcontent-engine-1\tcontent-engine-1\t-",
+		"wt\tcontent-engine-1\texp/roll-hiring\troll-hiring\troll-hiring\t-",
+		"wt\tdotfiles\tmain\tdotfiles\tdotfiles\t-",
+		"tabs\tAll\tdotfiles\tcontent-engine-1\tyap-trial",
+		"",
+	}, "\n")
+	if b.String() != want {
+		t.Errorf("got\n%s\nwant\n%s", b.String(), want)
 	}
 }

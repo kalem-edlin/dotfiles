@@ -41,6 +41,7 @@ var (
 	countFg     = cMauve // fzf info colour
 	promptFg    = cMauve
 	errorFg     = cRed
+	statusFg    = cGreen // a lifecycle action's result line (B3)
 	cellRest    = cGreen
 	cellArmed   = cRed
 	ageFg       = cOverlay1 // age outside a chip, unselected row
@@ -55,6 +56,15 @@ var (
 	shellCmdFg  = cOverlay1
 	commandFg   = cSubtext1
 	indexFg     = cLavender
+	heavyFg     = cPeach // heavy element symbols on rows (V8)
+	lockFg      = cSubtext0
+	// Preview cells (D106): one shared background, a bold value, a quieter
+	// label, and a dim pair for a zero cell.
+	previewBg      = cSurface1
+	previewValueFg = cText
+	previewLabelFg = cSubtext0
+	previewDimFg   = cOverlay1
+	previewRuleFg  = cSurface1 // the rule under the preview line, a step darker than borderRest (D107)
 )
 
 // dimAmount is how far an unselected card's colours move toward the base

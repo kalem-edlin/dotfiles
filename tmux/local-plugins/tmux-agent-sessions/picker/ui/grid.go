@@ -14,9 +14,8 @@ const (
 // card is one grid cell (D51). A window with two or more agent panes has
 // one split card per agent pane (pane set, split true). Any other window
 // has one window card; its pane is the window's single agent pane, or nil
-// when it has none. In worktree mode only member panes count: a window
-// shows when one of its panes is a member, and a member agent pane is the
-// only kind that gets a card or fills pane.
+// when it has none. buildCards can restrict this to member panes; every
+// row today counts all panes of its session.
 type card struct {
 	win   *state.Window
 	pane  *state.Pane
@@ -72,8 +71,13 @@ func anyPane(*state.Pane) bool { return true }
 
 func sessionCards(s *state.Session) []card { return buildCards(s.Windows, anyPane) }
 
+// worktreeCards is the cards of the worktree's session (V1), none without
+// one.
 func worktreeCards(t *state.Worktree) []card {
-	return buildCards(t.Windows, func(p *state.Pane) bool { return p.Worktree == t })
+	if t.Session == nil {
+		return nil
+	}
+	return sessionCards(t.Session)
 }
 
 // rowCards is the grid for a list row, nil for none.
@@ -127,23 +131,22 @@ func activeWindow(s *state.Session) *state.Window {
 }
 
 // defaultPane is the pane the grid starts on: the row's most recently
-// focused member pane. Without one, a session falls back to its active
-// window's active pane, and a worktree to a member pane that is active in
-// an active window of an attached session.
+// focused member pane. Without one, the row's session (a worktree's own)
+// falls back to its active window's active pane.
 func defaultPane(r state.Row) *state.Pane {
 	if p := lastFocusedPane(r.Members()); p != nil {
 		return p
 	}
+	var s *state.Session
 	switch r := r.(type) {
 	case *state.Session:
-		if w := activeWindow(r); w != nil {
-			return activePane(w)
-		}
+		s = r
 	case *state.Worktree:
-		for _, p := range r.Panes {
-			if p.Active && p.Window.Active && p.Window.Session.Attached {
-				return p
-			}
+		s = r.Session
+	}
+	if s != nil {
+		if w := activeWindow(s); w != nil {
+			return activePane(w)
 		}
 	}
 	return nil

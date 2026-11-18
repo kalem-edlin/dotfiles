@@ -1,5 +1,6 @@
 // agent-picker is the prefix o session picker. The binding passes the
-// invoking client's name as the only argument.
+// invoking client's name as the only argument. `agent-picker --list`
+// prints the list instead of opening the picker (tests, debugging).
 package main
 
 import (
@@ -14,6 +15,13 @@ func main() {
 	client := ""
 	if len(os.Args) > 1 {
 		client = os.Args[1]
+	}
+	if client == "--list" {
+		if err := ui.List(tmuxio.New(""), os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "agent-picker:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := ui.Run(tmuxio.New(client)); err != nil {
 		// The popup closes on exit, so a failure before the first frame

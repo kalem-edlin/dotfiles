@@ -1,0 +1,838 @@
+#!/usr/bin/env bash
+# wt: git worktree lifecycle owner for the agent picker, zsh and agents.
+#
+#   wt new <repo-root> --branch B [--from REF] [--name SLUG] [--json]
+#   wt status <root> [--json]
+#   wt rm <root> [--force] [--json]  moves it to ~/.Trash, dirt and all
+#   wt repurpose <root> --branch B [--from REF] [--stash] [--json]
+#   wt ports <root> [--json]          next free port block, writes nothing
+#   wt env-refresh <root> [--here] [--no-pull] [--json]  pull env in main (or copy
+#                                     from <root> with --here) to every worktree
+#
+# exit: 0 ok, 2 usage, 3 dirty, 4 locked, 5 refused, 6 ports, 1 other
+#
+# Git only: never runs tmux, installs, or touches DerivedData or remote
+# endpoints (the picker owns those). content-engine conventions (port keys,
+# heavy paths, LFS models path) are hard-coded until a second repo differs.
+# Spec: docs/tasks/worktree-native-tmux.md (V9-V12, R5-R10).
+# Bash 3.2 compatible.
+
+set -u
+
+WT_MODELS_PATH='packages/native-tools/ios/Models'
+WT_LFS_EXCLUDE="$WT_MODELS_PATH/**"
+PORT_KEYS='NEXT_PORT DASHBOARD_PORT ENGINE_PORT EXPO_PORT'
+PORT_STEP=100
+PORT_MAX_BLOCK=40 # keeps the NEXT band (3000+) below the ENGINE band (7500+)
+
+json=0
+
+# --- helpers ------------------------------------------------------------------
+
+port_base() {
+  case $1 in
+    NEXT_PORT) echo 3000 ;;
+    DASHBOARD_PORT) echo 3010 ;;
+    ENGINE_PORT) echo 7500 ;;
+    EXPO_PORT) echo 8081 ;;
+  esac
+}
+
+jstr() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\r'/\\r}
+  printf '"%s"' "$s"
+}
+# jstr_or_null VALUE: JSON string, or null when empty.
+jnull() { if [ -n "$1" ]; then jstr "$1"; else printf null; fi; }
+jbool() { if [ "$1" = 1 ]; then printf true; else printf false; fi; }
+# jarr WORD...: JSON array of strings.
+jarr() {
+  local out="" w
+  for w in "$@"; do out="$out,$(jstr "$w")"; done
+  printf '[%s]' "${out#,}"
+}
+
+die() {
+  local code=$1
+  shift
+  if [ "$json" = 1 ]; then
+    printf '{"ok":false,"code":%d,"error":%s}\n' "$code" "$(jstr "$*")"
+  fi
+  printf 'wt: %s\n' "$*" >&2
+  exit "$code"
+}
+
+usage() {
+  sed -n '3,9s/^# \{0,1\}//p' "$0" >&2
+  [ $# -gt 0 ] && die 2 "$*"
+  exit 2
+}
+
+canon() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+
+now() { date +%Y-%m-%dT%H:%M:%S; }
+
+# wt_dir_for MAIN SLUG: where a new worktree goes (sibling of the main checkout).
+wt_dir_for() { printf '%s/%s' "$(dirname "$1")" "$2"; }
+
+# slug_for BRANCH: directory (and tmux session) name derived from a branch.
+# '.' and ':' are excluded because tmux rewrites them in session names.
+slug_for() {
+  local s=$1
+  s=${s//\//-}
+  s=${s//[!A-Za-z0-9_-]/-}
+  while :; do case $s in -*) s=${s#-} ;; *) break ;; esac; done
+  printf '%s' "$s"
+}
+
+valid_slug() {
+  case $1 in '' | -* | *[!A-Za-z0-9_-]*) return 1 ;; esac
+  return 0
+}
+
+# resolve_root PATH: sets ROOT (this worktree's top, canonical), MAIN (main
+# worktree, canonical) and COMMON (absolute git common dir).
+resolve_root() {
+  local p=$1 first
+  [ -d "$p" ] || die 1 "no such directory: $p"
+  ROOT=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null) || die 1 "not a git worktree: $p"
+  ROOT=$(canon "$ROOT")
+  COMMON=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) ||
+    die 1 "cannot find git common dir for $ROOT"
+  first=$(git -C "$ROOT" worktree list --porcelain | sed -n '1,2p')
+  case $first in *$'\n'bare*) die 5 "bare repositories are not supported" ;; esac
+  first=${first%%$'\n'*}
+  MAIN=$(canon "${first#worktree }")
+}
+
+# wt_records: one line per registered worktree,
+# path<TAB>branch<TAB>locked(0/1)<TAB>lock reason. Paths are canonical.
+wt_records() {
+  local line path="" branch="" locked=0 reason=""
+  flush() {
+    [ -n "$path" ] && printf '%s\t%s\t%s\t%s\n' "$(canon "$path")" "$branch" "$locked" "$reason"
+    path="" branch="" locked=0 reason=""
+  }
+  while IFS= read -r line; do
+    case $line in
+      'worktree '*) flush; path=${line#worktree } ;;
+      'branch refs/heads/'*) branch=${line#branch refs/heads/} ;;
+      locked) locked=1 ;;
+      'locked '*) locked=1 reason=${line#locked } ;;
+      '') flush ;;
+    esac
+  done < <(git -C "$MAIN" worktree list --porcelain)
+  flush
+}
+
+# resolve_missing PATH: for a directory that no longer exists, find the repo
+# that still registers it. A linked worktree's admin dir is COMMON/worktrees/
+# ID, and its gitdir file names PATH/.git, so the nearest existing ancestors
+# (up to three) and their children are asked for their common dir, and each
+# common dir's admin dirs are searched for that gitdir. Sets ROOT (the path
+# as registered), MAIN and COMMON; returns 1 when nothing registers PATH.
+resolve_missing() {
+  local p=${1%/} a rest="" want c common seen=" " adm g levels=0 first
+  [ -e "$p" ] && return 1
+  case $p in /*) ;; *) p="$PWD/$p" ;; esac
+  a=$p
+  while [ ! -d "$a" ]; do
+    rest="/${a##*/}$rest"
+    a=$(dirname "$a")
+  done
+  want="$(canon "$a")$rest"
+  while [ "$levels" -lt 3 ] && [ -n "$a" ]; do
+    for c in "$a" "$a"/* "$a"/.[!.]*; do
+      [ -e "$c/.git" ] || continue
+      common=$(git -C "$c" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+      common=$(canon "$common")
+      case $seen in *" $common "*) continue ;; esac
+      seen="$seen$common "
+      for adm in "$common"/worktrees/*; do
+        [ -f "$adm/gitdir" ] || continue
+        g=$(sed -n 1p "$adm/gitdir")
+        case $g in /*) ;; *) continue ;; esac
+        g=${g%/.git}
+        if [ "$g" = "$p" ] || [ "$g" = "$want" ]; then
+          COMMON=$common ROOT=$g
+          first=$(git --git-dir="$COMMON" worktree list --porcelain | sed -n '1,2p')
+          case $first in *$'\n'bare*) die 5 "bare repositories are not supported" ;; esac
+          first=${first%%$'\n'*}
+          MAIN=$(canon "${first#worktree }")
+          return 0
+        fi
+      done
+    done
+    [ "$a" = / ] && break
+    a=$(dirname "$a")
+    levels=$((levels + 1))
+  done
+  return 1
+}
+
+# record_for PATH: the wt_records line for PATH, empty if not registered.
+record_for() {
+  local want=$1 rec
+  while IFS= read -r rec; do
+    [ "${rec%%$'\t'*}" = "$want" ] && { printf '%s\n' "$rec"; return 0; }
+  done < <(wt_records)
+  return 1
+}
+
+# branch_checked_out_at BRANCH: path of the worktree that has BRANCH, if any.
+branch_checked_out_at() {
+  local rec p b rest
+  while IFS= read -r rec; do
+    p=${rec%%$'\t'*}
+    rest=${rec#*$'\t'}
+    b=${rest%%$'\t'*}
+    [ "$b" = "$1" ] && { printf '%s\n' "$p"; return 0; }
+  done < <(wt_records)
+  return 1
+}
+
+# linked_count: registered linked worktrees of MAIN, prunable ones included.
+linked_count() { echo $(($(wt_records | wc -l) - 1)); }
+
+# plural N WORD: "N WORD" or "N WORDs".
+plural() { if [ "$1" = 1 ]; then printf '%s %s' "$1" "$2"; else printf '%s %ss' "$1" "$2"; fi; }
+
+# dirty_counts DIR: "<tracked changes> <untracked>".
+dirty_counts() {
+  git --no-optional-locks -C "$1" status --porcelain=v1 2>/dev/null |
+    awk '/^\?\? /{u++; next} {d++} END{print d+0, u+0}'
+}
+
+default_base() {
+  local r
+  for r in origin/main main; do
+    git -C "$MAIN" rev-parse --verify -q "$r^{commit}" >/dev/null && { printf '%s' "$r"; return 0; }
+  done
+  return 1
+}
+
+# blocks_in_file FILE: every block k declared by a .env.ports (one per line).
+blocks_in_file() {
+  local key val base d
+  [ -f "$1" ] || return 0
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    key=${key#export }
+    key=${key//[[:space:]]/}
+    case " $PORT_KEYS " in *" $key "*) ;; *) continue ;; esac
+    val=${val%%#*}
+    val=${val//[\"\'[:space:]]/}
+    case $val in '' | *[!0-9]*) continue ;; esac
+    base=$(port_base "$key")
+    d=$((10#$val - base))
+    [ "$d" -ge 0 ] && [ $((d % PORT_STEP)) -eq 0 ] && echo $((d / PORT_STEP))
+  done <"$1"
+}
+
+# ports_block DIR: the block declared by DIR/.env.ports (NEXT_PORT first).
+ports_block() { blocks_in_file "$1/.env.ports" | head -n 1; }
+
+used_blocks() {
+  local rec p
+  {
+    blocks_in_file "$MAIN/.env.ports"
+    while IFS= read -r rec; do
+      p=${rec%%$'\t'*}
+      [ -d "$p" ] && blocks_in_file "$p/.env.ports"
+    done < <(wt_records)
+  } | sort -n -u
+}
+
+# ports_free K: none of block K's ports has a TCP listener (WT_PORT_PROBE=0 skips).
+ports_free() {
+  local k=$1 key args=""
+  [ "${WT_PORT_PROBE:-1}" = 0 ] && return 0
+  command -v lsof >/dev/null 2>&1 || return 0
+  for key in $PORT_KEYS; do args="$args -iTCP:$(($(port_base "$key") + PORT_STEP * k))"; done
+  # shellcheck disable=SC2086
+  ! lsof -nP $args -sTCP:LISTEN -t >/dev/null 2>&1
+}
+
+# next_block: lowest free block, or fail. Sets USED (space separated).
+next_block() {
+  local k=0
+  USED=" $(used_blocks | tr '\n' ' ')"
+  while [ "$k" -le "$PORT_MAX_BLOCK" ]; do
+    case $USED in
+      *" $k "*) ;;
+      *) ports_free "$k" && { echo "$k"; return 0; } ;;
+    esac
+    k=$((k + 1))
+  done
+  return 1
+}
+
+ports_json() {
+  local k=$1 key out=""
+  for key in $PORT_KEYS; do out="$out,\"$key\":$(($(port_base "$key") + PORT_STEP * k))"; done
+  printf '{%s}' "${out#,}"
+}
+ports_human() {
+  local k=$1 key out=""
+  for key in $PORT_KEYS; do out="$out $key=$(($(port_base "$key") + PORT_STEP * k))"; done
+  printf '%s' "${out# }"
+}
+
+LOCK_DIR=""
+port_lock() {
+  local i=0
+  LOCK_DIR="$COMMON/wt-ports.lock"
+  # A lock older than a minute is from a crashed run.
+  [ -d "$LOCK_DIR" ] && [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +1 2>/dev/null)" ] && rmdir "$LOCK_DIR" 2>/dev/null
+  until mkdir "$LOCK_DIR" 2>/dev/null; do
+    i=$((i + 1))
+    [ "$i" -gt 100 ] && { LOCK_DIR=""; die 6 "port allocation lock busy: $COMMON/wt-ports.lock"; }
+    sleep 0.1
+  done
+  trap 'port_unlock' EXIT
+}
+port_unlock() { [ -n "$LOCK_DIR" ] && rmdir "$LOCK_DIR" 2>/dev/null; LOCK_DIR=""; }
+
+# env_sources DIR: gitignored .env* files at DIR (the main checkout, or the
+# source worktree of env-refresh --here) to copy, one per line.
+env_sources() {
+  local src=$1 f name names=()
+  for f in "$src"/.env*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    name=${f##*/}
+    case $name in .env.ports | .env.branch | *.generated | *.rendered) continue ;; esac
+    [ -d "$f" ] && [ ! -L "$f" ] && continue
+    names+=("$name")
+  done
+  [ ${#names[@]} -gt 0 ] || return 0
+  git -C "$src" check-ignore -- "${names[@]}" 2>/dev/null
+}
+
+# rewrite_ports FILE FROM TO: rewrite port-derived values in place from block
+# FROM's ports to block TO's (atomic, never through a symlink). Prints the
+# changed key names, never values.
+rewrite_ports() {
+  python3 -I - "$1" "$2" "$3" <<'PY'
+import os, re, sys, tempfile
+path, src, dst = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+if os.path.islink(path):
+    sys.stderr.write("refusing to rewrite a symlink: %s\n" % path)
+    sys.exit(5)
+if src == dst:
+    print("")
+    sys.exit(0)
+BASE = {"NEXT_PORT": 3000, "DASHBOARD_PORT": 3010, "ENGINE_PORT": 7500, "EXPO_PORT": 8081}
+M = {str(v + 100 * src): str(v + 100 * dst) for v in BASE.values()}
+PORT = re.compile(r':(' + '|'.join(M) + r')(?!\d)')
+KEYWORDS = ("URL", "ORIGIN", "HOST", "PORT")
+with open(path, encoding="utf-8") as fh:
+    lines = fh.read().split("\n")
+out, changed = [], []
+for line in lines:
+    m = re.match(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$', line)
+    if not m or line.lstrip().startswith("#"):
+        out.append(line); continue
+    key, val = m.group(1), m.group(2)
+    if not any(k in key for k in KEYWORDS):
+        out.append(line); continue
+    newval = PORT.sub(lambda x: ":" + M[x.group(1)], val)
+    if key in BASE:
+        bm = re.match(r'^\s*["\']?(\d+)["\']?\s*$', val)
+        if bm and bm.group(1) in M:
+            newval = val.replace(bm.group(1), M[bm.group(1)])
+    if newval != val:
+        changed.append(key)
+        line = line[: m.start(2)] + newval
+    out.append(line)
+if changed:
+    mode = os.stat(path).st_mode & 0o7777
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".wt-rewrite.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out))
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+print(" ".join(changed))
+PY
+}
+
+# ensure_worktree_config: per-worktree config needs extensions.worktreeConfig.
+ensure_worktree_config() {
+  [ "$(git -C "$MAIN" config --type=bool --get extensions.worktreeConfig 2>/dev/null)" = true ] && return 0
+  # Enabling the extension makes core.worktree / core.bare=true in the common
+  # config apply to every worktree; refuse rather than migrate them.
+  if git config --file "$COMMON/config" --get core.worktree >/dev/null 2>&1 ||
+    [ "$(git config --file "$COMMON/config" --type=bool --get core.bare 2>/dev/null)" = true ]; then
+    return 1
+  fi
+  git config --file "$COMMON/config" extensions.worktreeConfig true
+}
+
+# arg parsing shared by subcommands
+ARG_ROOT="" ARG_BRANCH="" ARG_FROM="" ARG_NAME="" ARG_FORCE=0 ARG_STASH=0 ARG_NO_PULL=0 ARG_HERE=0
+parse_args() {
+  local allowed=$1
+  shift
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --json) json=1 ;;
+      --branch | --from | --name)
+        case " $allowed " in *" $1 "*) ;; *) usage "unknown option: $1" ;; esac
+        [ $# -ge 2 ] || usage "$1 needs a value"
+        case $1 in --branch) ARG_BRANCH=$2 ;; --from) ARG_FROM=$2 ;; --name) ARG_NAME=$2 ;; esac
+        shift
+        ;;
+      --branch=* | --from=* | --name=*)
+        case " $allowed " in *" ${1%%=*} "*) ;; *) usage "unknown option: ${1%%=*}" ;; esac
+        case $1 in --branch=*) ARG_BRANCH=${1#*=} ;; --from=*) ARG_FROM=${1#*=} ;; --name=*) ARG_NAME=${1#*=} ;; esac
+        ;;
+      --force | --stash | --no-pull | --here)
+        case " $allowed " in *" $1 "*) ;; *) usage "unknown option: $1" ;; esac
+        case $1 in --force) ARG_FORCE=1 ;; --stash) ARG_STASH=1 ;; --no-pull) ARG_NO_PULL=1 ;; --here) ARG_HERE=1 ;; esac
+        ;;
+      -h | --help) usage ;;
+      -*) usage "unknown option: $1" ;;
+      *)
+        [ -z "$ARG_ROOT" ] || usage "unexpected argument: $1"
+        ARG_ROOT=$1
+        ;;
+    esac
+    shift
+  done
+  [ -n "$ARG_ROOT" ] || usage "missing <root>"
+}
+
+need_branch() {
+  [ -n "$ARG_BRANCH" ] || usage "--branch is required"
+  git check-ref-format --branch "$ARG_BRANCH" >/dev/null 2>&1 || die 2 "invalid branch name: $ARG_BRANCH"
+}
+
+branch_exists() { git -C "$MAIN" show-ref --verify -q "refs/heads/$1"; }
+
+# --- commands -----------------------------------------------------------------
+
+cmd_ports() {
+  parse_args "" "$@"
+  resolve_root "$ARG_ROOT"
+  local k used
+  k=$(next_block) || die 6 "no free port block in 0..$PORT_MAX_BLOCK"
+  used=$(used_blocks | tr '\n' ',')
+  used=${used%,}
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"repo":%s,"block":%d,"ports":%s,"used":[%s]}\n' \
+      "$(jstr "$MAIN")" "$k" "$(ports_json "$k")" "$used"
+  else
+    printf 'next free block %d: %s\n' "$k" "$(ports_human "$k")"
+  fi
+}
+
+cmd_status() {
+  parse_args "" "$@"
+  resolve_root "$ARG_ROOT"
+  local branch head counts dirty untracked upstream="" ahead="" behind="" lr
+  local merged=0 locked=0 reason="" rec rest heavy=() block is_main=0 linked=""
+  [ "$ROOT" = "$MAIN" ] && is_main=1 linked=$(linked_count)
+  branch=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null)
+  head=$(git -C "$ROOT" rev-parse -q --short HEAD 2>/dev/null)
+  counts=$(dirty_counts "$ROOT")
+  dirty=${counts% *} untracked=${counts#* }
+  if upstream=$(git -C "$ROOT" rev-parse -q --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null); then
+    lr=$(git -C "$ROOT" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null) &&
+      { behind=${lr%%[[:space:]]*}; ahead=${lr##*[[:space:]]}; }
+  else
+    upstream=""
+  fi
+  if [ -n "$head" ] && git -C "$ROOT" rev-parse -q --verify 'origin/main^{commit}' >/dev/null 2>&1 &&
+    git -C "$ROOT" merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+    merged=1
+  fi
+  if rec=$(record_for "$ROOT"); then
+    rest=${rec#*$'\t'}
+    rest=${rest#*$'\t'}
+    locked=${rest%%$'\t'*}
+    reason=${rest#*$'\t'}
+  fi
+  if [ -e "$ROOT/apps/expo/ios/Pods" ] || [ -e "$ROOT/apps/expo/ios/build" ] || [ -e "$ROOT/ios/build" ]; then
+    heavy+=(ios)
+  fi
+  # LFS pointer files are ~130 bytes; a smudged model is far over 1 KB.
+  if [ -d "$ROOT/$WT_MODELS_PATH" ] &&
+    [ -n "$(find "$ROOT/$WT_MODELS_PATH" -type f -size +2 -print 2>/dev/null | head -n 1)" ]; then
+    heavy+=(lfs)
+  fi
+  block=$(ports_block "$ROOT")
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"path":%s,"main":%s,"branch":%s,"head":%s,"dirty":%d,"untracked":%d,' \
+      "$(jstr "$ROOT")" "$(jbool "$is_main")" "$(jnull "$branch")" "$(jnull "$head")" "$dirty" "$untracked"
+    printf '"upstream":%s,"ahead":%s,"behind":%s,"merged":%s,"locked":%s,"lock_reason":%s,' \
+      "$(jnull "$upstream")" "${ahead:-null}" "${behind:-null}" "$(jbool "$merged")" \
+      "$(jbool "$locked")" "$(if [ "$locked" = 1 ]; then jstr "$reason"; else printf null; fi)"
+    printf '"heavy":%s,"ports_block":%s,"linked":%s}\n' "$(jarr ${heavy[@]+"${heavy[@]}"})" "${block:-null}" "${linked:-null}"
+  else
+    local line="$ROOT ${branch:-(detached)} ${head:-none} dirty=$dirty untracked=$untracked"
+    [ -n "$upstream" ] && line="$line $upstream +${ahead:-?}/-${behind:-?}"
+    [ "$merged" = 1 ] && line="$line merged"
+    [ "$locked" = 1 ] && line="$line locked${reason:+($reason)}"
+    [ ${#heavy[@]} -gt 0 ] && line="$line heavy=$(IFS=,; echo "${heavy[*]}")"
+    [ -n "$block" ] && line="$line ports=$block"
+    [ -n "$linked" ] && line="$line linked=$linked"
+    printf '%s\n' "$line"
+  fi
+}
+
+cmd_new() {
+  parse_args "--branch --from --name" "$@"
+  need_branch
+  resolve_root "$ARG_ROOT"
+  local branch=$ARG_BRANCH slug target from="" existing=0 at f srcs=() k mk
+  local copied=() rewritten="" err
+  slug=${ARG_NAME:-$(slug_for "$branch")}
+  valid_slug "$slug" || die 2 "invalid worktree name: $slug (letters, digits, - and _ only)"
+  target=$(wt_dir_for "$MAIN" "$slug")
+  { [ -e "$target" ] || [ -L "$target" ]; } && die 5 "target exists: $target"
+
+  if branch_exists "$branch"; then
+    existing=1
+    [ -n "$ARG_FROM" ] && die 2 "branch $branch already exists; drop --from to check it out"
+    at=$(branch_checked_out_at "$branch") && die 5 "branch $branch is checked out at $at"
+  else
+    from=${ARG_FROM:-$(default_base)} || die 1 "no base ref: neither origin/main nor main exists"
+    git -C "$MAIN" rev-parse -q --verify "$from^{commit}" >/dev/null || die 1 "unknown ref: $from"
+  fi
+
+  # Env files are copied, never linked. A symlinked source once let a port
+  # rewrite in a worktree clobber the main checkout's .env.local.
+  [ -L "$MAIN/.env.local" ] && die 5 "refusing: $MAIN/.env.local is a symlink; replace it with a real file first"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -L "$MAIN/$f" ] && die 5 "refusing: $MAIN/$f is a symlink; replace it with a real file first"
+    srcs+=("$f")
+  done < <(env_sources "$MAIN")
+
+  port_lock
+  k=$(next_block) || die 6 "no free port block in 0..$PORT_MAX_BLOCK"
+
+  if [ "$existing" = 1 ]; then
+    err=$(GIT_LFS_SKIP_SMUDGE=1 git -C "$MAIN" worktree add -q "$target" "$branch" 2>&1 >/dev/null) ||
+      die 1 "git worktree add failed: $err"
+  else
+    err=$(GIT_LFS_SKIP_SMUDGE=1 git -C "$MAIN" worktree add -q --no-track -b "$branch" "$target" "$from" 2>&1 >/dev/null) ||
+      die 1 "git worktree add failed: $err"
+  fi
+  target=$(canon "$target")
+
+  ensure_worktree_config ||
+    die 1 "worktree created at $target, but extensions.worktreeConfig cannot be enabled (core.worktree or core.bare=true in common config); lfs.fetchexclude not set"
+  git -C "$target" config --worktree lfs.fetchexclude "$WT_LFS_EXCLUDE" ||
+    die 1 "worktree created at $target, but setting lfs.fetchexclude failed"
+
+  {
+    printf '# Generated by wt new -- do not hand-edit. Block k=%d: each default port plus %d*k.\n' "$k" "$PORT_STEP"
+    for f in $PORT_KEYS; do printf '%s=%d\n' "$f" $(($(port_base "$f") + PORT_STEP * k)); done
+  } >"$target/.env.ports" || die 1 "worktree created at $target, but writing .env.ports failed"
+  port_unlock
+
+  for f in ${srcs[@]+"${srcs[@]}"}; do
+    { [ -e "$target/$f" ] || [ -L "$target/$f" ]; } && continue
+    cp -c -p "$MAIN/$f" "$target/$f" 2>/dev/null || cp -p "$MAIN/$f" "$target/$f" ||
+      die 1 "worktree created at $target, but copying $f failed"
+    [ -L "$target/$f" ] && die 5 "copy of $f produced a symlink; removed nothing, fix by hand"
+    copied+=("$f")
+  done
+  if [ -f "$target/.env.local" ]; then
+    # Main's block is 0 by convention; a main without .env.ports is 0 too.
+    mk=$(ports_block "$MAIN")
+    rewritten=$(rewrite_ports "$target/.env.local" "${mk:-0}" "$k") ||
+      die 1 "worktree created at $target, but rewriting .env.local ports failed"
+  fi
+
+  local head
+  head=$(git -C "$target" rev-parse --short HEAD)
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"path":%s,"slug":%s,"branch":%s,"created_branch":%s,"from":%s,"head":%s,' \
+      "$(jstr "$target")" "$(jstr "$slug")" "$(jstr "$branch")" "$(jbool $((1 - existing)))" \
+      "$(jnull "$from")" "$(jstr "$head")"
+    # shellcheck disable=SC2086 # key names split on purpose
+    printf '"ports_block":%d,"ports":%s,"env_copied":%s,"env_rewritten":%s,"needs_install":true}\n' \
+      "$k" "$(ports_json "$k")" "$(jarr ${copied[@]+"${copied[@]}"})" "$(jarr $rewritten)"
+  else
+    printf 'created %s on %s (%s) block %d, copied %d env file(s), needs install\n' \
+      "$target" "$branch" "$head" "$k" "${#copied[@]}"
+  fi
+}
+
+# rm_missing: ROOT is registered but its directory is gone, so only the
+# registration goes (git worktree prune in MAIN). Locked needs --force.
+rm_missing() {
+  local rec rest branch locked reason
+  rec=$(record_for "$ROOT") || die 1 "not a registered worktree of $MAIN: $ROOT"
+  rest=${rec#*$'\t'}
+  branch=${rest%%$'\t'*}
+  rest=${rest#*$'\t'}
+  locked=${rest%%$'\t'*}
+  reason=${rest#*$'\t'}
+  if [ "$locked" = 1 ]; then
+    [ "$ARG_FORCE" = 1 ] || die 4 "locked${reason:+: $reason}: $ROOT (use --force)"
+    git -C "$MAIN" worktree unlock "$ROOT" >/dev/null 2>&1 || die 1 "git worktree unlock failed for $ROOT"
+  fi
+  git -C "$MAIN" worktree prune >/dev/null 2>&1
+  record_for "$ROOT" >/dev/null && die 1 "git worktree prune left $ROOT registered"
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"pruned":%s,"branch":%s}\n' "$(jstr "$ROOT")" "$(jnull "$branch")"
+  else
+    printf 'pruned %s (its directory was already gone)%s\n' "$ROOT" "${branch:+, branch $branch kept}"
+  fi
+}
+
+# trash_root: move ROOT to ~/.Trash/<basename> (or <basename>-<time> when
+# that exists) and set dest. Recoverable, never rm -rf; a dirty tree's
+# changes ride along inside it (D105).
+trash_root() {
+  local trash err
+  [ -n "${HOME:-}" ] || die 1 "HOME is not set; cannot find the Trash"
+  trash="$HOME/.Trash"
+  mkdir -p "$trash" || die 1 "cannot create $trash"
+  dest="$trash/${ROOT##*/}"
+  { [ -e "$dest" ] || [ -L "$dest" ]; } && dest="$dest-$(date +%Y%m%dT%H%M%S)"
+  { [ -e "$dest" ] || [ -L "$dest" ]; } && die 1 "trash target exists: $dest"
+  err=$(mv "$ROOT" "$dest" 2>&1) || die 1 "moving $ROOT to $dest failed: $err"
+}
+
+# rm_main: the main checkout is the whole repo. Refused while any linked
+# worktree is registered; otherwise it moves to ~/.Trash.
+rm_main() {
+  local n branch dest common
+  n=$(linked_count)
+  [ "$n" -gt 0 ] && die 5 "main checkout has $(plural "$n" "linked worktree"): remove them first"
+  common=$(canon "$COMMON")
+  case $common in "$ROOT"/*) ;; *) die 5 "the git dir $common is outside $ROOT; not moving it to the Trash" ;; esac
+  branch=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null)
+  trash_root
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":true}\n' \
+      "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jstr "$dest")"
+  else
+    printf 'moved repo %s to %s\n' "$ROOT" "$dest"
+  fi
+}
+
+# cmd_rm: a linked worktree moves to ~/.Trash, dirt and all, then git
+# worktree prune drops its registration (D105). The branch stays. A locked
+# worktree needs --force, which unlocks it first; --force overrides
+# nothing else.
+cmd_rm() {
+  parse_args "--force" "$@"
+  if [ ! -e "$ARG_ROOT" ] && resolve_missing "$ARG_ROOT"; then
+    rm_missing
+    return
+  fi
+  resolve_root "$ARG_ROOT"
+  local rec rest locked=0 reason="" branch dest
+  if [ "$ROOT" = "$MAIN" ]; then
+    rm_main
+    return
+  fi
+  rec=$(record_for "$ROOT") || die 1 "not a registered worktree of $MAIN: $ROOT"
+  rest=${rec#*$'\t'}
+  branch=${rest%%$'\t'*}
+  rest=${rest#*$'\t'}
+  locked=${rest%%$'\t'*}
+  reason=${rest#*$'\t'}
+  if [ "$locked" = 1 ]; then
+    [ "$ARG_FORCE" = 1 ] || die 4 "locked${reason:+: $reason}: $ROOT (use --force)"
+    git -C "$MAIN" worktree unlock "$ROOT" >/dev/null 2>&1 || die 1 "git worktree unlock failed for $ROOT"
+  fi
+  trash_root
+  git -C "$MAIN" worktree prune >/dev/null 2>&1
+  record_for "$ROOT" >/dev/null && die 1 "moved $ROOT to $dest, but git worktree prune left it registered"
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":false}\n' \
+      "$(jstr "$ROOT")" "$(jnull "$branch")" "$(jstr "$dest")"
+  else
+    printf 'moved %s to %s%s\n' "$ROOT" "$dest" "${branch:+ (branch $branch kept)}"
+  fi
+}
+
+cmd_repurpose() {
+  parse_args "--branch --from --stash" "$@"
+  need_branch
+  resolve_root "$ARG_ROOT"
+  local branch=$ARG_BRANCH current from="" existing=0 at counts dirty untracked slug
+  local stashed=0 stash="" stashed_changes=0 old new err needs_install=0 needs_pods=0 block
+  slug=${ROOT##*/}
+  current=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null)
+  [ "$current" = "$branch" ] && die 5 "$ROOT is already on $branch"
+  if branch_exists "$branch"; then
+    existing=1
+    [ -n "$ARG_FROM" ] && die 2 "branch $branch already exists; drop --from to switch to it"
+    at=$(branch_checked_out_at "$branch") && die 5 "branch $branch is checked out at $at"
+  else
+    from=${ARG_FROM:-$(default_base)} || die 1 "no base ref: neither origin/main nor main exists"
+    git -C "$ROOT" rev-parse -q --verify "$from^{commit}" >/dev/null || die 1 "unknown ref: $from"
+  fi
+  counts=$(dirty_counts "$ROOT")
+  dirty=${counts% *} untracked=${counts#* }
+  if [ $((dirty + untracked)) -gt 0 ]; then
+    [ "$ARG_STASH" = 1 ] || die 3 "dirty: $dirty changed, $untracked untracked in $ROOT (use --stash)"
+    git -C "$ROOT" stash push -q -u -m "wt repurpose $slug $(now)" >/dev/null 2>&1 || die 1 "git stash failed in $ROOT"
+    stashed=1 stashed_changes=$((dirty + untracked))
+    stash=$(git -C "$ROOT" rev-parse --short 'stash@{0}')
+    counts=$(dirty_counts "$ROOT")
+    [ "$counts" = "0 0" ] || die 3 "still dirty after stash ($counts) in $ROOT; stash $stash kept"
+  fi
+  old=$(git -C "$ROOT" rev-parse HEAD)
+  if [ "$existing" = 1 ]; then
+    err=$(GIT_LFS_SKIP_SMUDGE=1 git -C "$ROOT" switch -q "$branch" 2>&1 >/dev/null)
+  else
+    err=$(GIT_LFS_SKIP_SMUDGE=1 git -C "$ROOT" switch -q --no-track -c "$branch" "$from" 2>&1 >/dev/null)
+  fi || die 1 "git switch failed: $err${stash:+ (changes stashed as $stash)}"
+  new=$(git -C "$ROOT" rev-parse HEAD)
+  rm -f "$ROOT/.env.branch"
+  git -C "$ROOT" diff --quiet "$old" "$new" -- pnpm-lock.yaml || needs_install=1
+  git -C "$ROOT" diff --quiet "$old" "$new" -- ':(glob)apps/expo/app.config.*' \
+    ':(glob)**/Podfile' ':(glob)**/Podfile.lock' || needs_pods=1
+  block=$(ports_block "$ROOT")
+  if [ "$json" = 1 ]; then
+    printf '{"ok":true,"path":%s,"branch":%s,"previous_branch":%s,"created_branch":%s,"from":%s,"head":%s,' \
+      "$(jstr "$ROOT")" "$(jstr "$branch")" "$(jnull "$current")" "$(jbool $((1 - existing)))" \
+      "$(jnull "$from")" "$(jstr "$(git -C "$ROOT" rev-parse --short HEAD)")"
+    printf '"stashed":%s,"stash":%s,"stashed_changes":%d,"ports_block":%s,"needs_install":%s,"needs_pods":%s}\n' \
+      "$(jbool "$stashed")" "$(jnull "$stash")" "$stashed_changes" "${block:-null}" "$(jbool "$needs_install")" "$(jbool "$needs_pods")"
+  else
+    local extra=""
+    [ "$needs_install" = 1 ] && extra="$extra, needs install"
+    [ "$needs_pods" = 1 ] && extra="$extra, needs pods"
+    [ -n "$stash" ] && extra="$extra, changes stashed as $stash"
+    printf 'repurposed %s: %s -> %s%s\n' "$ROOT" "${current:-(detached)}" "$branch" "$extra"
+  fi
+}
+
+# env-refresh (D109): render the main checkout's env files afresh and copy
+# them to every other worktree, each keeping its own port block. With
+# --here the given worktree is the source instead, copied as it is to every
+# other worktree, main included, and nothing is pulled.
+#
+# The pull is the repo's business: `git config wt.envPull` in the main
+# checkout names a shell command run there first (content-engine:
+# `pnpm env:pull:staging && pnpm env:pull:production`); unset, or with
+# --no-pull, only the copy runs. Then the same files `wt new` copies
+# (gitignored .env* at the source, minus .env.ports, .env.branch,
+# *.generated, *.rendered) replace their namesakes in each worktree, written
+# to a temp file beside the target and renamed over it, and .env.local's
+# port-derived values are rewritten from the source's block to the
+# worktree's (no .env.ports counts as block 0). A symlinked target is left
+# alone and reported. Never pulls or writes in a worktree whose directory is
+# gone. Output never carries a value.
+cmd_env_refresh() {
+  parse_args "--no-pull --here" "$@"
+  resolve_root "$ARG_ROOT"
+  local src=$MAIN pull_cmd="" pulled=0 srcs=() f rec path k src_k log tail
+  local paths=() blocks=() copied_all=() rewritten_all=() skipped_all=() missing=()
+  local n_refreshed=0
+  [ "$ARG_HERE" = 1 ] && src=$ROOT
+
+  [ "$src" = "$MAIN" ] && pull_cmd=$(git -C "$MAIN" config --get wt.envPull 2>/dev/null || true)
+  if [ "$ARG_NO_PULL" = 0 ] && [ -n "$pull_cmd" ]; then
+    log=$(mktemp "${TMPDIR:-/tmp}/wt-env-pull.XXXXXX") || die 1 "cannot create a temp file"
+    if (cd "$MAIN" && bash -c "$pull_cmd") >"$log" 2>&1; then
+      pulled=1
+      rm -f "$log"
+    else
+      k=$?
+      tail=$(tail -n 1 "$log" 2>/dev/null)
+      rm -f "$log"
+      die 1 "env pull failed in $MAIN (exit $k): ${tail:-no output}"
+    fi
+  fi
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -L "$src/$f" ] && die 5 "refusing: $src/$f is a symlink; replace it with a real file first"
+    srcs+=("$f")
+  done < <(env_sources "$src")
+  src_k=$(ports_block "$src")
+
+  while IFS= read -r rec; do
+    path=${rec%%$'\t'*}
+    [ "$path" = "$src" ] && continue
+    if [ ! -d "$path" ]; then
+      missing+=("$path")
+      continue
+    fi
+    local copied=() rewritten="" skipped=() tmp
+    for f in ${srcs[@]+"${srcs[@]}"}; do
+      if [ -L "$path/$f" ]; then
+        skipped+=("$f")
+        continue
+      fi
+      tmp=$(mktemp "$path/.wt-env.XXXXXX") || die 1 "cannot create a temp file in $path"
+      rm -f "$tmp" # clonefile wants a fresh name; the random one is kept
+      { cp -c -p "$src/$f" "$tmp" 2>/dev/null || cp -p "$src/$f" "$tmp"; } &&
+        mv -f "$tmp" "$path/$f" || {
+        rm -f "$tmp"
+        die 1 "copying $f to $path failed"
+      }
+      copied+=("$f")
+    done
+    k=$(ports_block "$path")
+    for f in ${copied[@]+"${copied[@]}"}; do
+      [ "$f" = .env.local ] || continue
+      rewritten=$(rewrite_ports "$path/.env.local" "${src_k:-0}" "${k:-0}") ||
+        die 1 "rewriting $path/.env.local ports failed"
+    done
+    n_refreshed=$((n_refreshed + 1))
+    paths+=("$path")
+    blocks+=("${k:-null}")
+    copied_all+=("$(jarr ${copied[@]+"${copied[@]}"})")
+    rewritten_all+=("$(jarr $rewritten)")
+    skipped_all+=("$(jarr ${skipped[@]+"${skipped[@]}"})")
+  done < <(wt_records)
+
+  if [ "$json" = 1 ]; then
+    local i items=""
+    i=0
+    while [ "$i" -lt "$n_refreshed" ]; do
+      items="$items,{\"path\":$(jstr "${paths[$i]}"),\"ports_block\":${blocks[$i]},\"copied\":${copied_all[$i]},\"rewritten\":${rewritten_all[$i]},\"skipped\":${skipped_all[$i]}}"
+      i=$((i + 1))
+    done
+    printf '{"ok":true,"main":%s,"source":%s,"pulled":%s,"files":%s,"refreshed":%d,"missing":%s,"worktrees":[%s]}\n' \
+      "$(jstr "$MAIN")" "$(jstr "$src")" "$(jbool "$pulled")" "$(jarr ${srcs[@]+"${srcs[@]}"})" "$n_refreshed" \
+      "$(jarr ${missing[@]+"${missing[@]}"})" "${items#,}"
+  else
+    [ "$pulled" = 1 ] && printf 'pulled env in %s\n' "$MAIN"
+    printf 'refreshed %d worktree(s) from %s: %s\n' "$n_refreshed" "$src" "${srcs[*]:-no env files}"
+    i=0
+    while [ "$i" -lt "$n_refreshed" ]; do
+      [ "${skipped_all[$i]}" = '[]' ] || printf '  %s: symlinks left alone: %s\n' "${paths[$i]}" "${skipped_all[$i]}"
+      i=$((i + 1))
+    done
+    for path in ${missing[@]+"${missing[@]}"}; do printf '  %s: directory missing, skipped\n' "$path"; done
+  fi
+}
+
+# --- main ---------------------------------------------------------------------
+
+cmd=${1:-}
+[ $# -gt 0 ] && shift
+case $cmd in
+  new) cmd_new "$@" ;;
+  status) cmd_status "$@" ;;
+  rm) cmd_rm "$@" ;;
+  repurpose) cmd_repurpose "$@" ;;
+  ports) cmd_ports "$@" ;;
+  env-refresh) cmd_env_refresh "$@" ;;
+  -h | --help | help) usage ;;
+  '') usage "missing command" ;;
+  *)
+    for a in "$@"; do [ "$a" = --json ] && json=1; done
+    usage "unknown command: $cmd"
+    ;;
+esac

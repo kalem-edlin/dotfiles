@@ -92,14 +92,22 @@ func TestSwitchNothing(t *testing.T) {
 
 func TestCreateSession(t *testing.T) {
 	reset(t)
-	expectOK(t, New(client).CreateSession("work"))
+	expectOK(t, New(client).CreateSession("work", ""))
 	expectCalls(t, tmuxLog, argv("new-session", "-d", "-s", "work", "-c", homeDir, ";",
 		"switch-client", "-c", client, "-t", "=work:"))
 }
 
+// A worktree row without a session opens one rooted at the worktree.
+func TestCreateSessionInDir(t *testing.T) {
+	reset(t)
+	expectOK(t, New(client).CreateSession("api-exp", "/r/api-exp"))
+	expectCalls(t, tmuxLog, argv("new-session", "-d", "-s", "api-exp", "-c", "/r/api-exp", ";",
+		"switch-client", "-c", client, "-t", "=api-exp:"))
+}
+
 func TestCreateSessionOddName(t *testing.T) {
 	reset(t)
-	expectOK(t, New(client).CreateSession(`my "proj"; x`))
+	expectOK(t, New(client).CreateSession(`my "proj"; x`, ""))
 	expectCalls(t, tmuxLog, argv("new-session", "-d", "-s", `my "proj"; x`, "-c", homeDir, ";",
 		"switch-client", "-c", client, "-t", `=my "proj"; x:`))
 }
@@ -111,7 +119,7 @@ func TestCreateSessionRejects(t *testing.T) {
 		"a:b": "cannot contain '.' or ':'",
 	} {
 		reset(t)
-		expectErr(t, New(client).CreateSession(name), want)
+		expectErr(t, New(client).CreateSession(name, ""), want)
 		expectCalls(t, tmuxLog)
 	}
 }
@@ -119,7 +127,7 @@ func TestCreateSessionRejects(t *testing.T) {
 func TestCreateSessionDuplicate(t *testing.T) {
 	reset(t)
 	fixture(t, "fail-new-session", "duplicate session: work\n")
-	expectErr(t, New(client).CreateSession("work"), "tmux new-session: duplicate session: work")
+	expectErr(t, New(client).CreateSession("work", ""), "tmux new-session: duplicate session: work")
 }
 
 // ------------------------------------------------------------ new-window

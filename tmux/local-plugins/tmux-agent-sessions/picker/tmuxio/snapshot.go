@@ -120,13 +120,28 @@ func (a *actions) Load() (*state.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildSnapshot(cl, rows, mem, time.Now().Unix()), nil
+	return buildSnapshot(cl, rows, mem, time.Now().Unix(), a.worktrees()), nil
+}
+
+// worktrees is the discovery result, read on the first load and kept for
+// the picker run (V5): stay-open actions reload tmux state, not the
+// filesystem. A lifecycle action that adds or removes worktrees (B3: N, R,
+// D) must set a.rediscover so the next Load scans again.
+func (a *actions) worktrees() []worktree.Entry {
+	if a.discovered == nil || a.rediscover {
+		a.discovered = worktree.Discover(worktree.DevRoot())
+		if a.discovered == nil {
+			a.discovered = []worktree.Entry{}
+		}
+		a.rediscover = false
+	}
+	return a.discovered
 }
 
 // parseSnapshot is parseRows plus buildSnapshot, for tests.
-func parseSnapshot(raw string, mem map[int]int64, now int64) *state.Snapshot {
+func parseSnapshot(raw string, mem map[int]int64, now int64, entries ...worktree.Entry) *state.Snapshot {
 	cl, rows := parseRows(raw)
-	return buildSnapshot(cl, rows, mem, now)
+	return buildSnapshot(cl, rows, mem, now, entries)
 }
 
 // clientLine is the invoking client's first line: its session id and active
@@ -246,11 +261,11 @@ func locatePaneMem() (string, error) {
 	return filepath.Join(plugin, "scripts", "pane-mem"), nil
 }
 
-// buildSnapshot turns rows into the session tree and groups the panes into
-// worktrees. Rules from v1: an agent whose @agent_pid is not alive is no
-// agent; remote panes get no memory and no agent; an unknown agent state
-// reads as idle.
-func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64) *state.Snapshot {
+// buildSnapshot turns rows into the session tree and gives each discovered
+// worktree the session named after it. Rules from v1: an agent whose
+// @agent_pid is not alive is no agent; remote panes get no memory and no
+// agent; an unknown agent state reads as idle.
+func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64, entries []worktree.Entry) *state.Snapshot {
 	current := cl.session
 	snap := &state.Snapshot{CurrentID: current, CurrentPane: cl.pane, Now: now}
 	sessions := map[string]*state.Session{}
@@ -293,54 +308,69 @@ func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64)
 			sort.SliceStable(w.Panes, func(i, j int) bool { return w.Panes[i].Index < w.Panes[j].Index })
 		}
 	}
-	// Worktrees are grouped in tmux's session order, before the sort, so
-	// their windows and full ties do not depend on the session order.
-	snap.Worktrees = buildWorktrees(snap.Sessions, cl.pane, worktree.NewResolver().Resolve)
+	// Matching runs in tmux's session order, before the sort, so a name
+	// shared by two worktrees resolves the same way whatever the order.
+	snap.Worktrees = buildWorktrees(entries, snap.Sessions)
 	sortRows(snap.Sessions)
 	sortRows(snap.Worktrees)
 	return snap
 }
 
-// buildWorktrees groups panes by the worktree holding their effective
-// directory, resolving each directory once (one resolver per load). Every
-// pane's Worktree is set, nil outside a repository. A window linked into
-// several sessions counts once, under the first session that has it.
-// currentPane's worktree is the current one. The result is in first
-// appearance order, unsorted.
-func buildWorktrees(sessions []*state.Session, currentPane string, resolve func(dir string) (worktree.Info, bool)) []*state.Worktree {
-	var out []*state.Worktree
-	byRoot := map[string]*state.Worktree{}
-	seen := map[string]bool{} // window ids already grouped
+// buildWorktrees makes a row per discovered worktree and gives it the
+// session named after its directory (V1): a window is in a worktree because
+// it is in that session, and pane directories never group. When two
+// worktrees share a basename (two clones of one project), the session goes
+// to the one holding a pane's directory, else to the first discovered. A
+// session takes one worktree at most; sessions named after none stay plain
+// session rows. The result is in discovery order, unsorted.
+func buildWorktrees(entries []worktree.Entry, sessions []*state.Session) []*state.Worktree {
+	out := make([]*state.Worktree, 0, len(entries))
+	byName := map[string][]*state.Worktree{}
+	for _, e := range entries {
+		t := &state.Worktree{
+			Root: e.Root, Name: e.Name, Repo: e.Repo, Branch: e.Branch, Head: e.Head,
+			Main: e.Main, Locked: e.Locked, Missing: e.Missing, ActiveAt: e.ActiveAt,
+		}
+		out = append(out, t)
+		n := state.SessionName(e.Name)
+		byName[n] = append(byName[n], t)
+	}
 	for _, s := range sessions {
-		for _, w := range s.Windows {
-			first := !seen[w.ID]
-			seen[w.ID] = true
-			for _, p := range w.Panes {
-				info, ok := resolve(p.Dir())
-				if !ok {
-					continue
-				}
-				t := byRoot[info.Root]
-				if t == nil {
-					t = &state.Worktree{Root: info.Root, Repo: info.Repo, Branch: info.Branch, Head: info.Head}
-					byRoot[info.Root] = t
-					out = append(out, t)
-				}
-				p.Worktree = t
-				if currentPane != "" && p.ID == currentPane {
-					t.Current = true
-				}
-				if !first {
-					continue
-				}
-				if n := len(t.Windows); n == 0 || t.Windows[n-1] != w {
-					t.Windows = append(t.Windows, w)
-				}
-				t.Panes = append(t.Panes, p)
+		var t *state.Worktree
+		for _, c := range byName[s.Name] {
+			if c.Session != nil {
+				continue
 			}
+			if t == nil {
+				t = c
+			}
+			if holdsPane(c.Root, s) {
+				t = c
+				break
+			}
+		}
+		if t == nil {
+			continue
+		}
+		t.Session, t.Current, t.Windows = s, s.Current, s.Windows
+		t.Panes = s.Members()
+		for _, p := range t.Panes {
+			p.Worktree = t
 		}
 	}
 	return out
+}
+
+// holdsPane reports whether a pane of s has its directory at or under root.
+func holdsPane(root string, s *state.Session) bool {
+	for _, w := range s.Windows {
+		for _, p := range w.Panes {
+			if d := p.Dir(); d == root || strings.HasPrefix(d, root+"/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sortRows orders rows for display, by last access only (D78): top to

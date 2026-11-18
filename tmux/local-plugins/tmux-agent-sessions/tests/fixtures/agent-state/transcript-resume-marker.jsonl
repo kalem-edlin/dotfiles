@@ -1,0 +1,2 @@
+{"type":"user","uuid":"prompt","parentUuid":null,"isSidechain":false,"message":{"role":"user","content":"Choose an option"},"sessionId":"synthetic"}
+{"type":"assistant","uuid":"reply","parentUuid":"prompt","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"Not user-facing"},{"type":"text","text":"Which option?"},{"type":"text","text":"\n \tAwaiting your input. \t\r\n\n  "}],"stop_reason":"end_turn"},"sessionId":"synthetic"}

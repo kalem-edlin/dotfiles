@@ -56,18 +56,6 @@ func buildRows(rs []paneRow) ([][]string, map[int]int64) {
 	return rows, mem
 }
 
-// fakeResolve maps a directory or any directory under it to a worktree.
-func fakeResolve(roots map[string]worktree.Info) func(string) (worktree.Info, bool) {
-	return func(dir string) (worktree.Info, bool) {
-		for d := dir; d != "/" && d != "."; d = filepath.Dir(d) {
-			if info, ok := roots[d]; ok {
-				return info, true
-			}
-		}
-		return worktree.Info{}, false
-	}
-}
-
 func roots(ws []*state.Worktree) []string {
 	var out []string
 	for _, w := range ws {
@@ -84,94 +72,129 @@ func paneIDs(ps []*state.Pane) []string {
 	return out
 }
 
-func winIDs(ws []*state.Window) []string {
-	var out []string
-	for _, w := range ws {
-		out = append(out, w.Session.ID+w.ID)
-	}
-	return out
+// entry is a discovered worktree named after its root's basename.
+func entry(root, repo, branch string, activeAt int64) worktree.Entry {
+	return worktree.Entry{Info: worktree.Info{Root: root, Repo: repo, Branch: branch},
+		Name: filepath.Base(root), ActiveAt: activeAt}
 }
 
-func TestBuildWorktreesMembership(t *testing.T) {
-	resolve := fakeResolve(map[string]worktree.Info{
-		"/r/a":  {Root: "/r/a", Repo: "a", Branch: "main"},
-		"/r/a2": {Root: "/r/a2", Repo: "a", Head: "abc1234"},
-		"/r/b":  {Root: "/r/b", Repo: "b", Branch: "dev"},
-	})
+// named renames the sessions of rows: sid -> name.
+func named(rows [][]string, names map[string]string) [][]string {
+	for _, f := range rows {
+		if n, ok := names[f[fSessionID]]; ok {
+			f[fSessionName] = n
+		}
+	}
+	return rows
+}
+
+// A session belongs to the worktree named like it (V1), whatever its panes'
+// directories; a name shared by two worktrees goes to the one holding a
+// pane; '.' in a directory name matches tmux's '_'; a session named after
+// no worktree stays a plain session.
+func TestBuildWorktreesByName(t *testing.T) {
+	entries := []worktree.Entry{
+		entry("/r/a", "a", "main", 0),
+		entry("/r/b", "b", "dev", 0),
+		entry("/org/a", "a2", "main", 0), // another clone named a
+		entry("/r/v1.2", "a", "rel", 0),
+		entry("/r/idle", "a", "old", 0),
+	}
 	rows, mem := buildRows([]paneRow{
-		// A subdirectory belongs to its worktree; a pane outside every repo
-		// belongs to none.
-		{sid: "$1", wid: "@1", widx: 1, pid: "%1", pidx: 0, path: "/r/a/sub"},
-		{sid: "$1", wid: "@1", widx: 1, pid: "%2", pidx: 1, path: "/home"},
-		// A live agent counts by its cwd, not its pane path.
-		{sid: "$1", wid: "@2", widx: 2, pid: "%3", pidx: 0, path: "/r/a", cwd: "/r/b", st: "working"},
-		// A window linked into $2 and $1: grouped once, under $1 (tmux
-		// order), though $2's copy comes first in the rows.
-		{sid: "$2", wid: "@3", widx: 1, pid: "%4", pidx: 0, path: "/r/a2"},
-		{sid: "$1", wid: "@3", widx: 3, pid: "%4", pidx: 0, path: "/r/a2"},
+		// Session b sits in /r/a: the directory does not move it.
+		{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/r/a/sub"},
+		{sid: "$1", wid: "@2", widx: 2, pid: "%2", path: "/home", cwd: "/r/a", st: "working"},
+		// Session a has a pane in /org/a, so it takes that clone.
+		{sid: "$2", wid: "@3", widx: 1, pid: "%3", path: "/org/a/x"},
+		{sid: "$3", wid: "@4", widx: 1, pid: "%4", path: "/r/v1.2"},
+		{sid: "$4", wid: "@5", widx: 1, pid: "%5", path: "/r/b"},
 	})
-	sessions := buildSnapshot(clientLine{}, rows, mem, 0).Sessions
-	// Back to tmux order ($1 first here) for a direct call.
-	if sessions[0].ID != "$1" {
-		sessions[0], sessions[1] = sessions[1], sessions[0]
+	rows = named(rows, map[string]string{"$1": "b", "$2": "a", "$3": "v1_2", "$4": "home"})
+	snap := buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries)
+	by := map[string]*state.Worktree{}
+	for _, t := range snap.Worktrees {
+		by[t.Root] = t
 	}
-	ws := buildWorktrees(sessions, "%3", resolve)
-	if got, want := roots(ws), []string{"/r/a", "/r/b", "/r/a2"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("roots %v, want %v", got, want)
+	if len(by) != 5 {
+		t.Fatalf("worktrees %v", roots(snap.Worktrees))
 	}
-	a, b, a2 := ws[0], ws[1], ws[2]
-	if got := paneIDs(a.Panes); !reflect.DeepEqual(got, []string{"%1"}) {
-		t.Errorf("a panes %v", got)
+	sess := func(root string) string {
+		if s := by[root].Session; s != nil {
+			return s.ID
+		}
+		return "-"
 	}
-	if got := paneIDs(b.Panes); !reflect.DeepEqual(got, []string{"%3"}) {
-		t.Errorf("b panes %v", got)
+	for root, want := range map[string]string{"/r/a": "-", "/r/b": "$1", "/org/a": "$2", "/r/v1.2": "$3", "/r/idle": "-"} {
+		if got := sess(root); got != want {
+			t.Errorf("%s session %s, want %s", root, got, want)
+		}
 	}
-	if !b.Current || a.Current || a2.Current {
-		t.Errorf("current: a=%v b=%v a2=%v", a.Current, b.Current, a2.Current)
+	b := by["/r/b"]
+	if got := paneIDs(b.Panes); !reflect.DeepEqual(got, []string{"%1", "%2"}) || len(b.Windows) != 2 || !b.Current {
+		t.Errorf("b panes %v windows %d current %v", got, len(b.Windows), b.Current)
 	}
-	if got := winIDs(a2.Windows); !reflect.DeepEqual(got, []string{"$1@3"}) {
-		t.Errorf("linked window under %v, want $1", got)
+	if by["/org/a"].Current || by["/r/a"].Current {
+		t.Error("only the client's session's worktree is current")
 	}
-	if !a2.Detached() || a2.Head != "abc1234" || a.Repo != "a" {
-		t.Errorf("a2 = %+v", a2)
-	}
-	for _, s := range sessions {
+	for _, s := range snap.Sessions {
 		for _, w := range s.Windows {
 			for _, p := range w.Panes {
-				if (p.ID == "%2") != (p.Worktree == nil) {
+				if (s.ID == "$4") != (p.Worktree == nil) {
 					t.Errorf("%s Worktree = %v", p.ID, p.Worktree)
 				}
 			}
 		}
 	}
+	// With no pane in either clone, the first discovered wins.
+	rows, mem = buildRows([]paneRow{{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/tmp"}})
+	rows = named(rows, map[string]string{"$1": "a"})
+	snap = buildSnapshot(clientLine{}, rows, mem, 0, entries)
+	for _, t2 := range snap.Worktrees {
+		if (t2.Session != nil) != (t2.Root == "/r/a") {
+			t.Errorf("%s has session %v", t2.Root, t2.Session != nil)
+		}
+	}
 }
 
-// Worktrees sort as sessions do, by last access only: the current one
-// last, the rest by the newest member focus stamp. Agent states (awaiting,
-// done, working, a newer state change) do not reorder them. Stamps are per
-// pane, so the window shared by /r/shared and /r/split counts its focus only
-// for /r/shared, whose pane had it.
+// Worktrees sort by last activity: a session's last access (focus stamps
+// or attach) or its agents' newest state change when it has one (D95),
+// else the HEAD or index mtime. The current one is last.
 func TestWorktreeOrder(t *testing.T) {
-	info := map[string]worktree.Info{}
-	for _, n := range []string{"cur", "aw", "dn", "wk", "plain", "shared", "split"} {
-		info["/r/"+n] = worktree.Info{Root: "/r/" + n, Repo: "r", Branch: n}
+	entries := []worktree.Entry{
+		entry("/r/cur", "r", "cur", 1),
+		entry("/r/aw", "r", "aw", 0),
+		entry("/r/old", "r", "old", 3), // no session, committed at 3
+		entry("/r/wk", "r", "wk", 0),
+		entry("/r/new", "r", "new", 8), // no session, committed at 8
+		entry("/r/plain", "r", "plain", 99),
 	}
 	rows, mem := buildRows([]paneRow{
-		{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/r/cur", focus: 1},
-		{sid: "$1", wid: "@2", widx: 2, pid: "%2", path: "/r/aw", st: "awaiting", stateAt: 90, focus: 2},
-		{sid: "$1", wid: "@3", widx: 3, pid: "%3", path: "/r/dn", st: "finished", stateAt: 80, focus: 3},
-		{sid: "$1", wid: "@4", widx: 4, pid: "%4", path: "/r/wk", st: "working", stateAt: 70, focus: 4},
-		{sid: "$1", wid: "@5", widx: 5, pid: "%5", path: "/r/plain", focus: 6},
-		{sid: "$1", wid: "@6", widx: 6, pid: "%6", path: "/r/shared", focus: 9},
-		{sid: "$1", wid: "@6", widx: 6, pid: "%7", pidx: 1, path: "/r/split"},
-		{sid: "$1", wid: "@7", widx: 7, pid: "%8", path: "/r/split", focus: 5},
+		{sid: "$1", wid: "@1", widx: 1, pid: "%1", focus: 1},
+		{sid: "$2", wid: "@2", widx: 1, pid: "%2", st: "awaiting", stateAt: 90, focus: 2},
+		{sid: "$3", wid: "@3", widx: 1, pid: "%3", st: "working", stateAt: 70, focus: 5},
+		// A session with no stamp falls back to the mtime.
+		{sid: "$4", wid: "@4", widx: 1, pid: "%4"},
 	})
-	sessions := buildSnapshot(clientLine{}, rows, mem, 0).Sessions
-	ws := buildWorktrees(sessions, "%1", fakeResolve(info))
-	sortRows(ws)
-	want := []string{"/r/aw", "/r/dn", "/r/wk", "/r/split", "/r/plain", "/r/shared", "/r/cur"}
-	if got := roots(ws); !reflect.DeepEqual(got, want) {
+	rows = named(rows, map[string]string{"$1": "cur", "$2": "aw", "$3": "wk", "$4": "plain"})
+	snap := buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries)
+	want := []string{"/r/old", "/r/new", "/r/wk", "/r/aw", "/r/plain", "/r/cur"}
+	if got := roots(snap.Worktrees); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
+	}
+	// The merged list puts plain sessions among them by the same key.
+	rows, mem = buildRows([]paneRow{
+		{sid: "$1", wid: "@1", widx: 1, pid: "%1", focus: 1},
+		{sid: "$5", wid: "@5", widx: 1, pid: "%5", focus: 4},
+	})
+	rows = named(rows, map[string]string{"$1": "cur", "$5": "home"})
+	snap = buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries)
+	var got []string
+	for _, r := range state.ListRows(snap.Worktrees, snap.Sessions) {
+		got = append(got, r.RowID())
+	}
+	want = []string{"/r/aw", "/r/wk", "/r/old", "$5", "/r/new", "/r/plain", "/r/cur"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("list %v, want %v", got, want)
 	}
 }
 
@@ -231,77 +254,79 @@ func (f *gitFixture) repo(name string, branches ...string) []string {
 	return out
 }
 
-// Real repositories through the real resolver: a linked worktree, a main
-// checkout reached from a subdirectory, a detached HEAD and a non-repo.
-func TestSnapshotWorktreesGit(t *testing.T) {
+// Load discovers the worktrees under AGENT_SESSIONS_DEV_ROOT once per
+// run: a later Load reuses the scan, and rediscover forces a new one.
+func TestLoadDiscoversOnce(t *testing.T) {
+	reset(t)
 	f := newGitFixture(t)
-	api := f.repo("api", "exp/one")
-	other := f.repo("other")
-	f.git(other[0], "checkout", "-q", "--detach")
-	plain := f.path("plain")
-	if err := os.MkdirAll(plain, 0o755); err != nil {
+	api := f.repo("dev/api", "exp/one")
+	t.Setenv(worktree.DevRootEnv, f.path("dev"))
+	r := paneRow{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/x"}
+	fields := r.fields(1)
+	fields[fSessionName] = filepath.Base(api[1])
+	fixture(t, "out-list-panes", strings.Join(fields, sep)+"\n")
+
+	a := New("").(*actions)
+	snap, err := a.Load()
+	if err != nil {
 		t.Fatal(err)
 	}
-	rows, mem := buildRows([]paneRow{
-		{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: filepath.Join(api[0], "sub"), focus: 5, attached: true},
-		{sid: "$1", wid: "@1", widx: 1, pid: "%2", pidx: 1, path: plain, cwd: api[1], st: "awaiting", stateAt: 3},
-		{sid: "$2", wid: "@2", widx: 1, pid: "%3", path: other[0]},
-		{sid: "$2", wid: "@2", widx: 1, pid: "%4", pidx: 1, path: plain},
-	})
-	snap := buildSnapshot(clientLine{session: "$1", pane: "%1"}, rows, mem, 0)
-	// Neither other worktree has a focus stamp, so they tie and keep first
-	// appearance order (the awaiting agent does not move api-exp-one); the
-	// current one is last.
-	if got, want := roots(snap.Worktrees), []string{api[1], other[0], api[0]}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("worktrees %v, want %v", got, want)
+	if got := roots(snap.Worktrees); len(got) != 2 {
+		t.Fatalf("worktrees %v", got)
 	}
-	linked, o, cur := snap.Worktrees[0], snap.Worktrees[1], snap.Worktrees[2]
-	if !cur.Current || cur.Branch != "main" || cur.Repo != "api" {
-		t.Errorf("current = %+v", cur)
+	for _, wt := range snap.Worktrees {
+		if (wt.Root == api[1]) != (wt.Session != nil) || wt.Repo != "api" {
+			t.Errorf("%s: repo %s session %v", wt.Root, wt.Repo, wt.Session != nil)
+		}
 	}
-	if linked.Branch != "exp/one" || linked.Repo != "api" || paneIDs(linked.Panes)[0] != "%2" {
-		t.Errorf("linked = %+v", linked)
+	f.git(api[0], "worktree", "add", "-q", "-b", "exp/two", f.path("dev/api-exp-two"))
+	if snap, _ = a.Load(); len(snap.Worktrees) != 2 {
+		t.Errorf("second load rescanned: %v", roots(snap.Worktrees))
 	}
-	if !o.Detached() || len(o.Head) != 7 || o.Repo != "other" {
-		t.Errorf("detached = %+v", o)
-	}
-	if !snap.Sessions[1].Attached || snap.Sessions[0].Attached {
-		t.Errorf("attached: %v %v", snap.Sessions[0].Attached, snap.Sessions[1].Attached)
+	a.rediscover = true
+	if snap, _ = a.Load(); len(snap.Worktrees) != 3 {
+		t.Errorf("rediscover: %v", roots(snap.Worktrees))
 	}
 }
 
-// BenchmarkBuildSnapshotWorktrees builds a snapshot of 600 panes over 46
-// directories: 40 worktrees in 4 repos (36 of them linked), a subdirectory
-// per repo, and 2 non-repo directories. Each op uses a fresh resolver, as a
-// real load does.
+// BenchmarkBuildSnapshotWorktrees builds a snapshot of 600 panes in 30
+// sessions against 100 discovered worktrees, 20 of them named like a
+// session. Discovery itself is timed by worktree's BenchmarkDiscover.
 func BenchmarkBuildSnapshotWorktrees(b *testing.B) {
-	f := newGitFixture(b)
-	var dirs []string
-	for r := range 4 {
-		roots := f.repo(fmt.Sprintf("repo%d", r), "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9")
-		dirs = append(dirs, roots...)
-		dirs = append(dirs, filepath.Join(roots[0], "sub"))
+	var entries []worktree.Entry
+	for i := range 100 {
+		entries = append(entries, entry(fmt.Sprintf("/r/repo%d/wt%d", i%4, i), fmt.Sprintf("repo%d", i%4), "main", int64(i)))
 	}
-	dirs = append(dirs, f.path(".home"), f.base)
 	var rs []paneRow
 	for i := range 600 {
 		r := paneRow{
 			sid: fmt.Sprintf("$%d", i/20), wid: fmt.Sprintf("@%d", i/4), widx: i / 4 % 5, pid: fmt.Sprintf("%%%d", i),
-			pidx: i % 4, path: dirs[i%len(dirs)], focus: int64(i), attached: i < 20,
+			pidx: i % 4, path: "/r", focus: int64(i), attached: i < 20,
 		}
 		if i%3 == 0 {
-			r.st, r.cwd, r.stateAt = "working", dirs[(i/3)%len(dirs)], int64(i)
+			r.st, r.stateAt = "working", int64(i)
 		}
 		rs = append(rs, r)
 	}
 	rows, mem := buildRows(rs)
+	names := map[string]string{}
+	for i := range 30 {
+		names[fmt.Sprintf("$%d", i)] = fmt.Sprintf("wt%d", i*3)
+	}
+	rows = named(rows, names)
 	cl := clientLine{session: "$0", pane: "%0"}
-	snap := buildSnapshot(cl, rows, mem, 0)
-	if len(snap.Worktrees) != 40 {
-		b.Fatalf("only %d worktrees", len(snap.Worktrees))
+	snap := buildSnapshot(cl, rows, mem, 0, entries)
+	n := 0
+	for _, t := range snap.Worktrees {
+		if t.Session != nil {
+			n++
+		}
+	}
+	if n != 30 {
+		b.Fatalf("%d worktrees with a session", n)
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		buildSnapshot(cl, rows, mem, 0)
+		buildSnapshot(cl, rows, mem, 0, entries)
 	}
 }

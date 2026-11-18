@@ -20,6 +20,9 @@ var (
 	tmuxLog  string // one line per tmux call, args terminated by \x1f
 	rwLog    string
 	memLog   string
+	wtLog    string
+	saveLog  string
+	shimSave string
 	shimTmux string
 	shimRW   string
 	homeDir  string
@@ -57,6 +60,8 @@ func setupHarness(tmp string) error {
 	tmuxLog = filepath.Join(tmp, "tmux.log")
 	rwLog = filepath.Join(tmp, "rw.log")
 	memLog = filepath.Join(tmp, "mem.log")
+	wtLog = filepath.Join(tmp, "wt.log")
+	saveLog = filepath.Join(tmp, "save.log")
 
 	logArgs := func(log string) string {
 		return fmt.Sprintf("for a in \"$@\"; do printf '%%s\\037' \"$a\"; done >>'%s'\nprintf '\\n' >>'%s'\n", log, log)
@@ -64,6 +69,8 @@ func setupHarness(tmp string) error {
 	shimTmux = filepath.Join(bin, "tmux")
 	shimRW = filepath.Join(bin, "rw-close.sh")
 	shimMem := filepath.Join(bin, "pane-mem")
+	shimWT := filepath.Join(bin, "wt")
+	shimSave = filepath.Join(bin, "resurrect_save.sh")
 	shims := map[string]string{
 		shimTmux: logArgs(tmuxLog) + fmt.Sprintf(
 			"if [ -f '%[1]s/fail-'\"$1\" ]; then /bin/cat '%[1]s/fail-'\"$1\" >&2; exit 1; fi\n"+
@@ -74,6 +81,15 @@ func setupHarness(tmp string) error {
 				"exit 0\n", fakeDir),
 		shimMem: logArgs(memLog) + fmt.Sprintf(
 			"if [ -f '%[1]s/mem' ]; then /bin/cat '%[1]s/mem'; fi\nexit 0\n", fakeDir),
+		// wt OP: prints out-wt-OP, writes err-wt-OP to stderr, exits with
+		// exit-wt-OP (0 without), or replaces itself with a long sleep.
+		shimWT: logArgs(wtLog) + fmt.Sprintf(
+			"if [ -f '%[1]s/sleep-wt' ]; then exec /bin/sleep 5; fi\n"+
+				"if [ -f '%[1]s/out-wt-'\"$1\" ]; then /bin/cat '%[1]s/out-wt-'\"$1\"; fi\n"+
+				"if [ -f '%[1]s/err-wt-'\"$1\" ]; then /bin/cat '%[1]s/err-wt-'\"$1\" >&2; fi\n"+
+				"if [ -f '%[1]s/exit-wt-'\"$1\" ]; then exit \"$(/bin/cat '%[1]s/exit-wt-'\"$1\")\"; fi\n"+
+				"exit 0\n", fakeDir),
+		shimSave: logArgs(saveLog) + "exit 0\n",
 	}
 	for path, body := range shims {
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
@@ -105,6 +121,15 @@ func setupHarness(tmp string) error {
 	os.Setenv("TMUX_TMPDIR", filepath.Join(tmp, "tmux-tmpdir"))
 	os.Setenv("HOME", homeDir)
 	os.Unsetenv("AGENT_SESSIONS_RW_CLOSE")
+	os.Unsetenv("AGENT_SESSIONS_WT") // wt resolves on PATH, to the shim
+	// A real verified save would write the live resurrect directory.
+	os.Setenv("AGENT_SESSIONS_RESURRECT_SAVE", shimSave)
+	if p, err := exec.LookPath("wt"); err != nil || p != shimWT || wtBinary() != shimWT {
+		return fmt.Errorf("wt resolves to %q, not the shim", p)
+	}
+	if resurrectSavePath() != shimSave {
+		return fmt.Errorf("resurrect save resolves to %q, not the shim", resurrectSavePath())
+	}
 
 	// The shim must answer and log before anything else calls it.
 	if _, err := runTmux("guard-check"); err != nil {
@@ -123,7 +148,7 @@ func reset(t *testing.T) {
 	for _, e := range entries {
 		os.Remove(filepath.Join(fakeDir, e.Name()))
 	}
-	for _, f := range []string{tmuxLog, rwLog, memLog} {
+	for _, f := range []string{tmuxLog, rwLog, memLog, wtLog, saveLog} {
 		if err := os.WriteFile(f, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}

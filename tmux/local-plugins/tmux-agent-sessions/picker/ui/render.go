@@ -295,12 +295,50 @@ type listRow struct {
 	agentsAt int64 // newest state change among them
 	mem      string
 
-	// Worktree rows only (D76, D78).
+	// Worktree rows only (D76, D78). A plain session row in a list with
+	// worktrees gets a blank repo of the badge width, so names line up.
 	repo       string // badge text left of the name: the repo's code, or its full name
 	repoFg     string
-	repoBg     string
-	repoHit    bool // the query matched the repo name: badge text in matchFg (D82)
-	statusOnly bool // full-repo mode: no agents section on the right
+	repoBg     string // "" for the row background
+	repoHit    bool   // the query matched the repo name: badge text in matchFg (D82)
+	statusOnly bool   // full-repo mode: no agents or memory section on the right
+	bare       bool   // a worktree without a session: dim, nothing on the right (V5)
+	markers    []marker
+}
+
+// marker is one row marker after the label (V6): a heavy symbol, the lock
+// or missing.
+type marker struct {
+	text, fg string
+}
+
+// lockIcon is Font Awesome lock (U+F023) from Hack Nerd Font, the primary
+// font, so it needs no font-codepoint-map entry.
+const lockIcon = "\uf023"
+
+// rowMarkers lists a worktree's markers in V6 order: heavy symbols (V8),
+// the lock, then missing.
+func rowMarkers(t *state.Worktree, heavy []string) []marker {
+	var out []marker
+	for _, h := range heavy {
+		out = append(out, marker{h, heavyFg})
+	}
+	if t.Locked {
+		out = append(out, marker{lockIcon, lockFg})
+	}
+	if t.Missing {
+		out = append(out, marker{"missing", errorFg})
+	}
+	return out
+}
+
+// markersW is the width of the markers with a space before each.
+func markersW(ms []marker) int {
+	w := 0
+	for _, mk := range ms {
+		w += 1 + width(mk.text)
+	}
+	return w
 }
 
 func newSessionRow(s *state.Session, pos []int) listRow {
@@ -313,12 +351,16 @@ func newSessionRow(s *state.Session, pos []int) listRow {
 // newWorktreeRow labels the row with its branch, or its commit id dimmed
 // when detached, behind the repo badge b (D76). fullW above zero is
 // full-repo mode (D78): the badge shows the repo name padded or truncated
-// to fullW, and the row drops its agents section. repoHit paints the badge
-// text as a query match.
+// to fullW, and the row drops its agents and memory sections. repoHit
+// paints the badge text as a query match. A worktree with a session shows
+// that session's chips, agents and memory; one without is bare (V5).
 func newWorktreeRow(t *state.Worktree, pos []int, repoHit bool, b repoBadge, fullW int) listRow {
 	n, at := agentSummary(t.Panes)
 	r := listRow{pos: pos, chips: aggregate(t.Panes, rowOrder), agents: n, agentsAt: at,
-		repo: b.code, repoFg: b.fg, repoBg: b.bg, repoHit: repoHit}
+		repo: b.code, repoFg: b.fg, repoBg: b.bg, repoHit: repoHit, bare: t.Session == nil}
+	if t.Session != nil {
+		r.mem = memLabel(t.Panes)
+	}
 	if fullW > 0 {
 		r.repo, r.statusOnly = padRight(truncate(oneLine(t.Repo), fullW), fullW), true
 	}
@@ -398,8 +440,11 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	}
 	// gutter, a leading space and at least one space after the name; the
 	// right edge keeps one space after the last section.
+	if r.statusOnly || r.bare {
+		memW = 0
+	}
 	fixed := 0
-	if !r.statusOnly {
+	if !r.statusOnly && !r.bare {
 		fixed += sepW + agentsW
 	}
 	if memW > 0 {
@@ -409,7 +454,7 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	if r.repo != "" {
 		badgeW = width(r.repo) + 1
 	}
-	avail := w - 3 - fixed - badgeW - 1
+	avail := w - 3 - fixed - badgeW - 1 - markersW(r.markers)
 	nameW := width(r.name)
 	n := len(chips)
 	for n > 0 && avail-chipsW(n) < min(nameW, 12) {
@@ -418,18 +463,26 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 	name := truncate(r.name, avail-chipsW(n))
 
 	nameFg := cText
-	if r.dim {
+	if r.dim || r.bare {
 		nameFg = dimFg
 	}
 	line := gutter + paint(" ", "", bg, false)
 	if r.repo != "" {
-		badgeFg := r.repoFg
+		badgeFg, badgeBg := r.repoFg, r.repoBg
+		if badgeBg == "" {
+			badgeBg = bg
+		}
 		if r.repoHit {
 			badgeFg = matchFg
+		} else if r.bare {
+			badgeFg = dimFg
 		}
-		line += paint(r.repo, badgeFg, r.repoBg, true) + paint(" ", "", bg, false)
+		line += paint(r.repo, badgeFg, badgeBg, true) + paint(" ", "", bg, false)
 	}
 	line += highlightName(name, r.pos, nameFg, bg, selected)
+	for _, mk := range r.markers {
+		line += paint(" ", "", bg, false) + paint(mk.text, mk.fg, bg, false)
+	}
 	right := ""
 	for i, c := range chips[:n] {
 		if i > 0 {
@@ -437,7 +490,7 @@ func renderRow(r listRow, memW, w int, selected bool, now int64) string {
 		}
 		right += c
 	}
-	if !r.statusOnly {
+	if !r.statusOnly && !r.bare {
 		right += sep + agentsCell(r.agents, r.agentsAt, now, bg, selected)
 	}
 	if memW > 0 {
@@ -472,7 +525,7 @@ type filterChip struct {
 
 // renderInputLine draws left (query, prompt or error) with the match count
 // and the prefix cell at the right edge (D20). A filter chip (the repo
-// filter in worktree mode, D80) follows left after one space, in whatever
+// filter when worktrees exist, D80) follows left after one space, in whatever
 // room left leaves it, truncated or dropped first.
 func renderInputLine(left string, filter filterChip, count string, armed bool, w int) string {
 	cellBg := cellRest

@@ -1,0 +1,326 @@
+package ui
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+
+	tea "charm.land/bubbletea/v2"
+
+	"agentpicker/state"
+)
+
+// Worktree lifecycle keys (B3, task V10-V12, keys per D103, D104): c and
+// C create a worktree (from main, or from the row's branch) and go to its
+// new session; x repurposes ("cuts") the row's worktree in place, stashing
+// a dirty tree; D moves it, or on a main checkout with no linked worktrees
+// the whole repo, to the Trash (D102, D105); e refreshes the env files of
+// every worktree of the row's repo from a fresh pull in its main checkout,
+// and E spreads the row's own files instead, as they are (D109). One prompt
+// or one short confirm each. Each runs the wt script
+// through state.Actions as a tea.Cmd, so the "running wt ..." line renders
+// first; keys wait until it answers.
+
+// lifecycleKey starts C-a c, C, x, D, e or E on worktree row t.
+func (m *model) lifecycleKey(k string, t *state.Worktree) tea.Cmd {
+	m.targetWT, m.target = t, t.Session
+	switch k {
+	case "c", "C":
+		if t.Missing {
+			m.err = fmt.Errorf("worktree directory is missing: %s", t.Root)
+			return nil
+		}
+		m.targetFrom, m.label = "", "new worktree from main: "
+		if k == "C" {
+			m.targetFrom = t.Branch
+			if t.Detached() {
+				m.targetFrom = t.Head
+			}
+			m.label = "new worktree from " + m.targetFrom + ": "
+		}
+		m.startPrompt(promptNewWorktree, "")
+	case "x":
+		if t.Main {
+			m.err = fmt.Errorf("refusing to repurpose the main worktree: %s", t.Name)
+			return nil
+		}
+		if m.err = refuseChange(t, "repurpose"); m.err != nil {
+			return nil
+		}
+		if t.Missing {
+			m.err = fmt.Errorf("worktree directory is missing: %s", t.Root)
+			return nil
+		}
+		m.label = "repurpose " + t.Name + " to branch: "
+		m.startPrompt(promptRepurpose, "")
+	case "D":
+		if m.err = refuseChange(t, "delete"); m.err != nil {
+			return nil
+		}
+		if t.Current && m.nextSession(t.Session) == nil {
+			// The client moves to another session before its own is
+			// killed (D108); with none it would detach and end the popup.
+			m.err = fmt.Errorf("refusing to delete %s: no other session to switch to", t.Name)
+			return nil
+		}
+		if t.Missing {
+			// Nothing on disk to lose, and wt reads no status for it:
+			// wt rm prunes the registration or says why it cannot.
+			root, name := t.Root, t.Name
+			return m.wt("rm", func(a state.Actions) tea.Msg {
+				_, err := a.WorktreeRemove(root)
+				msg := reload(a, err, "pruned "+name)
+				msg.forget = root
+				return msg
+			})
+		}
+		if t.Main || t.Locked {
+			// The refusals need wt: a main checkout's linked worktrees,
+			// a lock's reason.
+			root := t.Root
+			return m.wt("status", func(a state.Actions) tea.Msg {
+				st, err := a.WorktreeStatus(root)
+				return wtStatusMsg{st, err}
+			})
+		}
+		m.openDeleteConfirm(t)
+	case "e", "E":
+		if t.Missing {
+			m.err = fmt.Errorf("worktree directory is missing: %s", t.Root)
+			return nil
+		}
+		// On the main row E is e: wt takes main as the source and pulls.
+		m.targetHere = k == "E"
+		source := "main"
+		if m.targetHere {
+			source = t.Name
+		}
+		m.label = "refresh env of every " + t.Repo + " worktree from " + source + "? "
+		m.pending = confirmEnvRefresh
+	}
+	return nil
+}
+
+// envRefresh runs wt env-refresh for t's repo (D109): the main checkout
+// pulls afresh when its wt.envPull is set, then every linked worktree gets
+// the copies with its own ports; with here (C-a E) t itself is the source,
+// copied as it is to every other worktree, main included, with no pull. No
+// session changes, so the reload keeps the rows; only the preview counts
+// may move.
+func (m *model) envRefresh(t *state.Worktree, here bool) tea.Cmd {
+	root, repo := t.Root, t.Repo
+	return m.wt("env-refresh", func(a state.Actions) tea.Msg {
+		res, err := a.WorktreeEnvRefresh(root, here)
+		if err != nil {
+			return reload(a, err, "")
+		}
+		return reload(a, nil, envRefreshStatus(repo, res))
+	})
+}
+
+// envRefreshStatus is the green line after wt env-refresh. The files are
+// not listed: they are the same set wt new copies, and the line is narrow.
+func envRefreshStatus(repo string, r state.WTEnvResult) string {
+	noun := "worktrees"
+	if r.Refreshed == 1 {
+		noun = "worktree"
+	}
+	s := fmt.Sprintf("env refreshed in %d %s %s from %s", r.Refreshed, repo, noun, filepath.Base(r.Source))
+	if r.Pulled {
+		s += ", pulled"
+	} else {
+		s += ", copied only"
+	}
+	skipped := 0
+	for _, w := range r.Worktrees {
+		skipped += len(w.Skipped)
+	}
+	if skipped > 0 {
+		s += fmt.Sprintf(", %d symlink(s) skipped", skipped)
+	}
+	if len(r.Missing) > 0 {
+		s += fmt.Sprintf(", %d missing", len(r.Missing))
+	}
+	return s
+}
+
+// refuseChange is the local refusal before repurpose or delete: a row
+// whose session has an agent Working. (Repurpose also refuses the main
+// worktree; delete leaves main to wt status, D102.)
+func refuseChange(t *state.Worktree, verb string) error {
+	n := 0
+	for _, p := range t.Panes {
+		if p.State == state.StateWorking {
+			n++
+		}
+	}
+	switch n {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("refusing to %s %s: an agent is working in it", verb, t.Name)
+	}
+	return fmt.Errorf("refusing to %s %s: %d agents are working in it", verb, t.Name, n)
+}
+
+// wt runs f off the UI goroutine with "running wt OP ..." on the input line.
+func (m *model) wt(op string, f func(state.Actions) tea.Msg) tea.Cmd {
+	m.busy = "running wt " + op + " …"
+	a := m.act
+	return func() tea.Msg { return f(a) }
+}
+
+// newWorktree runs wt new for the repo of row t, then creates the new
+// directory's session there and goes to it; the picker exits. Nothing is
+// installed. A failure reloads and stays open.
+func (m *model) newWorktree(t *state.Worktree, branch, from string) tea.Cmd {
+	root := t.Root
+	return m.wt("new", func(a state.Actions) tea.Msg {
+		res, err := a.WorktreeNew(root, branch, from)
+		if err == nil && res.Path == "" {
+			err = errors.New("wt new: no path in its reply")
+		}
+		if err == nil {
+			if err = a.CreateSession(state.SessionName(filepath.Base(res.Path)), res.Path); err == nil {
+				return exitMsg{}
+			}
+		}
+		return reload(a, err, "")
+	})
+}
+
+// repurpose runs wt repurpose on t with --stash, so a dirty tree is
+// stashed (wt's tagged stash) rather than asked about (D105); the picker
+// reloads and shows the result.
+func (m *model) repurpose(t *state.Worktree, branch string) tea.Cmd {
+	root, name := t.Root, t.Name
+	return m.wt("repurpose", func(a state.Actions) tea.Msg {
+		res, err := a.WorktreeRepurpose(root, branch)
+		msg := reload(a, err, repurposeStatus(name, res))
+		msg.forget = root
+		return msg
+	})
+}
+
+// repurposeStatus is the short result line (D105).
+func repurposeStatus(name string, r state.WTResult) string {
+	s := "repurposed " + name + " to " + r.Branch
+	switch {
+	case r.StashedChanges == 1:
+		s += ", 1 change stashed"
+	case r.StashedChanges > 1:
+		s += fmt.Sprintf(", %d changes stashed", r.StashedChanges)
+	case r.Stashed:
+		s += ", changes stashed"
+	}
+	return s
+}
+
+// delete kills s (when t has a session; remote panes close through rw
+// first), then runs wt rm on t, which moves it to the Trash, then starts a
+// background resurrect save. A kill failure stops before wt rm. On the
+// client's own row the client is switched to the next most recent session
+// first (D108), so the kill never leaves it without a session.
+func (m *model) delete(t *state.Worktree, s *state.Session) tea.Cmd {
+	root, name, repo := t.Root, t.Name, t.Repo
+	var next *state.Session
+	if t.Current {
+		next = m.nextSession(s)
+	}
+	return m.wt("rm", func(a state.Actions) tea.Msg {
+		if s != nil {
+			if next != nil {
+				if err := a.Switch(next, nil, nil); err != nil {
+					return reload(a, err, "")
+				}
+			}
+			if err := a.KillSession(s); err != nil {
+				return reload(a, err, "")
+			}
+		}
+		res, err := a.WorktreeRemove(root)
+		if err != nil {
+			return reload(a, err, "")
+		}
+		status := "deleted " + name
+		if res.Main {
+			status = "deleted repo " + repo
+		}
+		if err := a.SaveLayout(); err != nil {
+			status += " (" + err.Error() + ")"
+		}
+		msg := reload(a, nil, status)
+		msg.forget = root
+		return msg
+	})
+}
+
+// nextSession is the most recently active session other than s: where the
+// client goes before s, its own session, is killed (D108). nil without one.
+func (m model) nextSession(s *state.Session) *state.Session {
+	var best *state.Session
+	for _, o := range m.snap.Sessions {
+		if s != nil && o.ID == s.ID {
+			continue
+		}
+		if best == nil || o.Recency() > best.Recency() {
+			best = o
+		}
+	}
+	return best
+}
+
+// openDeleteConfirm opens the one short delete confirm (D105).
+func (m *model) openDeleteConfirm(t *state.Worktree) {
+	m.label = "delete " + t.Name + " to Trash? "
+	if t.Main {
+		m.label = "delete repo " + t.Repo + " to Trash? "
+	}
+	m.pending = confirmDelete
+}
+
+// deleteConfirm turns wt status of a main or locked row into the delete
+// confirm, or the refusal for a locked worktree or a main checkout that
+// still has linked worktrees. That refusal also shows them: the repo filter goes to the
+// row's repo and the query is cleared (D102).
+func (m *model) deleteConfirm(msg wtStatusMsg) {
+	t := m.targetWT
+	switch {
+	case msg.err != nil:
+		m.err = msg.err
+	case t == nil:
+	case msg.st.Main && msg.st.Linked > 0:
+		m.showRepo(t)
+		noun := "linked worktrees"
+		if msg.st.Linked == 1 {
+			noun = "linked worktree"
+		}
+		m.err = fmt.Errorf("%s still has %d %s: delete them first", t.Repo, msg.st.Linked, noun)
+	case msg.st.Locked:
+		reason := msg.st.LockReason
+		if reason == "" {
+			reason = "no reason given"
+		}
+		m.err = fmt.Errorf("refusing to delete %s: locked (%s)", t.Name, reason)
+	default:
+		m.openDeleteConfirm(t)
+	}
+}
+
+// showRepo sets the repo filter to t's repo with an empty query, so the
+// list shows that repo's rows only, and keeps the cursor on t.
+func (m *model) showRepo(t *state.Worktree) {
+	if m.hasRepos() {
+		m.repo = t.Repo
+	}
+	m.query.SetValue("")
+	m.resetList()
+	for i, idx := range m.matches {
+		if m.rows[idx].RowID() == t.Root {
+			m.cur = i
+			break
+		}
+	}
+	m.listFollow()
+	m.resetCards()
+}

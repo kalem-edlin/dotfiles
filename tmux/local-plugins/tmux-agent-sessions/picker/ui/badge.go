@@ -5,6 +5,9 @@ import (
 	"sort"
 )
 
+// badgeCodeW is the width of a compact badge.
+const badgeCodeW = 2
+
 // repoBadge is a repo's 2-letter code and the grey it sits on (D76).
 type repoBadge struct {
 	code   string

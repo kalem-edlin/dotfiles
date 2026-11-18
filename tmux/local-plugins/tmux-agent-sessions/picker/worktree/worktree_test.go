@@ -166,9 +166,10 @@ func TestResolve(t *testing.T) {
 		{"absolute gitdir", f.path("wt-absolute"), Info{Root: f.path("wt-absolute"), CommonDir: common, Repo: "proj", Branch: "abs"}, true},
 		{"missing commondir", f.path("wt-nocommon"), Info{Root: f.path("wt-nocommon"), CommonDir: nocommonGitdir, Repo: "wt-nocommon", Branch: "nocommon"}, true},
 		{"other ref", f.path("wt-otherref"), Info{Root: f.path("wt-otherref"), CommonDir: common, Repo: "proj", Branch: "remotes/origin/main"}, true},
-		{"bare linked worktree", f.path("bare/svc-wt"), Info{Root: f.path("bare/svc-wt"), CommonDir: f.path("bare/svc.git"), Repo: "svc", Branch: "bare-feat"}, true},
-		{"bare linked subdir", f.path("bare/svc-wt/pkg"), Info{Root: f.path("bare/svc-wt"), CommonDir: f.path("bare/svc.git"), Repo: "svc", Branch: "bare-feat"}, true},
-		{"bare without suffix", f.path("bare/plain-wt"), Info{Root: f.path("bare/plain-wt"), CommonDir: f.path("bare/plain"), Repo: "plain", Branch: "plain-feat"}, true},
+		// bare clones of proj carry remote.origin.url = proj, so D93 names them proj
+		{"bare linked worktree", f.path("bare/svc-wt"), Info{Root: f.path("bare/svc-wt"), CommonDir: f.path("bare/svc.git"), Repo: "proj", Branch: "bare-feat"}, true},
+		{"bare linked subdir", f.path("bare/svc-wt/pkg"), Info{Root: f.path("bare/svc-wt"), CommonDir: f.path("bare/svc.git"), Repo: "proj", Branch: "bare-feat"}, true},
+		{"bare without suffix", f.path("bare/plain-wt"), Info{Root: f.path("bare/plain-wt"), CommonDir: f.path("bare/plain"), Repo: "proj", Branch: "plain-feat"}, true},
 		{"non-repo dir", f.path("plain"), Info{}, false},
 		{"non-repo subdir", f.path("plain/sub"), Info{}, false},
 		{"nonexistent dir", f.path("proj/nope"), Info{}, false},
@@ -289,5 +290,38 @@ func BenchmarkResolve100(b *testing.B) {
 		for _, d := range dirs {
 			r.Resolve(d)
 		}
+	}
+}
+
+func TestRepoNameFromOrigin(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"git@github.com:kalem-edlin/content-engine.git", "content-engine"},
+		{"https://github.com/kalem-edlin/agent-reach.git", "agent-reach"},
+		{"ssh://git@host/org/name", "name"},
+		{"/srv/git/name.git/", "name"},
+		{"", ""},
+	} {
+		if got := urlBase(tc.url); got != tc.want {
+			t.Errorf("urlBase(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+	dir := t.TempDir()
+	common := filepath.Join(dir, "main", ".git")
+	if err := os.MkdirAll(common, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:kalem-edlin/content-engine.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+	if err := os.WriteFile(filepath.Join(common, "config"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoName(filepath.Join(dir, "main"), common, false); got != "content-engine" {
+		t.Errorf("repoName with origin = %q, want content-engine", got)
+	}
+	other := filepath.Join(dir, "other", ".git")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := repoName(filepath.Join(dir, "other"), other, false); got != "other" {
+		t.Errorf("repoName without origin = %q, want other (directory fallback)", got)
 	}
 }

@@ -1,0 +1,2 @@
+{"type":"user","uuid":"prompt","parentUuid":null,"message":{"role":"user","content":"Choose an option"}}
+{"type":"assistant","uuid":"reply","parentUuid":"prompt","message":{"role":"assistant","content":"Which option?\nAwaiting your input."}}

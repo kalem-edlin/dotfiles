@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"agentpicker/state"
+	"agentpicker/worktree"
 )
 
 // tmuxPath is the tmux binary. Tests point it at a shim.
@@ -31,6 +32,9 @@ func defaultRWClose() string {
 
 type actions struct {
 	client string // #{client_name} of the invoking client, may be empty
+
+	discovered []worktree.Entry // worktree discovery, cached per picker run
+	rediscover bool             // scan again on the next Load (B3 lifecycle actions)
 }
 
 // New returns the tmux-backed Actions for the client named client. Targets
@@ -68,13 +72,16 @@ func (a *actions) Switch(s *state.Session, w *state.Window, p *state.Pane) error
 	return err
 }
 
-func (a *actions) CreateSession(name string) error {
+func (a *actions) CreateSession(name, dir string) error {
 	if err := checkSessionName(name); err != nil {
 		return err
 	}
+	if dir == "" {
+		dir = home()
+	}
 	// `=NAME:` is an exact session match; a bare name would also match
 	// window names in the current session.
-	args := []string{"new-session", "-d", "-s", name, "-c", home(), ";", "switch-client"}
+	args := []string{"new-session", "-d", "-s", name, "-c", dir, ";", "switch-client"}
 	args = append(args, a.clientArgs()...)
 	args = append(args, "-t", "="+name+":")
 	_, err := runTmux(args...)

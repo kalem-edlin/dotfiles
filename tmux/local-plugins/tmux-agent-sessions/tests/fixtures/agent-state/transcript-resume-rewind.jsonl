@@ -1,0 +1,5 @@
+{"type":"user","uuid":"root","parentUuid":null,"message":{"role":"user","content":"Choose"}}
+{"type":"assistant","uuid":"waiting-branch","parentUuid":"root","message":{"role":"assistant","content":"Which?\nAwaiting your input.","stop_reason":"end_turn"}}
+{"type":"user","uuid":"other-prompt","parentUuid":"root","message":{"role":"user","content":"Another branch"}}
+{"type":"assistant","uuid":"other-reply","parentUuid":"other-prompt","message":{"role":"assistant","content":"Done.","stop_reason":"end_turn"}}
+{"type":"last-prompt","leafUuid":"waiting-branch","explicit":true,"rewound":true,"sessionId":"synthetic"}

@@ -56,7 +56,9 @@ pane_read() {
 # jq helper: sanitized text (control chars to space, runs collapsed, trimmed).
 JQ_DEFS='def clean: tostring | gsub("[[:cntrl:]\u2028\u2029]"; " ") | gsub(" +"; " ") | sub("^ "; "") | sub(" $"; "");
 def cut($n): clean | .[0:$n] | sub("[ ;\\\\]+$"; "");
-def path_ok: tostring | if test("[[:cntrl:]]") or endswith(";") then "" else . end;'
+def path_ok: tostring | if test("[[:cntrl:]]") or endswith(";") then "" else . end;
+def awaiting_marker: split("\n") | map(gsub("^\\s+|\\s+$"; ""))
+  | map(select(length > 0)) | (last // "") == "Awaiting your input.";'
 
 jq_get() {
   [ -n "$JQ" ] || return 1
@@ -102,6 +104,64 @@ titles_pick() {
       elif $e.type == "ai-title" then .a = ($e.aiTitle // "" | cut(60))
       else . end)
     | [.c, .a] | map(select(. != null and . != "")) | first // ""' 2>/dev/null
+}
+
+# Resume reads raw conversation records, never picker text. Only main-chain
+# user/assistant records advance the turn. A user (including tool results),
+# tool-only assistant or incomplete response masks any earlier marker.
+# An explicit last-prompt.leafUuid is Claude's branch/rewind checkpoint. It may
+# select an older main-chain reply, so resolve it by UUID rather than finding
+# the last marker anywhere in the file. Keep only a small summary per scan.
+RESUME_DEFS='
+def short_uuid: if type == "string" and length <= 128 then . else null end;
+def main_turn: .isSidechain != true and (.type == "user" or .type == "assistant");
+def reply_marker:
+  if .type != "assistant" then false
+  else .message as $m
+    | (if ($m | type) == "object" then $m.content else $m end) as $body
+    | (if ($m | type) == "object" and ($m | has("stop_reason")) then
+         ($m.stop_reason == "end_turn" or $m.stop_reason == "stop_sequence")
+       else true end) as $complete
+    | (if ($body | type) == "string" then $body
+       elif ($body | type) == "array" then
+         [$body[] | objects | select(.type == "text") | .text | strings] | join("\n")
+       else "" end) as $text
+    | $complete and ([$body | arrays | .[] | objects | select(.type == "tool_use")] | length == 0)
+      and ($text | awaiting_marker)
+  end;'
+resume_scan() {
+  "$JQ" -Rrn "$JQ_DEFS $RESUME_DEFS"'
+    reduce (inputs | fromjson? | objects) as $e
+      ({seen: false, uuid: null, marker: false, target: null};
+       if ($e | main_turn) then
+         {seen: true, uuid: ($e.uuid | short_uuid), marker: ($e | reply_marker), target: null}
+       elif $e.isSidechain != true and $e.type == "last-prompt" and $e.explicit == true then
+         ($e.leafUuid | short_uuid) as $leaf
+         | if $leaf != null then
+             if .uuid == $leaf then .target = null
+             else {seen: true, uuid: null, marker: false, target: $leaf} end
+           elif $e.leafUuid == null and ($e | has("leafUuid")) then
+             {seen: true, uuid: null, marker: false, target: null}
+           else . end
+       else . end)' 2>/dev/null
+}
+transcript_awaiting() {
+  local file="$1" result target
+  [ -n "$JQ" ] && [ -n "$file" ] && [ -f "$file" ] && [ -r "$file" ] || return 1
+  # The cut first line and malformed/truncated records are skipped by fromjson?.
+  # No conversation text is captured in a shell variable, even on fallback.
+  result="$(tail -c 262144 -- "$file" | resume_scan)" || return 1
+  if ! printf '%s' "$result" | "$JQ" -e '.seen' >/dev/null 2>&1; then
+    result="$(resume_scan <"$file")" || return 1
+  fi
+  target="$(printf '%s' "$result" | "$JQ" -r '.target // ""')" || return 1
+  if [ -n "$target" ]; then
+    "$JQ" -Rren --arg target "$target" "$JQ_DEFS $RESUME_DEFS"'
+      reduce (inputs | fromjson? | objects | select(.uuid == $target and main_turn)) as $e
+        (false; $e | reply_marker)' <"$file" >/dev/null 2>&1
+  else
+    printf '%s' "$result" | "$JQ" -e '.marker' >/dev/null 2>&1
+  fi
 }
 
 cmd=()
@@ -226,7 +286,11 @@ case "$event" in
         *) add set -pu -t "$pane" @agent_empty ;;
       esac
       add set -p -t "$pane" @agent_subs 0
-      add_state idle
+      if [ "$src" = resume ] && transcript_awaiting "$transcript"; then
+        add_state awaiting
+      else
+        add_state idle
+      fi
     fi
     run
     ;;
@@ -295,10 +359,8 @@ case "$event" in
     fields="$(jq_get '
       def inflight: select((.status // "" | tostring | ascii_downcase)
         | IN("completed", "failed", "killed", "cancelled", "canceled", "stopped", "done") | not);
-      (.last_assistant_message // "" | tostring | split("\n")
-        | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | last // "")
-        as $last
-      | (if $last == "Awaiting your input." then "1" else "0" end),
+      (.last_assistant_message // "" | tostring | awaiting_marker) as $marker
+      | (if $marker then "1" else "0" end),
         (.cwd // "" | path_ok), (.transcript_path // "" | tostring),
         (if (.background_tasks | type) == "array" then "1" else "0" end),
         ([.background_tasks[]? | objects | inflight] | length),

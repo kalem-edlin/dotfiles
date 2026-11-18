@@ -73,7 +73,7 @@ func TestParseOrderCurrentLast(t *testing.T) {
 	// (focus ...0001), $1 (focus ...9900), $3 (focus ...9960). The client's
 	// $2 (focus ...9950) is last though $3 is newer, and agent states play
 	// no part.
-	want := []string{"$5", "$4", "$7", "$6", "$1", "$3", "$2"}
+	want := []string{"$5", "$4", "$6", "$7", "$1", "$3", "$2"}
 	if got := sessionIDs(snap); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
 	}
@@ -90,7 +90,7 @@ func TestParseOrderCurrentLast(t *testing.T) {
 func TestParseNoClient(t *testing.T) {
 	snap := parseSnapshot("\n"+loadRows(t), loadMem(t), 0)
 	// Without a client $2 takes its place by access, before $3.
-	want := []string{"$5", "$4", "$7", "$6", "$1", "$2", "$3"}
+	want := []string{"$5", "$4", "$6", "$7", "$1", "$2", "$3"}
 	if got := sessionIDs(snap); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
 	}
@@ -308,7 +308,7 @@ func TestLoadWithClient(t *testing.T) {
 		"list-panes", "-a", "-F", listFormat))
 	_, rows := parseRows("\n" + loadRows(t))
 	expectCalls(t, memLog, memPIDs(rows))
-	if got := sessionIDs(snap); !reflect.DeepEqual(got, []string{"$5", "$4", "$7", "$6", "$1", "$3", "$2"}) {
+	if got := sessionIDs(snap); !reflect.DeepEqual(got, []string{"$5", "$4", "$6", "$7", "$1", "$3", "$2"}) {
 		t.Errorf("order %v", got)
 	}
 	if p := findPane(t, snap, "%3"); p.AgentKind != "" {
@@ -409,17 +409,20 @@ func TestOrderByAccess(t *testing.T) {
 			orderSession("wk3", 1, false, orderPane{wk, 1, 0}, orderPane{wk, 1, 0}, orderPane{wk, 1, 0}),
 			orderSession("wk1", 9, false, orderPane{wk, 9, 0})},
 			[]string{"wk3", "wk1"}},
-		{"a newer state change does not reorder", []*state.Session{
+		{"a newer state change reorders (D95)", []*state.Session{
 			orderSession("changed", 1, false, orderPane{wk, 500, 0}), orderSession("visited", 9, false, orderPane{wk, 100, 0})},
-			[]string{"changed", "visited"}},
+			[]string{"visited", "changed"}},
 		{"a focus stamp newer than the last attach wins", []*state.Session{
 			orderSession("focused", 10, false, orderPane{focus: 200}), orderSession("attached", 100, false)},
 			[]string{"attached", "focused"}},
 		{"no stamps falls back to the last attach", []*state.Session{
 			orderSession("unstamped", 50, false), orderSession("stamped", 10, false, orderPane{focus: 40})},
 			[]string{"stamped", "unstamped"}},
-		{"full ties keep tmux order", []*state.Session{
+		{"an agent stamp newer than the attach wins", []*state.Session{
 			orderSession("x", 5, false, orderPane{aw, 9, 0}), orderSession("y", 5, false)},
+			[]string{"y", "x"}},
+		{"full ties keep tmux order", []*state.Session{
+			orderSession("x", 5, false, orderPane{aw, 5, 0}), orderSession("y", 5, false)},
 			[]string{"x", "y"}},
 	}
 	for _, c := range cases {

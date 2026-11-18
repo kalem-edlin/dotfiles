@@ -1,0 +1,9 @@
+{"type":"user","uuid":"prompt","message":{"role":"user","content":"hello"}}
+{"type":"assistant","uuid":"reply","parentUuid":"prompt","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}
+{"type":"progress","message":{"role":"assistant","content":"Awaiting your input."}}
+{"type":"ai-title","aiTitle":"","message":{"content":"Awaiting your input."}}
+{"wrapped":{"type":"assistant","message":{"content":"Awaiting your input."}}}
+null
+[]
+not JSON
+{"type":"assistant","message":{"content":"Awaiting your input."

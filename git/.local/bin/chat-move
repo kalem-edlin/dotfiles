@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# chat-move: move the calling agent chat into another directory's tmux session.
+#
+#   chat-move <dir> --message-file FILE
+#   chat-move <dir> --message TEXT
+#
+# Run from inside a Claude Code (claudef) or pi (pif) chat, as the chat's last
+# act of its turn. The chat is found from what the agent's shell tool inherits:
+# CLAUDE_CODE_SESSION_ID (Claude) or PI_SESSION_FILE (pi), plus TMUX_PANE.
+# The command returns at once; a worker under the tmux server (run-shell -b)
+# outlives the pane and does the move:
+#   1. waits until the pane's @agent_state leaves working (the turn ended);
+#   2. creates the session named after <dir> (the picker's naming) when it is
+#      missing, rooted at <dir>, and opens a shell window in it;
+#   3. types the resume into that shell: `claudef --resume ID "<message>"` or
+#      `pif --fork FILE "<message>"`, so the whole conversation continues in
+#      <dir> with the message as its next prompt;
+#   4. answers Claude Code's trust dialog for the new directory, and once the
+#      new pane publishes @agent_pid (the agent is up) it kills the old pane. A client whose session would die with it is moved to the new
+#      session first; no other client is switched.
+# A failure after the wait leaves the old pane alone, shows on it through
+# display-message and is logged to ~/.local/state/chat-move/log.
+#
+# exit: 0 handed off, 2 usage, 1 not in a chat pane or no such directory
+
+set -u
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chat-move"
+TURN_WAIT=${CHAT_MOVE_TURN_WAIT:-600} # seconds for the calling turn to end
+AGENT_WAIT=${CHAT_MOVE_AGENT_WAIT:-90} # seconds for the resumed agent to come up
+
+usage() {
+  sed -n '3,5s/^# \{0,1\}//p' "$0" >&2
+  exit 2
+}
+
+die() {
+  printf 'chat-move: %s\n' "$*" >&2
+  exit "${code:-1}"
+}
+
+log() {
+  mkdir -p "$STATE_DIR"
+  printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$*" >>"$STATE_DIR/log"
+}
+
+# session_name DIR: the picker's naming (state.SessionName): '.' and ':' to '_'.
+session_name() {
+  local b
+  b=${1##*/}
+  b=${b//./_}
+  b=${b//:/_}
+  printf '%s' "$b"
+}
+
+# pane_fmt PANE FORMAT: expand FORMAT in PANE; fails when the pane is gone.
+pane_fmt() { tmux display-message -p -t "$1" "$2" 2>/dev/null; }
+
+# --- worker -------------------------------------------------------------------
+
+# fail MSG: log, tell the old pane when it still exists, and stop.
+fail() {
+  log "job $job failed: $*"
+  [ -n "${pane:-}" ] && tmux display-message -t "$pane" -d 10000 "chat-move: $*" 2>/dev/null
+  exit 1
+}
+
+worker() {
+  local job=$1 dir kind sid pane name msg i state created=0 newpane launch turn_wait agent_wait trusted screen
+  for f in dir kind sid pane name turn_wait agent_wait; do
+    [ -f "$job/$f" ] || { log "job $job: missing $f"; exit 1; }
+    IFS= read -r "$f" <"$job/$f"
+  done
+  msg="$job/message"
+  log "job $job: $kind chat in $pane to $name ($dir)"
+
+  # 1. The turn that called us ends when @agent_state is no longer working.
+  # No state at all (hooks absent) gets a short grace period instead.
+  i=0
+  while :; do
+    state=$(pane_fmt "$pane" '#{@agent_state}') || fail "the chat's pane $pane is gone"
+    case $state in
+      working) ;;
+      '') [ "$i" -ge 10 ] && break ;;
+      *) break ;;
+    esac
+    [ "$i" -ge "$turn_wait" ] && fail "turn still running after ${turn_wait}s, nothing moved"
+    sleep 1
+    i=$((i + 1))
+  done
+
+  # 2. The session and a shell window in it.
+  if tmux has-session -t "=$name:" 2>/dev/null; then
+    newpane=$(tmux new-window -d -P -F '#{pane_id}' -t "=$name:" -c "$dir" -n "${kind}f") ||
+      fail "new-window in $name failed"
+  else
+    newpane=$(tmux new-session -d -P -F '#{pane_id}' -s "$name" -c "$dir" -n "${kind}f") ||
+      fail "new-session $name failed"
+    created=1
+  fi
+
+  # 3. The resume, typed into the shell so the window stays a shell afterwards,
+  # as the user's own chats are. The message file is read by that shell.
+  case $kind in
+    claude) launch="claudef --resume '$sid' \"\$(cat '$msg')\"" ;;
+    pi) launch="pif --fork '$sid' \"\$(cat '$msg')\"" ;;
+  esac
+  tmux send-keys -t "$newpane" -l "$launch" \; send-keys -t "$newpane" Enter ||
+    fail "send-keys to $newpane failed"
+
+  # 4. The agent is up when its publisher stamps @agent_pid on the new pane.
+  # A new worktree is a new directory to Claude Code, which first asks
+  # "Is this a project you trust?" (its hooks run only after that), so the
+  # dialog is answered here, once: Down to "Yes, I trust this folder", Enter.
+  i=0 trusted=0
+  while :; do
+    state=$(pane_fmt "$newpane" '#{@agent_pid}') || fail "the new pane $newpane closed before the agent came up; this chat stays"
+    [ -n "$state" ] && break
+    screen=$(tmux capture-pane -p -t "$newpane" 2>/dev/null)
+    case $screen in
+      *"No conversation found with session"*) fail "Claude Code found no conversation $sid to resume; this chat stays" ;;
+    esac
+    if [ "$trusted" = 0 ]; then
+      case $screen in
+        *"Yes, I trust this folder"*)
+          tmux send-keys -t "$newpane" Down \; send-keys -t "$newpane" Enter
+          trusted=1
+          log "job $job: answered the trust dialog in $newpane"
+          ;;
+      esac
+    fi
+    [ "$i" -ge "$agent_wait" ] && fail "no agent in $newpane after ${agent_wait}s; this chat stays, see $name"
+    sleep 1
+    i=$((i + 1))
+  done
+
+  # A client on a session that dies with the old pane would be detached or
+  # thrown somewhere else by tmux; it follows the chat instead.
+  if [ "$(pane_fmt "$pane" '#{session_windows}#{window_panes}')" = 11 ]; then
+    local sess c
+    sess=$(pane_fmt "$pane" '#{session_id}')
+    tmux list-clients -F '#{client_name} #{session_id}' 2>/dev/null |
+      while read -r c s; do
+        [ "$s" = "$sess" ] && tmux switch-client -c "$c" -t "=$name:" 2>/dev/null
+      done
+  fi
+  tmux kill-pane -t "$pane" 2>/dev/null
+  log "job $job done: $kind chat resumed in $newpane of $name, created=$created, old pane $pane killed"
+  rm -rf "$job"
+}
+
+# --- front ---------------------------------------------------------------------
+
+[ "${1:-}" = --worker ] && { [ $# -eq 2 ] || usage; worker "$2"; exit 0; }
+
+dir="" text="" file=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --message) [ $# -ge 2 ] || usage; text=$2; shift 2 ;;
+    --message-file) [ $# -ge 2 ] || usage; file=$2; shift 2 ;;
+    -h | --help) usage ;;
+    -*) usage ;;
+    *) [ -z "$dir" ] || usage; dir=$1; shift ;;
+  esac
+done
+[ -n "$dir" ] || usage
+[ -n "$text" ] || [ -n "$file" ] || usage
+[ -n "$text" ] && [ -n "$file" ] && usage
+[ -d "$dir" ] || die "no such directory: $dir"
+dir=$(cd "$dir" && pwd -P)
+[ -z "$file" ] || [ -s "$file" ] || die "message file is missing or empty: $file"
+
+pane=${TMUX_PANE:-}
+case $pane in %[0-9]*) ;; *) die "not inside a tmux pane (TMUX_PANE unset)" ;; esac
+if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  kind=claude sid=$CLAUDE_CODE_SESSION_ID
+elif [ -n "${PI_SESSION_FILE:-}" ]; then
+  kind=pi sid=$PI_SESSION_FILE
+  [ -f "$sid" ] || die "PI_SESSION_FILE does not exist: $sid"
+else
+  die "not inside a Claude Code or pi chat (no CLAUDE_CODE_SESSION_ID or PI_SESSION_FILE)"
+fi
+pane_fmt "$pane" '#{pane_id}' >/dev/null || die "pane $pane is not on this tmux server"
+name=$(session_name "$dir")
+
+self="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
+job=$(mktemp -d "$STATE_DIR/job.XXXXXX") || die "cannot create a job directory"
+printf '%s\n' "$dir" >"$job/dir"
+printf '%s\n' "$kind" >"$job/kind"
+printf '%s\n' "$sid" >"$job/sid"
+printf '%s\n' "$pane" >"$job/pane"
+printf '%s\n' "$name" >"$job/name"
+printf '%s\n' "$TURN_WAIT" >"$job/turn_wait"
+printf '%s\n' "$AGENT_WAIT" >"$job/agent_wait"
+if [ -n "$file" ]; then cp "$file" "$job/message"; else printf '%s\n' "$text" >"$job/message"; fi
+chmod 600 "$job/message"
+
+tmux run-shell -b "'$self' --worker '$job'" || { rm -rf "$job"; die "tmux run-shell failed"; }
+log "job $job queued from $pane"
+printf 'chat-move: this %s chat moves to session %s (%s) when this turn ends; the pane here closes once the agent is up there\n' "$kind" "$name" "$dir"

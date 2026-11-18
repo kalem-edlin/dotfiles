@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -40,7 +41,7 @@ func send(t *testing.T, m model, keys ...string) model {
 			msg := cmd()
 			cmd = nil
 			switch msg.(type) {
-			case actionMsg, exitMsg:
+			case actionMsg, exitMsg, wtStatusMsg:
 				nm, cmd = m.Update(msg)
 				m = nm.(model)
 			}
@@ -281,9 +282,9 @@ func TestPrefixArmDisarm(t *testing.T) {
 	if !m.armed {
 		t.Fatal("ctrl+a should arm")
 	}
-	m = send(t, m, "x") // disarms and types
-	if m.armed || m.query.Value() != "x" {
-		t.Errorf("C-a x: armed=%v query=%q", m.armed, m.query.Value())
+	m = send(t, m, "z") // disarms and types
+	if m.armed || m.query.Value() != "z" {
+		t.Errorf("C-a z: armed=%v query=%q", m.armed, m.query.Value())
 	}
 	m = send(t, m, "backspace", "ctrl+p", "ctrl+p", "ctrl+a", "ctrl+j") // disarms and moves
 	if m.armed || m.sel != 3 {
@@ -355,9 +356,9 @@ func TestEsc(t *testing.T) {
 func TestPrompts(t *testing.T) {
 	m, f := newTest(t)
 	m = send(t, m, "ctrl+p") // funnel, pane 1.2 selected
-	m = send(t, m, "ctrl+a", "c")
+	m = send(t, m, "ctrl+a", "w")
 	if m.pending != promptNewWindow {
-		t.Fatal("C-a c should prompt")
+		t.Fatal("C-a w should prompt")
 	}
 	m = send(t, m, "enter")
 	m = send(t, m, "ctrl+a", "r")
@@ -366,12 +367,12 @@ func TestPrompts(t *testing.T) {
 	}
 	m = send(t, m, "backspace", "backspace", "backspace", "backspace", "backspace", "Z", "enter")
 	m = send(t, m, "ctrl+a", "R", "2", "enter")
-	m = send(t, m, "x", "ctrl+a", "C")
+	m = send(t, m, "x", "ctrl+a", "s")
 	if m.prompt.Value() != "x" {
 		t.Errorf("new session default = %q", m.prompt.Value())
 	}
 	m = send(t, m, "y", "enter")
-	m = send(t, m, "ctrl+a", "C", "esc") // cancelled
+	m = send(t, m, "ctrl+a", "s", "esc") // cancelled
 	if m.pending != promptNone {
 		t.Error("esc should cancel the prompt")
 	}
@@ -437,7 +438,7 @@ func TestReloadKeepsSelection(t *testing.T) {
 	sff.Panes = sff.Panes[1:]
 	next.Sessions[2].Windows[1].Panes[0].FocusAt = now
 	f.next = next
-	m = send(t, m, "ctrl+a", "c", "enter")
+	m = send(t, m, "ctrl+a", "w", "enter")
 	if sessionName(m) != "roll-web-funnel-changes" || cardID(m) != "$4@w3-build" {
 		t.Errorf("after reload: %q %q", sessionName(m), cardID(m))
 	}
@@ -505,5 +506,174 @@ func TestPromptEditingKeys(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("calls:\n%v\nwant\n%v", f.calls, want)
+	}
+}
+
+// keyState is everything a lettered action can change, for comparing the
+// three forms of one letter.
+func keyState(m model, f *fakeActions) string {
+	return fmt.Sprintf("cur=%d sel=%d full=%v pending=%v prompt=%q label=%q dir=%q armed=%v query=%q quit=%v err=%v calls=%q",
+		m.cur, m.sel, m.fullRepo, m.pending, m.prompt.Value(), m.label, m.targetDir, m.armed, m.query.Value(), m.quitting, m.err, f.calls)
+}
+
+// D104: one action table. ctrl-<letter>, C-a <letter> and C-a
+// ctrl-<letter> do the same thing for every lowercase letter with an
+// action, and that thing is not nothing.
+func TestLetterForms(t *testing.T) {
+	session := func(sel int) func(t *testing.T) (model, *fakeActions) {
+		return func(t *testing.T) (model, *fakeActions) {
+			m, f := newTest(t)
+			m = send(t, m, "ctrl+p") // funnel: 5 cards, [0 1] [2 3] [4]
+			m.sel = sel
+			return m, f
+		}
+	}
+	wtRow := func(ups int) func(t *testing.T) (model, *fakeActions) {
+		return func(t *testing.T) (model, *fakeActions) { return wtAt(t, ups) }
+	}
+	cases := []struct {
+		letter string
+		setup  func(t *testing.T) (model, *fakeActions)
+		check  func(m model, f *fakeActions) bool
+	}{
+		{"n", session(0), func(m model, _ *fakeActions) bool { return strings.HasPrefix(sessionName(m), "dotfiles-agents") }},
+		{"p", session(0), func(m model, _ *fakeActions) bool { return sessionName(m) == "roll-initiative-2" }},
+		{"h", session(3), func(m model, _ *fakeActions) bool { return m.sel == 2 }},
+		{"l", session(0), func(m model, _ *fakeActions) bool { return m.sel == 1 }},
+		{"j", session(0), func(m model, _ *fakeActions) bool { return m.sel == 2 }},
+		{"k", session(2), func(m model, _ *fakeActions) bool { return m.sel == 0 }},
+		{"t", wtRow(0), func(m model, _ *fakeActions) bool { return m.fullRepo }},
+		{"w", session(0), func(m model, _ *fakeActions) bool { return m.pending == promptNewWindow }},
+		{"s", session(0), func(m model, _ *fakeActions) bool { return m.pending == promptNewSession }},
+		{"r", session(0), func(m model, _ *fakeActions) bool { return m.pending == promptRenameWindow }},
+		{"q", session(0), func(_ model, f *fakeActions) bool {
+			return reflect.DeepEqual(f.calls, []string{"kill-pane %special-feature-flags.1"})
+		}},
+		{"c", wtRow(0), func(m model, _ *fakeActions) bool {
+			return m.pending == promptNewWorktree && m.label == "new worktree from main: "
+		}},
+		{"x", wtRow(0), func(m model, _ *fakeActions) bool { return m.pending == promptRepurpose }},
+	}
+	for _, c := range cases {
+		forms := [][]string{{"ctrl+" + c.letter}, {"ctrl+a", c.letter}, {"ctrl+a", "ctrl+" + c.letter}}
+		if c.letter == "c" {
+			forms = forms[1:] // ctrl-c closes (TestCtrlCAndCreate)
+		}
+		var first string
+		for i, keys := range forms {
+			m, f := c.setup(t)
+			m = send(t, m, keys...)
+			got := keyState(m, f)
+			if !c.check(m, f) {
+				t.Errorf("%v: no effect: %s", keys, got)
+			}
+			if i == 0 {
+				first = got
+			} else if got != first {
+				t.Errorf("%s forms differ:\n %v: %s\n %v: %s", c.letter, forms[0], first, keys, got)
+			}
+		}
+	}
+}
+
+// Uppercase actions are C-a <Letter> only; C-a ctrl-<letter> is the
+// lowercase action, and a bare capital types into the query.
+func TestUppercaseOnlyWithPrefix(t *testing.T) {
+	cases := []struct {
+		upper, lower string
+		ups          int
+		want         promptKind
+	}{
+		{"C", "c", 0, promptNewWorktree},
+		{"R", "r", 0, promptRenameSession},
+		{"Q", "q", 0, confirmKillSession},
+		{"D", "d", 0, confirmDelete},
+	}
+	for _, c := range cases {
+		m, _ := wtAt(t, c.ups)
+		if m = send(t, m, "ctrl+a", c.upper); m.pending != c.want {
+			t.Errorf("C-a %s: pending %v, want %v", c.upper, m.pending, c.want)
+		}
+		m, _ = wtAt(t, c.ups)
+		if m = send(t, m, c.upper); m.pending != promptNone || m.query.Value() != c.upper {
+			t.Errorf("bare %s: pending %v query %q", c.upper, m.pending, m.query.Value())
+		}
+		m, f := wtAt(t, c.ups)
+		m = send(t, m, "ctrl+a", "ctrl+"+c.lower)
+		switch c.upper {
+		case "C":
+			if m.label != "new worktree from main: " {
+				t.Errorf("C-a ctrl+c: label %q, want the lowercase action", m.label)
+			}
+		case "R":
+			if m.pending != promptRenameWindow {
+				t.Errorf("C-a ctrl+r: %v", m.pending)
+			}
+		case "Q":
+			if m.pending != promptNone || len(f.calls) != 1 || !strings.HasPrefix(f.calls[0], "kill-") || strings.HasPrefix(f.calls[0], "kill-session") {
+				t.Errorf("C-a ctrl+q: %v %q", m.pending, f.calls)
+			}
+		case "D":
+			if m.pending != promptNone || len(f.calls) != 0 || m.armed {
+				t.Errorf("C-a ctrl+d: %v %q (d has no action)", m.pending, f.calls)
+			}
+		}
+	}
+}
+
+// ctrl-c closes; C-a c and C-a ctrl-c start the create prompt; C-a C-a
+// stays armed; C-a esc closes; an unbound letter after C-a types it.
+func TestCtrlCAndCreate(t *testing.T) {
+	m, f := wtAt(t, 0)
+	if m = send(t, m, "ctrl+c"); !m.quitting || len(f.calls) != 0 {
+		t.Errorf("ctrl+c: quitting=%v calls=%v", m.quitting, f.calls)
+	}
+	for _, k := range []string{"c", "ctrl+c"} {
+		m, _ = wtAt(t, 0)
+		if m = send(t, m, "ctrl+a", k); m.quitting || m.pending != promptNewWorktree {
+			t.Errorf("C-a %s: quitting=%v pending=%v", k, m.quitting, m.pending)
+		}
+	}
+	m, _ = newTest(t)
+	if m = send(t, m, "ctrl+a", "ctrl+c"); m.quitting || m.pending != promptNone {
+		t.Errorf("C-a ctrl+c on a plain row: quitting=%v pending=%v", m.quitting, m.pending)
+	}
+	if m = send(t, m, "ctrl+a", "ctrl+a"); !m.armed {
+		t.Error("C-a C-a should stay armed")
+	}
+	if m = send(t, m, "esc"); !m.quitting {
+		t.Error("C-a esc should close")
+	}
+	m, _ = newTest(t)
+	if m = send(t, m, "ctrl+a", "z", "n"); m.query.Value() != "zn" || m.armed {
+		t.Errorf("C-a z, then bare n: query %q armed %v", m.query.Value(), m.armed)
+	}
+}
+
+// Prompts are a separate keymap: ctrl-u, ctrl-w, ctrl-a, ctrl-k and ctrl-h
+// edit, and no lettered action fires inside one.
+func TestPromptKeysNotActions(t *testing.T) {
+	m, f := newTest(t)
+	m = send(t, m, "ctrl+p", "ctrl+a", "r") // "special-feature-flags"
+	sel := m.sel
+	m = send(t, m, "ctrl+h", "ctrl+h", "ctrl+h", "ctrl+h", "ctrl+h")
+	if m.pending != promptRenameWindow || m.prompt.Value() != "special-feature-" || m.sel != sel {
+		t.Fatalf("ctrl+h is backspace: %v %q", m.pending, m.prompt.Value())
+	}
+	m = send(t, m, " ", "a", "b", "ctrl+w")
+	if m.pending != promptRenameWindow || m.prompt.Value() != "special-feature- " {
+		t.Fatalf("ctrl+w deletes a word: %v %q", m.pending, m.prompt.Value())
+	}
+	m = send(t, m, "ctrl+a", "X", "ctrl+k")
+	if m.prompt.Value() != "X" {
+		t.Errorf("ctrl+a goes to the start, ctrl+k deletes after: %q", m.prompt.Value())
+	}
+	m = send(t, m, "ctrl+n", "ctrl+p", "ctrl+q", "ctrl+t", "ctrl+x", "ctrl+s", "ctrl+r", "ctrl+l", "ctrl+j")
+	if m.pending != promptRenameWindow || len(f.calls) != 0 || m.fullRepo || m.armed || m.sel != sel || sessionName(m) != "roll-web-funnel-changes" {
+		t.Errorf("an action fired in a prompt: %v %q", m.pending, f.calls)
+	}
+	m = send(t, m, "ctrl+u", "Z", "enter")
+	if want := []string{"rename-window $4@w1-special-feature-flags Z"}; !reflect.DeepEqual(f.calls, want) {
+		t.Errorf("calls %q", f.calls)
 	}
 }
