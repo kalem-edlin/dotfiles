@@ -1,7 +1,7 @@
 .PHONY: all setup setup-headless setup-headless-darwin setup-headless-unsupported \
 	setup-linux-headless setup-linux-headless-run headless-doctor check-tool-parity \
 	install install-headless brew brew-headless brew-cleanup brew-cleanup-force \
-	brew-cleanup-headless brew-cleanup-headless-force \
+	brew-cleanup-headless brew-cleanup-headless-force brew-upgrade \
 	neovim node python macos helium obsidian obsidian-cli lucide-font misc misc-headless rea uninstall reload help
 
 # Dotfiles directory (absolute path). Resolved from this Makefile's own
@@ -376,6 +376,11 @@ brew-cleanup-headless-force:
 	@echo "Removing packages not in Brewfile.headless (forced)..."
 	@brew bundle cleanup --file="$(DOTFILES)/Brewfile.headless" --force
 
+# Upgrade Homebrew formulae here and on every macOS worker in the rw config,
+# then list shared formulae whose versions still differ. tmux stays pinned.
+brew-upgrade:
+	@"$(DOTFILES)/setup/brew-upgrade.sh"
+
 # Install Neovim Python provider and verify tmux/neovim prerequisites
 neovim:
 	@echo "Setting up Neovim support..."
@@ -474,6 +479,7 @@ help:
 	@echo "  brew-cleanup  Show what 'brew bundle cleanup' would remove (dry run)"
 	@echo "  brew-cleanup-force  Actually remove packages not in Brewfile (destructive)"
 	@echo "  brew-cleanup-headless / brew-cleanup-headless-force  Same, for Brewfile.headless"
+	@echo "  brew-upgrade  brew upgrade here and on macOS workers, then diff versions (tmux pinned)"
 	@echo "  neovim      Install pynvim provider and verify Neovim/tmux"
 	@echo "  node         Install Node.js (fnm) and global npm packages"
 	@echo "  python       Install Python (pyenv)"

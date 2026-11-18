@@ -46,6 +46,18 @@ if ! brew bundle --file="$BUNDLE_FILE"; then
   exit 1
 fi
 
+# tmux is pinned at the same version on every machine: laptop and workers
+# drive each other's servers (rw), and replacing the binary under a live
+# server breaks client calls until the server restarts. Homebrew can only
+# install the current version, so warn when that is not the pin; move the
+# pin deliberately (unpin, upgrade, pin) with a server restart on each host.
+TMUX_VERSION=3.8
+brew pin tmux
+tmux_installed="$(brew list --versions tmux | awk '{print $2}')"
+if [ "$tmux_installed" != "$TMUX_VERSION" ]; then
+  echo "⚠ tmux $tmux_installed is installed (pinned); the repo pins $TMUX_VERSION." >&2
+fi
+
 # Post-install steps
 echo "Linking libpq..."
 brew link --force libpq 2>/dev/null || true
