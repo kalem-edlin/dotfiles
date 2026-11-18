@@ -186,7 +186,11 @@ if [ -z "${state_file:-}" ]; then
 fi
 
 now="$(rw_now_iso)"
+# A tree beside a pane in a remote root belongs to that root: hand-back,
+# forget and reclaim close it with the root's other endpoints.
+root_id="$(rw_read_endpoint "$endpoint_id" 2>/dev/null | jq -r '.root_id // empty')"
 registry_json="$(jq -nc \
+  --arg root_id "$root_id" \
   --arg endpoint_id "$tree_id" \
   --arg worker "$worker" \
   --arg focus_machine_id "$(rw_machine_id)" \
@@ -198,6 +202,7 @@ registry_json="$(jq -nc \
   '{
     endpoint_id: $endpoint_id,
     worker: $worker,
+    root_id: (if $root_id == "" then null else $root_id end),
     role: "tree",
     tree_of: $tree_of,
     tree_state_file: $tree_state_file,
@@ -210,6 +215,7 @@ registry_json="$(jq -nc \
     created_at: $now, updated_at: $now, generation: 1
   }')"
 rw_write_json_atomic "$(rw_endpoint_file "$tree_id")" "$registry_json"
+[ -n "$root_id" ] && rw_record_add_endpoint "$root_id" "$tree_id"
 
 tree_pane="$(tmux split-window -hb -l 40 -t "$pane_id" -P -F '#{pane_id}' \
   "exec bash '$SCRIPT_DIR/rw-tree-pane.sh' '$tree_id'")"

@@ -29,7 +29,12 @@
 #   - Manual: invoke this file directly at any time (e.g. `--dry-run` from
 #     `rw doctor`, or for real after fixing a worker's reachability).
 #
-# HARD SAFETY RULES (docs/tmux-remote-workspaces.md):
+# HARD SAFETY RULES (docs/tmux-remote-workspaces.md, and decision D14 in
+# docs/tasks/mini-remote-sessions.md):
+#   - A REGISTERED endpoint is never closed here, whether or not a local pane
+#     was found for it: a worker session dies only by explicit hand-back,
+#     `rw forget`, or `rw close`. Only worker sessions with no registry
+#     entry at all (orphans) and tombstoned entries are disposed of.
 #   - A missing/unreadable snapshot is NOT an empty desired set. This script
 #     independently re-verifies the tmux-workspace-resurrect sidecar (not
 #     just trusting that it was hook-chained after a successful restore) and

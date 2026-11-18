@@ -151,6 +151,11 @@ cmd_versions() {
     exit 3
   fi
 
+  # Resumes go through the focus launcher (decision D13); refuse before
+  # anything moves when the worker cannot resolve it.
+  ca_worker_has_launcher "$worker" pif ||
+    ca_die "'pif' does not resolve on worker '$worker' (resumes run through it). Run 'make setup-headless' there, then retry." 1
+
   jq -nc \
     --arg local_cli "$local_cli" --arg local_node "$local_node" \
     --arg worker_cli "$worker_cli" --arg worker_node "$worker_node" \
@@ -288,16 +293,35 @@ cmd_install() {
     basename_out="$(basename "$transcript")"
   fi
 
+  # Rewrite the session header's cwd (line 1, `{"type":"session",...,"cwd"}`)
+  # to the destination path; every other line is copied byte for byte.
+  local rewritten header
+  rewritten="$(mktemp "${TMPDIR:-/tmp}/rw-pi-install.XXXXXX")"
+  header="$(head -n1 "$transcript" | jq -c --arg cwd "$dest_path" \
+    'if (type == "object" and has("cwd")) then .cwd = $cwd else . end' 2>/dev/null)"
+  if [ -z "$header" ]; then
+    rm -f "$rewritten"
+    ca_die "failed to rewrite the pi session header cwd for $dest_path." 1
+  fi
+  {
+    printf '%s\n' "$header"
+    tail -n +2 "$transcript"
+  } >"$rewritten"
+
   if [ -n "$worker" ]; then
-    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.pi/agent/sessions/${slug}\" && cat > \"\$HOME/.pi/agent/sessions/${slug}/${basename_out}\"" <"$transcript"; then
+    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.pi/agent/sessions/${slug}\" && cat > \"\$HOME/.pi/agent/sessions/${slug}/${basename_out}\"" <"$rewritten"; then
+      rm -f "$rewritten"
       ca_die "failed to install pi transcript on worker '$worker'." 1
     fi
+    rm -f "$rewritten"
     printf 'installed pi transcript on %s: ~/.pi/agent/sessions/%s/%s\n' "$worker" "$slug" "$basename_out"
   else
     local dest_dir
     dest_dir="$(pi_sessions_root_local)/$slug"
     mkdir -p "$dest_dir"
-    cp -p "$transcript" "$dest_dir/$basename_out"
+    cp "$rewritten" "$dest_dir/$basename_out"
+    touch -r "$transcript" "$dest_dir/$basename_out" 2>/dev/null || true
+    rm -f "$rewritten"
     printf 'installed pi transcript: %s/%s\n' "$dest_dir" "$basename_out"
   fi
 }
@@ -349,10 +373,16 @@ cmd_resume_cmd() {
       session_ref="$(printf '%q' "$session_id")"
       ;;
   esac
+  # pif, never bare pi (decision D13): the focus launcher carries the
+  # profile, extensions (agent-state publisher, resurrect session record)
+  # and PI_CODING_AGENT_SESSION_DIR. Typed into the endpoint pane's
+  # interactive login shell, where pif resolves as the zsh function (or a
+  # script on PATH) and fnm's node is active. Run from dest-path so pi's
+  # own cwd matches the rewritten session header.
   if [ "$fork" -eq 1 ]; then
-    printf 'pi --fork %s\n' "$session_ref"
+    printf 'cd %q && pif --fork %s\n' "$dest_path" "$session_ref"
   else
-    printf 'pi --session %s\n' "$session_ref"
+    printf 'cd %q && pif --session %s\n' "$dest_path" "$session_ref"
   fi
 }
 

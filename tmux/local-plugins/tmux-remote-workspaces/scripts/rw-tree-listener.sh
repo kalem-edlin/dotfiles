@@ -104,7 +104,9 @@ while true; do
     fi
 
     now="$(rw_now_iso)"
+    root_id="$(printf '%s' "$tree_json" | jq -r '.root_id // empty')"
     registry_json="$(jq -nc \
+      --arg root_id "$root_id" \
       --arg endpoint_id "$editor_id" \
       --arg worker "$worker" \
       --arg focus_machine_id "$(rw_machine_id)" \
@@ -114,6 +116,7 @@ while true; do
       '{
         endpoint_id: $endpoint_id,
         worker: $worker,
+        root_id: (if $root_id == "" then null else $root_id end),
         role: "tree-editor",
         tree_of: $tree_of,
         focus_machine_id: $focus_machine_id,
@@ -124,6 +127,7 @@ while true; do
         created_at: $now, updated_at: $now, generation: 1
       }')"
     rw_write_json_atomic "$(rw_endpoint_file "$editor_id")" "$registry_json"
+    [ -n "$root_id" ] && rw_record_add_endpoint "$root_id" "$editor_id"
 
     # Split beside the associated shell pane when it is still alive;
     # otherwise (orphaned tree) split off the tree pane itself.

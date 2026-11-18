@@ -11,7 +11,6 @@
       "notes": "Linux VPS worker reached through the agents-roll OpenSSH alias."
     }
   ],
-  "workspace_root": "~/rw-workspaces/<focus-machine-id>",
   "ssh": {
     "connect_timeout_seconds": 8,
     "preflight_timeout_seconds": 10,

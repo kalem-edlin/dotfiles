@@ -181,11 +181,11 @@ else
 fi
 
 echo
-echo "== Handoff/return machinery (report only) =="
-if [ -x "$SCRIPT_DIR/rw-handoff.sh" ] && [ -x "$SCRIPT_DIR/rw-return.sh" ] && [ -x "$SCRIPT_DIR/../libexec/sync/handoff" ]; then
-  pass "rw-handoff.sh/rw-return.sh/libexec/sync/handoff are present and executable"
+echo "== Handoff/handback machinery (report only) =="
+if [ -x "$SCRIPT_DIR/rw-handoff.sh" ] && [ -x "$SCRIPT_DIR/rw-handback.sh" ] && [ -x "$SCRIPT_DIR/rw-open.sh" ] && [ -x "$SCRIPT_DIR/../libexec/sync/handoff" ]; then
+  pass "rw-handoff.sh/rw-handback.sh/rw-open.sh/libexec/sync/handoff are present and executable"
 else
-  fail "one or more of rw-handoff.sh/rw-return.sh/libexec/sync/handoff is missing or not executable"
+  fail "one or more of rw-handoff.sh/rw-handback.sh/rw-open.sh/libexec/sync/handoff is missing or not executable"
 fi
 adapters_dir="$SCRIPT_DIR/../libexec/adapters"
 installed_adapters="$(find "$adapters_dir" -maxdepth 1 -type f -perm -u+x ! -name 'common-adapter.sh' ! -name 'smoke-test' 2>/dev/null | wc -l | tr -d ' ')"

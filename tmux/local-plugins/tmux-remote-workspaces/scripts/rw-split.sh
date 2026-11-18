@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Backs the `\` and `/` split bindings (tmux.reset.conf). A split ALWAYS
 # follows the host of the pane it was invoked from: if the source pane is
-# remote-backed, the new pane inherits worker+workspace and becomes its own
-# remote endpoint via `rw ensure` (new endpoint id with pane-scoped intent);
+# remote-backed, the new pane opens remote in the same remote root via
+# `rw open` (its own endpoint, no sync);
 # if the source pane is local, this is an ordinary local split, even when a
 # sibling pane in the same window is
 # remote-backed. The original window-default inheritance was dropped on
@@ -42,19 +42,18 @@ endpoint="$(rw_pane_get "$pane_id" @rw-endpoint)"
 remote_host="$(rw_pane_get "$pane_id" @remote-host)"
 
 worker=""
-workspace=""
 if [ -n "$endpoint" ] && [ -n "$remote_host" ]; then
-  # Source pane is itself remote-backed -- inherit its worker+workspace.
+  # Source pane is itself remote-backed -- the new pane opens in the same
+  # remote root (resolved by `rw open` from the inherited cwd).
   worker="$(rw_pane_get "$pane_id" @rw-worker)"
-  workspace="$(rw_pane_get "$pane_id" @rw-workspace)"
 fi
 
 if [ -n "$worker" ]; then
   rw_bin="$SCRIPT_DIR/rw"
-  # Fall back to an interactive shell if `rw ensure` returns early (e.g. a
-  # preflight failure) instead of leaving the pane dead.
+  # Fall back to an interactive shell if `rw open` returns early (e.g. the
+  # remote is unreachable) instead of leaving the pane dead.
   tmux split-window "${split_args[@]}" -c "$current_path" -t "$pane_id" \
-    "\"$rw_bin\" ensure --worker \"$worker\" --workspace \"${workspace:-auto}\"; exec \${SHELL:-/bin/sh} -l"
+    "\"$rw_bin\" open --worker \"$worker\"; exec \${SHELL:-/bin/sh} -l"
   exit 0
 fi
 

@@ -69,22 +69,27 @@ fi
 timeout_s="$(rw_ssh_preflight_timeout)"
 
 # A tiny, read-only remote probe. Never writes, installs, or mutates
-# anything on the worker.
+# anything on the worker. Single-quoted on purpose: it expands remotely.
+# shellcheck disable=SC2016
 remote_probe='
   ok=1
   have() { command -v "$1" >/dev/null 2>&1; }
   if have tmux; then tmux_ok=true; else tmux_ok=false; ok=0; fi
   if have git; then git_ok=true; else git_ok=false; ok=0; fi
   if have git-lfs; then lfs_ok=true; else lfs_ok=false; fi
-  printf "ok=%s\ntmux=%s\ngit=%s\ngit_lfs=%s\nhome=%s\nhostname=%s\n" \
-    "$ok" "$tmux_ok" "$git_ok" "$lfs_ok" "$HOME" "$(hostname 2>/dev/null)"
+  if have rsync; then rsync_ok=true; else rsync_ok=false; ok=0; fi
+  # Physical home: adapters slug Claude projects by the physical cwd, and
+  # every worker path is <this home>/<root_rel>.
+  home="$(cd "$HOME" 2>/dev/null && pwd -P || printf "%s" "$HOME")"
+  printf "ok=%s\ntmux=%s\ngit=%s\ngit_lfs=%s\nrsync=%s\nhome=%s\nhostname=%s\n" \
+    "$ok" "$tmux_ok" "$git_ok" "$lfs_ok" "$rsync_ok" "$home" "$(hostname 2>/dev/null)"
 '
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/tmux-remote-workspaces-preflight.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 start_ts="$(rw_now_epoch)"
 
-if ! output="$(rw_ssh_batch "$worker" "$timeout_s" "$remote_probe" 2>"$work_dir/err")"; then
+if ! output="$(rw_ssh_batch "$worker" "$timeout_s" "$remote_probe" 2>"$work_dir/err" </dev/null)"; then
   duration_ms="$(rw_elapsed_ms "$start_ts")"
   err="$(cat "$work_dir/err" 2>/dev/null)"
   jq -nc --arg worker "$worker" --arg err "$err" --argjson duration_ms "$duration_ms" \
@@ -96,13 +101,14 @@ if ! output="$(rw_ssh_batch "$worker" "$timeout_s" "$remote_probe" 2>"$work_dir/
 fi
 duration_ms="$(rw_elapsed_ms "$start_ts")"
 
-tmux_ok=false; git_ok=false; lfs_ok=false; home=""; hostname=""
+tmux_ok=false; git_ok=false; lfs_ok=false; rsync_ok=false; home=""; hostname=""
 while IFS='=' read -r key value; do
   case "$key" in
     ok) : ;; # remote-side summary bit; missing[] is recomputed locally below
     tmux) tmux_ok="$value" ;;
     git) git_ok="$value" ;;
     git_lfs) lfs_ok="$value" ;;
+    rsync) rsync_ok="$value" ;;
     home) home="$value" ;;
     hostname) hostname="$value" ;;
   esac
@@ -119,12 +125,8 @@ git_host_auth_failed="false"
 if [ -n "$repo_remote" ] && [ "$git_ok" = "true" ]; then
   git_host="$(rw_normalize_git_remote "$repo_remote")"
   git_host="${git_host%%/*}"
-  pf_shquote() {
-    local s="$1"
-    printf "'%s'" "${s//\'/\'\\\'\'}"
-  }
-  auth_probe="if command -v timeout >/dev/null 2>&1; then timeout 10 git ls-remote --heads $(pf_shquote "$repo_remote") HEAD; else git ls-remote --heads $(pf_shquote "$repo_remote") HEAD; fi"
-  if ! rw_ssh_batch "$worker" "$timeout_s" "$auth_probe" >/dev/null 2>"$work_dir/git-auth.err"; then
+  auth_probe="if command -v timeout >/dev/null 2>&1; then timeout 10 git ls-remote --heads $(rw_shquote "$repo_remote") HEAD; else git ls-remote --heads $(rw_shquote "$repo_remote") HEAD; fi"
+  if ! rw_ssh_batch "$worker" "$timeout_s" "$auth_probe" </dev/null >/dev/null 2>"$work_dir/git-auth.err"; then
     git_host_auth_failed="true"
   fi
 fi
@@ -132,6 +134,7 @@ fi
 missing=()
 [ "$tmux_ok" = "true" ] || missing+=("tmux")
 [ "$git_ok" = "true" ] || missing+=("git")
+[ "$rsync_ok" = "true" ] || missing+=("rsync")
 if [ "$check_lfs" = "true" ] && [ "$lfs_ok" != "true" ]; then
   missing+=("git-lfs")
 fi
@@ -145,6 +148,7 @@ report="$(jq -nc \
   --argjson tmux "$tmux_ok" \
   --argjson git "$git_ok" \
   --argjson git_lfs "$lfs_ok" \
+  --argjson rsync "$rsync_ok" \
   --arg home "$home" \
   --arg hostname "$hostname" \
   --argjson duration_ms "$duration_ms" \
@@ -158,6 +162,7 @@ report="$(jq -nc \
     tmux: $tmux,
     git: $git,
     git_lfs: $git_lfs,
+    rsync: $rsync,
     home: $home,
     hostname: $hostname,
     duration_ms: $duration_ms,

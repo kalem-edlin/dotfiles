@@ -15,7 +15,9 @@
 #   - namespace: only sessions prefixed rw-<this machine's short id>-;
 #     other focus machines' sessions and ordinary sessions are invisible.
 #   - registry is authoritative: an endpoint file in the laptop registry
-#     means NOT a zombie, no further questions.
+#     means NOT a zombie, no further questions -- even when no local pane
+#     carries it (decision D14: registered endpoints are never closed by a
+#     sweep).
 #   - min-age window (default 120s, callers may narrow): a concurrent
 #     `rw ensure` creates its remote session BEFORE writing the registry
 #     entry (rw-ensure.sh create at ~line 157, registry write at ~223), so

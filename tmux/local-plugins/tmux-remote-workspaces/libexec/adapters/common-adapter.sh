@@ -49,6 +49,15 @@ ca_ssh_run() {
   "$(ca_ssh_bin)" -o BatchMode=yes -o ConnectTimeout="$(ca_ssh_connect_timeout)" "$worker" "$@"
 }
 
+# ca_worker_has_launcher <worker> <name>
+# True when <name> (claudef, pif) resolves on the worker the way a resume
+# command typed into an endpoint pane will see it: on PATH, in
+# ~/.local/bin, or as a function/alias of the interactive login zsh.
+ca_worker_has_launcher() {
+  local worker="$1" name="$2"
+  ca_ssh_run "$worker" "command -v $name >/dev/null 2>&1 || [ -x \"\$HOME/.local/bin/$name\" ] || zsh -lic 'whence $name' </dev/null >/dev/null 2>&1" </dev/null >/dev/null 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # tmux-workspace-resurrect pane-agent-state: READ-ONLY consumer. That plugin
 # (via scripts/record-agent-session.sh, wired through each provider's

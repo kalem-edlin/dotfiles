@@ -17,8 +17,8 @@ Build order (decided in the plan): Pi, then Claude, then Codex. Codex's
 passed (see "Codex gate" below), so all three adapters implement the full
 five-subcommand contract.
 
-`rw handoff` / `rw return` (see `../scripts/rw-handoff.sh`,
-`../scripts/rw-return.sh`, owned by a different task wave) are the
+`rw handoff` / `rw handback` (see `../scripts/rw-handoff.sh`,
+`../scripts/rw-handback.sh`) are the
 command-surface seam that dispatches into these adapters. Adapters are
 called blind -- they make no assumptions about tmux-remote-workspaces
 runtime state beyond `common-adapter.sh` itself.
@@ -68,6 +68,10 @@ remediation itself (consume, never provision).
 - **Claude**: `{local, worker, policy}` where local/worker are plain semver
   strings (native side-by-side installs under
   `~/.local/share/claude/versions`; no Node dependency).
+- **Claude / Pi** also check that the worker resolves the focus launcher
+  (`claudef` / `pif`: on `PATH`, in `~/.local/bin`, or as a function of the
+  interactive login zsh) and exit 1 with the setup remediation when it does
+  not, since every resume runs through it.
 - **Codex / Pi**: `{local: {cli, node}, worker: {cli, node}, policy}` --
   both are npm packages under fnm, so alignment is CLI package version *and*
   Node version. `policy` is `"identical"` only when both match; a Node-only
@@ -91,16 +95,27 @@ Exit 4 if no matching transcript exists to export (gated/not-resumable).
 
 Places the snapshot so the session is resumable from `dest-path`. Idempotent
 (re-running with the same snapshot/dest overwrites with identical content).
-`--dest-path` is the **destination** path -- for Claude this is the path
-whose slug becomes the containing directory name, since Claude resolves
-transcripts by destination-encoded project path.
+`--dest-path` is the **destination** path -- the destination's PHYSICAL path
+(under the worker's own physical home, never the laptop's user name). For Claude this is the path whose slug becomes the containing
+directory name, since Claude resolves transcripts by destination-encoded
+project path, and every transcript `cwd` field is rewritten to it. For pi
+the session header's `cwd` (line 1) is rewritten to it; every other line is
+copied byte for byte.
 
 **Codex `install` is implemented** (de-gated per a live sandboxed smoke
 test -- see "Codex gate" below for what was and was not verified).
 
 ### `resume-cmd --dest-path <path> --session-id <id> [--fork] [--mode-flags <flags>]`
 
-Prints the exact resume command to stdout (never executes it). `--fork`
+Prints the exact resume command to stdout (never executes it). Claude and pi
+resume through the focus launchers (decision D13), from `--dest-path`:
+`cd <path> && claudef [mode flags] --resume <id>` and
+`cd <path> && pif --session <ref>`. The command is typed into the endpoint
+pane's interactive login shell, so the launcher resolves whether it is a
+script on `PATH` or a zsh function, fnm's node is active, and the
+launcher's hooks (agent-state publisher, resurrect session record) run on
+either machine. `claudef` always passes `--dangerously-skip-permissions`
+itself, so a captured copy of that flag is dropped. Codex is unchanged. `--fork`
 uses provider-native forking for a divergent-lineage return handoff
 (`claude --resume ... --fork-session`, `codex fork ...`, `pi --fork ...`)
 rather than bespoke lineage bookkeeping, per the plan.
@@ -109,7 +124,7 @@ rather than bespoke lineage bookkeeping, per the plan.
 printed command (claude: before `--resume`; codex: on the
 `resume`/`fork` subcommand, which accepts them directly) so a handed-off
 session relaunches in the same permission mode on the other side --
-bidirectionally: `rw handoff` passes detect's live capture, `rw return`
+bidirectionally: `rw handoff` passes detect's live capture, `rw handback`
 passes the value recorded on the endpoint at handoff time. Tokens are
 re-validated against a safe charset before splicing (this is a public CLI
 surface).

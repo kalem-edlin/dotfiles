@@ -1,44 +1,26 @@
 #!/usr/bin/env bash
-# Local-pane-death sweep -- closes endpoints whose LOCAL pane died without
-# `prefix q` (smoke-journey Bucket 2 finding, 2026-08-04: a hard pane kill
-# takes attach-loop down with it, so nothing self-cleans; libexec/reconcile
-# deliberately keeps every registry entry desired; reconcile-worker spares
-# registered endpoints. Result: the endpoint and its detached worker
-# session linger forever). This is the missing third leg: registry entries
-# provably unbacked by any live local pane.
+# Local unbound-endpoint report. Lists registered endpoints that no live
+# local pane carries (@rw-endpoint) -- typically a pane killed without
+# `prefix q`, or a laptop restore that has not reattached yet.
+#
+# REPORT ONLY (decision D14, docs/tasks/mini-remote-sessions.md): a worker
+# session is killed only by an explicit hand-back, `rw forget`, or
+# `rw close`. A registered endpoint whose pane is not found is logged and
+# left alone -- its worker session (and any agent in it) keeps running, and
+# the picker keeps showing the root as remote. Before 2026-11-18 this
+# script closed such endpoints once it could prove the binding belonged to
+# the current server generation; that destroyed remote agents whenever a
+# restore failed to rebind a pane.
 #
 # Usage: reconcile-local [--min-age <seconds>] [--dry-run]
 #
-# "Provably" is the load-bearing word. A soft
-# pane-match failure must never gate an irreversible remote deletion.
-# rw-post-restore.sh never rewrites endpoint files -- it re-stamps live
-# pane @vars only -- so the registry's focus_pane_id is ensure-time cache,
-# stale across any server restart. The authoritative live binding is the
-# pane option @rw-endpoint. An endpoint is closed only when ALL hold:
+#   --min-age  ignore endpoints younger than this (default 120s,
+#              RW_LOCAL_RECONCILE_MIN_AGE_SECONDS): handoff/open write the
+#              registry entry a moment before stamping pane options.
+#   --dry-run  same report, without the rw.log line (used by `rw doctor`).
 #
-#   - the local tmux server answered and listed its panes successfully
-#     (no server / error = zero candidates, never "everything is orphaned");
-#   - no live pane on this server carries @rw-endpoint = its id;
-#   - the endpoint's binding demonstrably belongs to THIS server
-#     generation, one of two proofs:
-#       (a) created_at is AFTER the server's start_time -- rw-ensure bound
-#           it to a pane of this very server, and pane options only vanish
-#           when the pane dies; or
-#       (b) events.jsonl records a restore-reattach success for it AFTER
-#           server start -- rw-post-restore re-bound it under this server.
-#     Endpoints predating the server with no post-restore re-bind are
-#     exactly the ambiguous-restore class the plan protects: left alone
-#     for `rw status`/doctor, never swept.
-#   - min-age (default 120s, RW_LOCAL_RECONCILE_MIN_AGE_SECONDS): rw-ensure
-#     writes the registry entry before stamping pane options, so a
-#     just-born endpoint can look unbound for a moment.
-#
-# Closes go through rw_close_endpoint_core (tombstone-first, exact-match
-# remote kill, close event), </dev/null-guarded per the ssh-drains-stdin
-# bug documented in libexec/reconcile. If the worker is unreachable at
-# close time the registry entry still goes away and the leftover worker
-# session becomes exactly what reconcile-worker sweeps on a later ensure --
-# the two sweeps are self-healing complements.
+# No tmux server, or a failed listing, reports nothing (never "everything
+# is unbound").
 
 set -uo pipefail
 
@@ -71,71 +53,33 @@ iso_to_epoch() {
 endpoints_dir="$(rw_endpoints_dir)"
 [ -d "$endpoints_dir" ] || exit 0
 
-server_start="$(tmux display-message -p '#{start_time}' 2>/dev/null || true)"
-case "$server_start" in *[!0-9]* | '') exit 0 ;; esac # no server/garbled: zero candidates
-
-pane_listing="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)" || exit 0
+# One listing: pane id plus its @rw-endpoint (empty for local panes).
+pane_listing="$(tmux list-panes -a -F '#{pane_id} #{@rw-endpoint}' 2>/dev/null)" || exit 0
 [ -n "$pane_listing" ] || exit 0
-
-# Live-bound endpoint ids: every @rw-endpoint carried by a live pane.
-live_ids="$(
-  while IFS= read -r pane_id; do
-    [ -n "$pane_id" ] || continue
-    rw_pane_get "$pane_id" @rw-endpoint
-  done <<<"$pane_listing"
-)"
+live_ids="$(printf '%s\n' "$pane_listing" | awk 'NF == 2 { print $2 }')"
 
 now_epoch="$(date +%s)"
-start_ts="$(rw_now_epoch)"
-events_file="$(rw_state_dir)/events.jsonl"
 
-orphans=()
+unbound=()
 for f in "$endpoints_dir"/*.json; do
   [ -f "$f" ] || continue
   id="$(jq -r '.endpoint_id // empty' "$f" 2>/dev/null)"
   [ -n "$id" ] || continue
-
-  grep -Fqx "$id" <<<"$live_ids" && continue # bound to a live pane -- not ours
+  grep -Fqx "$id" <<<"$live_ids" && continue # bound to a live pane
 
   created_at="$(jq -r '.created_at // empty' "$f" 2>/dev/null)"
   created_epoch="$(iso_to_epoch "$created_at")"
-  case "$created_epoch" in *[!0-9]* | '') continue ;; esac # unparseable: no proof, skip
-
+  case "$created_epoch" in *[!0-9]* | '') continue ;; esac
   [ $((now_epoch - created_epoch)) -ge "$min_age" ] || continue
 
-  eligible="false"
-  if [ "$created_epoch" -gt "$server_start" ]; then
-    eligible="true" # proof (a): born under this server
-  elif [ -f "$events_file" ]; then
-    # proof (b): re-bound under this server by rw-post-restore
-    rebind_ts="$(grep -F '"restore-reattach"' "$events_file" 2>/dev/null |
-      jq -r --arg id "$id" 'select(.endpoint == $id and .outcome == "success") | .ts' 2>/dev/null |
-      tail -n1)"
-    if [ -n "$rebind_ts" ]; then
-      rebind_epoch="$(iso_to_epoch "$rebind_ts")"
-      case "$rebind_epoch" in
-        *[!0-9]* | '') : ;;
-        *) [ "$rebind_epoch" -gt "$server_start" ] && eligible="true" ;;
-      esac
-    fi
-  fi
-  [ "$eligible" = "true" ] || continue # ambiguous-restore class: never swept
-
-  orphans+=("$id")
+  unbound+=("$id")
 done
 
-count="${#orphans[@]}"
-[ "$count" -gt 0 ] || { [ "$dry_run" = "true" ] && echo "rw reconcile-local: dry-run would_close=0 ids=none"; exit 0; }
-
+count="${#unbound[@]}"
 if [ "$dry_run" = "true" ]; then
-  echo "rw reconcile-local: dry-run would_close=$count ids=${orphans[*]}"
+  echo "rw reconcile-local: unbound=$count ids=${unbound[*]:-none} (report only; never closed)"
   exit 0
 fi
-
-for id in ${orphans[@]+"${orphans[@]}"}; do
-  rw_close_endpoint_core "$id" "reconcile:local-pane-departed" "" </dev/null
-done
-
-duration_ms="$(rw_elapsed_ms "$start_ts")"
-rw_log_event "reconcile" "" "" "$duration_ms" "success" "scope=local closed=$count ids=${orphans[*]}"
-echo "rw reconcile-local: closed=$count ids=${orphans[*]}"
+[ "$count" -gt 0 ] || exit 0
+rw_log "reconcile-local: $count registered endpoint(s) have no live local pane, left running: ${unbound[*]}"
+echo "rw reconcile-local: unbound=$count ids=${unbound[*]} (left running)"

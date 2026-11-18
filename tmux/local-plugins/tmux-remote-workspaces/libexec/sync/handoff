@@ -1,41 +1,56 @@
 #!/usr/bin/env bash
-# libexec/sync/handoff -- workspace transfer core.
+# libexec/sync/handoff -- workspace transfer core for one directory root.
 #
-# Implements the correctness model from docs/tmux-remote-workspaces.md: move dirty git
-# state (unpushed commits, staged changes, unstaged changes, untracked
-# files, tracked deletions/renames, and referenced LFS content) between two
-# git worktrees without any commit/push/pull ceremony, with a destination
-# backup and divergence check before ever overwriting a managed destination.
+# Two channels move a root between the focus machine and a worker:
+#   - the git channel (git roots only): unpushed commits as a bundle,
+#     staged and unstaged binary patches, untracked (non-ignored) files as a
+#     tar, referenced LFS content -- with a destination backup and a
+#     divergence check before a managed destination is ever overwritten,
+#     and deletion of untracked files the owner no longer has;
+#   - the rsync channel: everything the git channel ignores. For a git root
+#     that is exactly the gitignored set (.env*, node_modules, build output);
+#     for a plain root it is the whole tree. Apple openrsync (protocol 29)
+#     over the same ssh alias, relative paths, delete semantics,
+#     COPYFILE_DISABLE=1.
+#
+# Before the destination copy is overwritten it is compared to its stored
+# manifest (the manifest gate, owner wins): unchanged is silent; a change
+# exits 5 listing `conflict\t<relpath>\t<changed|added|deleted>` on stdout
+# unless --resolve says what to do. keep-both renames each losing file to
+# `<file>.local-<YYYYMMDD-HHMMSS>` before the transfer.
 #
 # Usage:
-#   handoff sync --direction handoff|return \
+#   handoff sync --direction handoff|handback|return \
 #     --source-path <path> --dest-path <path> \
 #     --dest-mode local|ssh|custom \
 #       [--dest-worker <alias>]                  # ssh mode
 #       [--dest-exec-bin <bin> --dest-exec-arg <arg> ...]  # custom mode
 #     [--pull]                                   # see below
+#     [--kind git|plain]                         # default: detected
+#     [--dest-manifest <file>]                   # enables the manifest gate
+#     [--resolve overwrite|keep-both|abort]
+#     [--manifest-out <dir>]                     # writes source.tsv, dest.tsv
 #     [--endpoint <id> | --state-file <path>]    # generation/divergence state
+#     [--token <name>]                           # backup/staging directory name
 #     [--backup-root <path>] [--staging-root <path>]
 #     [--check-lfs] [--force-diverged]
 #
-#   handoff fingerprint --path <path> \
-#     --dest-mode local|ssh|custom [...]         # prints one fingerprint line
+#   handoff fingerprint --path <path> --dest-mode local|ssh|custom [...]
+#   handoff manifest --path <path> [--kind git|plain] --dest-mode local|ssh|custom [...]
 #
 # This process always runs on ONE of the two hosts involved and reaches the
 # OTHER through the --dest-mode/--dest-worker/--dest-exec-* exec wrapper --
 # those flags always describe "how to reach the far side", never which of
 # source/dest that is. By default (push, used by `rw handoff`) the far side
-# is the destination: --source-path is read directly (this process runs on
-# the focus machine, where the source content already lives) and
-# --dest-path is reached over the wrapper (the worker). Pass --pull (used
-# by `rw return`, which also always runs on the focus machine) to invert
-# that: --source-path is then reached over the wrapper (the worker) and
-# --dest-path is read/written directly (the focus machine, local to this
-# process). Every other flag and the whole correctness model (capture,
-# divergence check, backup, staging, apply, verify) are identical either
-# way -- only which side is "near" (direct) vs "far" (wrapper) changes.
+# is the destination: --source-path is read directly and --dest-path is
+# reached over the wrapper (the worker). Pass --pull (used by `rw handback`,
+# which also runs on the focus machine) to invert that. Every other flag and
+# the whole correctness model are identical either way -- only which side is
+# "near" (direct) vs "far" (wrapper) changes. rsync reaches the far side
+# with `-e "<ssh> -o BatchMode=yes ..."` in ssh mode and as a plain local
+# path in local/custom mode (same-host tests).
 #
-# See ../README.md for the full wire format and exit code table.
+# See ./README.md for the full wire format and exit code table.
 
 set -uo pipefail
 
@@ -51,25 +66,30 @@ usage() {
 usage: handoff <command> [args...]
 
 commands:
-  sync --direction handoff|return --source-path <path> --dest-path <path>
+  sync --direction handoff|handback --source-path <path> --dest-path <path>
        --dest-mode local|ssh|custom [--dest-worker <alias>]
-       [--dest-exec-bin <bin>] [--dest-exec-arg <arg>]...
-       [--endpoint <id> | --state-file <path>]
+       [--dest-exec-bin <bin>] [--dest-exec-arg <arg>]... [--pull]
+       [--kind git|plain] [--dest-manifest <file>]
+       [--resolve overwrite|keep-both|abort] [--manifest-out <dir>]
+       [--endpoint <id> | --state-file <path>] [--token <name>]
        [--backup-root <path>] [--staging-root <path>]
        [--check-lfs] [--force-diverged]
 
   fingerprint --path <path>
        --dest-mode local|ssh|custom [--dest-worker <alias>] [...]
 
+  manifest --path <path> [--kind git|plain]
+       --dest-mode local|ssh|custom [--dest-worker <alias>] [...]
+
 Exit codes: 0 ok, 2 diverged (aborted, nothing touched), 3 transfer verify
 failed (destination untouched), 4 post-apply verify failed (destination
-partially applied -- see backup), 64 usage error.
+partially applied -- see backup), 5 manifest conflict (stdout lists
+conflict<TAB>path<TAB>changed|added|deleted; nothing touched), 64 usage.
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Shared arg-parsing for the destination exec wrapper (used by both
-# subcommands).
+# Shared arg-parsing for the destination exec wrapper.
 # ---------------------------------------------------------------------------
 
 dest_mode=""
@@ -95,9 +115,20 @@ configure_dest_exec() {
   esac
 }
 
+# Far-side path as rsync must spell it: ssh mode prefixes the alias and
+# shell-escapes the path (the remote shell parses it; openrsync has no
+# --protect-args). Local/custom modes use the plain path.
+rsync_far_path() {
+  if [ "$dest_mode" = "ssh" ]; then
+    printf '%s:%q' "$dest_worker" "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 # ---------------------------------------------------------------------------
-# fingerprint subcommand -- thin CLI wrapper, useful standalone for tests and
-# for `rw status`/`doctor`-style introspection later.
+# fingerprint / manifest subcommands -- thin CLI wrappers, useful standalone
+# for tests and for status/doctor-style introspection.
 # ---------------------------------------------------------------------------
 
 cmd_fingerprint() {
@@ -117,20 +148,44 @@ cmd_fingerprint() {
   rw_sync_fingerprint_dest "$path"
 }
 
+cmd_manifest() {
+  local path="" kind=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --path) path="${2:?}"; shift 2 ;;
+      --kind) kind="${2:?}"; shift 2 ;;
+      --dest-mode) dest_mode="${2:?}"; shift 2 ;;
+      --dest-worker) dest_worker="${2:?}"; shift 2 ;;
+      --dest-exec-bin) dest_exec_bin="${2:?}"; shift 2 ;;
+      --dest-exec-arg) dest_exec_args+=("${2:?}"); shift 2 ;;
+      *) rw_die "handoff manifest: unknown argument: $1" 64 ;;
+    esac
+  done
+  [ -n "$path" ] || rw_die "handoff manifest: --path is required" 64
+  configure_dest_exec
+  if [ -z "$kind" ]; then
+    kind="$(rw_sync_dest_run "$(rw_sync_kind_probe "$path")" 2>/dev/null | tr -d '\r\n')"
+    [ "$kind" = "git" ] || kind="plain"
+  fi
+  rw_sync_manifest_via rw_sync_dest_exec_script "$path" "$kind"
+  if [ "$kind" = "git" ]; then
+    printf '#git\t%s\n' "$(rw_sync_fingerprint_dest "$path" | tr -d '\r\n')"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # sync subcommand
 # ---------------------------------------------------------------------------
 
 cmd_sync() {
   local direction="" source_path="" dest_path="" pull="false"
-  local endpoint_id="" state_file=""
-  # Local-machine defaults (this process's own $HOME/$XDG_STATE_HOME via
-  # rw_state_dir(), override-aware for tests) -- correct for any caller that
-  # doesn't pass --backup-root/--staging-root explicitly, e.g. `rw return`'s
-  # pull direction, where the destination being backed up/staged is this
-  # same (focus) machine. A caller writing to a genuinely remote worker
-  # (e.g. rw-handoff.sh's push direction) always passes both flags itself,
-  # computed from the worker's own queried $HOME (see rw_state_dir_at()).
+  local endpoint_id="" state_file="" kind="" dest_manifest="" dest_manifest_set="false"
+  local resolve="" manifest_out="" token=""
+  # Local-machine defaults (this process's own state dir, override-aware for
+  # tests) -- correct for a pull, where the destination being backed
+  # up/staged is this same (focus) machine. A caller writing to a remote
+  # worker (rw-handoff.sh's push) always passes both flags, computed from
+  # the worker's own queried $HOME (see rw_state_dir_at()).
   local backup_root staging_root
   backup_root="$(rw_state_dir)/handoff-backups"
   staging_root="$(rw_state_dir)/handoff-staging"
@@ -146,8 +201,13 @@ cmd_sync() {
       --dest-exec-bin) dest_exec_bin="${2:?}"; shift 2 ;;
       --dest-exec-arg) dest_exec_args+=("${2:?}"); shift 2 ;;
       --pull) pull="true"; shift ;;
+      --kind) kind="${2:?}"; shift 2 ;;
+      --dest-manifest) dest_manifest="${2:?}"; dest_manifest_set="true"; shift 2 ;;
+      --resolve) resolve="${2:?}"; shift 2 ;;
+      --manifest-out) manifest_out="${2:?}"; shift 2 ;;
       --endpoint) endpoint_id="${2:?}"; shift 2 ;;
       --state-file) state_file="${2:?}"; shift 2 ;;
+      --token) token="${2:?}"; shift 2 ;;
       --backup-root) backup_root="${2:?}"; shift 2 ;;
       --staging-root) staging_root="${2:?}"; shift 2 ;;
       --check-lfs) check_lfs="true"; shift ;;
@@ -157,9 +217,11 @@ cmd_sync() {
   done
 
   case "$direction" in
-    handoff | return) : ;;
-    *) rw_die "handoff sync: --direction must be 'handoff' or 'return'" 64 ;;
+    handoff | handback | return) : ;;
+    *) rw_die "handoff sync: --direction must be 'handoff' or 'handback'" 64 ;;
   esac
+  case "$kind" in '' | git | plain) : ;; *) rw_die "handoff sync: --kind must be git or plain" 64 ;; esac
+  case "$resolve" in '' | overwrite | keep-both | abort) : ;; *) rw_die "handoff sync: --resolve must be overwrite, keep-both or abort" 64 ;; esac
   [ -n "$source_path" ] || rw_die "handoff sync: --source-path is required" 64
   [ -n "$dest_path" ] || rw_die "handoff sync: --dest-path is required" 64
   configure_dest_exec
@@ -168,12 +230,12 @@ cmd_sync() {
   # "near" = direct on this process's own filesystem; "far" = over the
   # configured exec wrapper. Push (default): source is near, dest is far.
   # Pull: inverted. Every call site below goes through these four functions
-  # instead of ever hard-coding local-vs-wrapper, so the exact same
-  # capture/backup/apply/verify logic serves both `rw handoff` and
-  # `rw return`.
+  # (some only indirectly, by name).
+  # shellcheck disable=SC2329
   exec_source() {
     if [ "$pull" != "true" ]; then bash -c "$1"; else rw_sync_dest_run "$1"; fi
   }
+  # shellcheck disable=SC2329
   exec_source_script() {
     if [ "$pull" != "true" ]; then bash -s <"$1"; else rw_sync_dest_exec_script "$1"; fi
   }
@@ -185,15 +247,31 @@ cmd_sync() {
   }
 
   if [ "$pull" != "true" ]; then
-    source_path="$(cd "$source_path" 2>/dev/null && pwd)" || rw_die "handoff sync: --source-path does not exist: $source_path" 64
+    source_path="$(cd "$source_path" 2>/dev/null && pwd -P)" || rw_die "handoff sync: --source-path does not exist: $source_path" 64
+  else
+    dest_path="$(rw_physical_path "$dest_path")"
   fi
-  exec_source "git -C $(rw_sync_shquote "$source_path") rev-parse --is-inside-work-tree" >/dev/null 2>&1 ||
-    rw_die "handoff sync: --source-path is not a git worktree: $source_path" 64
+  local sq_source sq_dest
+  sq_source="$(rw_sync_shquote "$source_path")"
+  sq_dest="$(rw_sync_shquote "$dest_path")"
+
+  exec_source "[ -d $sq_source ]" >/dev/null 2>&1 ||
+    rw_die "handoff sync: --source-path does not exist: $source_path" 64
+
+  # A git root is a worktree TOPLEVEL; anything else travels as plain.
+  if [ -z "$kind" ]; then
+    kind="$(exec_source "$(rw_sync_kind_probe "$source_path")" 2>/dev/null | tr -d '\r\n')"
+    [ "$kind" = "git" ] || kind="plain"
+  elif [ "$kind" = "git" ]; then
+    exec_source "git -C $sq_source rev-parse --is-inside-work-tree" >/dev/null 2>&1 ||
+      rw_die "handoff sync: --source-path is not a git worktree: $source_path" 64
+  fi
 
   local start_ts
   start_ts="$(rw_now_epoch)"
 
-  local backup_token="${endpoint_id:-}"
+  local backup_token="$token"
+  [ -n "$backup_token" ] || backup_token="${endpoint_id:-}"
   if [ -z "$backup_token" ] && [ -n "$state_file" ]; then
     backup_token="$(basename "$state_file")"
     backup_token="${backup_token%.json}"
@@ -201,112 +279,90 @@ cmd_sync() {
   [ -n "$backup_token" ] || backup_token="adhoc-$(printf '%s' "$dest_path" | rw_sync_stable_slug)"
 
   # Deliberately NOT `local`: an EXIT trap fires after this function has
-  # already returned (right before the dispatcher's `exit $?`), so the
-  # variable it references must still be in scope at the process level.
+  # already returned, so the variable it references must still be in scope.
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/rw-handoff.XXXXXX")"
   # Cleanup only the LOCAL scratch dir on exit. Never touch source or dest.
   trap 'rm -rf "$work_dir"' EXIT
 
-  # --- capture source (read-only against source_path; every command below
-  # runs "near or far" via exec_source, so this is identical whether the
-  # source is local (push) or reached over the wrapper (--pull)) ----------
   local snap_dir="$work_dir/snapshot"
   mkdir -p "$snap_dir"
-  local sq_source
-  sq_source="$(rw_sync_shquote "$source_path")"
-  # NOTE: plain `git rev-parse HEAD` / `--abbrev-ref HEAD` echo the literal
-  # ref name to STDOUT even when it cannot be resolved (unborn branch, empty
-  # repo) while exiting nonzero -- so `2>/dev/null || fallback` captures
-  # "HEAD" (or "HEAD\nHEAD" with the fallback appended) instead of nothing.
-  # `--verify --quiet 'HEAD^{commit}'` prints only on success; symbolic-ref
-  # fails silently with -q when detached.
-  local branch head_commit detached="false"
-  branch="$(exec_source "git -C $sq_source symbolic-ref --short -q HEAD 2>/dev/null || echo HEAD")"
-  head_commit="$(exec_source "git -C $sq_source rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true")"
-  [ -n "$head_commit" ] || rw_die "handoff sync: --source-path has no commits (empty repo) -- nothing to hand off" 64
-  [ "$branch" = "HEAD" ] && detached="true"
+  local protect_list="$work_dir/protect.list"
+  : >"$protect_list"
 
-  rw_warn "handoff: capturing source state at $source_path ($branch @ ${head_commit:0:12})"
-
-  # Ask the destination what it already has, so the bundle only carries what
-  # it lacks (this is what lets unpushed commits travel without touching
-  # origin at all).
-  local dest_head
-  dest_head="$(exec_dest "git -C $(rw_sync_shquote "$dest_path") rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true" 2>/dev/null || true)"
-  dest_head="$(printf '%s' "$dest_head" | tr -d '\r\n')"
-
-  # NOTE: "HEAD" (a ref), not the bare $head_commit sha -- `git bundle
-  # create` refuses a bare object id with "Refusing to create empty bundle"
-  # because a bundle boundary must resolve through a named ref.
-  local bundle_present="false" bundle_range="HEAD"
-  if [ -n "$dest_head" ] && exec_source "git -C $sq_source cat-file -e '${dest_head}^{commit}'" 2>/dev/null; then
-    bundle_range="${dest_head}..HEAD"
-  fi
-  local commit_count
-  commit_count="$(exec_source "git -C $sq_source rev-list --count $bundle_range 2>/dev/null || echo 0")"
-  if [ "${commit_count:-0}" -gt 0 ]; then
-    if exec_source "git -C $sq_source bundle create - $bundle_range" >"$snap_dir/bundle.git" 2>"$work_dir/bundle.log"; then
-      bundle_present="true"
-    else
-      rw_die "handoff sync: failed to create git bundle ($bundle_range): $(cat "$work_dir/bundle.log")" 1
-    fi
-  fi
-
-  exec_source "git -C $sq_source diff --binary -M --cached" >"$snap_dir/staged.patch"
-  exec_source "git -C $sq_source diff --binary -M" >"$snap_dir/unstaged.patch"
-  local staged_present="false" unstaged_present="false"
-  [ -s "$snap_dir/staged.patch" ] && staged_present="true"
-  [ -s "$snap_dir/unstaged.patch" ] && unstaged_present="true"
-
+  local branch="" head_commit="" detached="false" source_fingerprint=""
+  local bundle_present="false" staged_present="false" unstaged_present="false" lfs_present="false"
   local untracked_list="$work_dir/untracked.list"
-  exec_source "git -C $sq_source ls-files --others --exclude-standard -z" >"$untracked_list"
-  # COPYFILE_DISABLE=1: on macOS, bsdtar otherwise embeds AppleDouble
-  # (._*) companions for files carrying xattrs (com.apple.provenance is
-  # near-universal); a Linux destination's GNU tar materializes those as
-  # literal ._* files, polluting the untracked inventory and failing the
-  # post-apply fingerprint verify. Harmless no-op everywhere else.
-  exec_source "COPYFILE_DISABLE=1 tar -C $sq_source --null -T - -cf -" <"$untracked_list" >"$snap_dir/untracked.tar" 2>"$work_dir/untracked.log" ||
-    rw_die "handoff sync: failed to archive untracked files: $(cat "$work_dir/untracked.log")" 1
-  local untracked_count
-  untracked_count="$(tr -cd '\0' <"$untracked_list" | wc -c | tr -d ' ')"
+  : >"$untracked_list"
 
-  local lfs_present="false"
-  if [ "$check_lfs" = "true" ] && exec_source "git -C $sq_source lfs env" >/dev/null 2>&1; then
-    exec_source "git -C $sq_source lfs pull" >"$work_dir/lfs.log" 2>&1 || true
-    if exec_source "[ -d $sq_source/.git/lfs/objects ] && [ -n \"\$(find $sq_source/.git/lfs/objects -type f -print -quit 2>/dev/null)\" ]" 2>/dev/null; then
-      if exec_source "COPYFILE_DISABLE=1 tar -C $sq_source/.git/lfs/objects -cf - ." >"$snap_dir/lfs-snapshot.tar" 2>"$work_dir/lfs-tar.log"; then
-        lfs_present="true"
+  # =========================================================================
+  # Git channel, part 1: capture (read-only against the source).
+  # =========================================================================
+  if [ "$kind" = "git" ]; then
+    # NOTE: plain `git rev-parse HEAD` / `--abbrev-ref HEAD` echo the literal
+    # ref name to STDOUT even when it cannot be resolved (unborn branch, empty
+    # repo) while exiting nonzero. `--verify --quiet 'HEAD^{commit}'` prints
+    # only on success; symbolic-ref fails silently with -q when detached.
+    branch="$(exec_source "git -C $sq_source symbolic-ref --short -q HEAD 2>/dev/null || echo HEAD")"
+    head_commit="$(exec_source "git -C $sq_source rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true")"
+    [ -n "$head_commit" ] || rw_die "handoff sync: --source-path has no commits (empty repo) -- nothing to hand off" 64
+    [ "$branch" = "HEAD" ] && detached="true"
+
+    rw_warn "handoff: capturing source state at $source_path ($branch @ ${head_commit:0:12})"
+
+    # Ask the destination what it already has, so the bundle only carries
+    # what it lacks (unpushed commits travel without touching origin).
+    local dest_head
+    dest_head="$(exec_dest "git -C $sq_dest rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null || true" 2>/dev/null || true)"
+    dest_head="$(printf '%s' "$dest_head" | tr -d '\r\n')"
+
+    # NOTE: "HEAD" (a ref), not the bare sha -- `git bundle create` refuses a
+    # bare object id ("Refusing to create empty bundle").
+    local bundle_range="HEAD"
+    if [ -n "$dest_head" ] && exec_source "git -C $sq_source cat-file -e '${dest_head}^{commit}'" 2>/dev/null; then
+      bundle_range="${dest_head}..HEAD"
+    fi
+    local commit_count
+    commit_count="$(exec_source "git -C $sq_source rev-list --count $bundle_range 2>/dev/null || echo 0")"
+    if [ "${commit_count:-0}" -gt 0 ]; then
+      if exec_source "git -C $sq_source bundle create - $bundle_range" >"$snap_dir/bundle.git" 2>"$work_dir/bundle.log"; then
+        bundle_present="true"
+      else
+        rw_die "handoff sync: failed to create git bundle ($bundle_range): $(cat "$work_dir/bundle.log")" 1
       fi
     fi
+
+    exec_source "git -C $sq_source diff --binary -M --cached" >"$snap_dir/staged.patch"
+    exec_source "git -C $sq_source diff --binary -M" >"$snap_dir/unstaged.patch"
+    [ -s "$snap_dir/staged.patch" ] && staged_present="true"
+    [ -s "$snap_dir/unstaged.patch" ] && unstaged_present="true"
+
+    exec_source "git -C $sq_source ls-files --others --exclude-standard -z" >"$untracked_list"
+    # COPYFILE_DISABLE=1: on macOS, bsdtar otherwise embeds AppleDouble
+    # (._*) companions for files carrying xattrs; a Linux destination's GNU
+    # tar materializes those as literal ._* files.
+    exec_source "COPYFILE_DISABLE=1 tar -C $sq_source --null -T - -cf -" <"$untracked_list" >"$snap_dir/untracked.tar" 2>"$work_dir/untracked.log" ||
+      rw_die "handoff sync: failed to archive untracked files: $(cat "$work_dir/untracked.log")" 1
+    # Newline list of the source's untracked files: the apply step deletes
+    # destination untracked files that are absent here (owner wins).
+    tr '\0' '\n' <"$untracked_list" >"$snap_dir/untracked.list"
+
+    if [ "$check_lfs" = "true" ] && exec_source "git -C $sq_source lfs env" >/dev/null 2>&1; then
+      exec_source "git -C $sq_source lfs pull" >"$work_dir/lfs.log" 2>&1 || true
+      if exec_source "[ -d $sq_source/.git/lfs/objects ] && [ -n \"\$(find $sq_source/.git/lfs/objects -type f -print -quit 2>/dev/null)\" ]" 2>/dev/null; then
+        if exec_source "COPYFILE_DISABLE=1 tar -C $sq_source/.git/lfs/objects -cf - ." >"$snap_dir/lfs-snapshot.tar" 2>"$work_dir/lfs-tar.log"; then
+          lfs_present="true"
+        fi
+      fi
+    fi
+
+    source_fingerprint="$(rw_sync_fingerprint_via exec_source_script "$source_path")"
+    source_fingerprint="$(printf '%s' "$source_fingerprint" | tr -d '\r\n')"
   fi
 
-  local source_fingerprint
-  source_fingerprint="$(rw_sync_fingerprint_via exec_source_script "$source_path")"
-  source_fingerprint="$(printf '%s' "$source_fingerprint" | tr -d '\r\n')"
-
-  jq -nc \
-    --arg direction "$direction" \
-    --arg branch "$branch" \
-    --arg head_commit "$head_commit" \
-    --argjson detached "$detached" \
-    --argjson bundle_present "$bundle_present" \
-    --argjson staged_present "$staged_present" \
-    --argjson unstaged_present "$unstaged_present" \
-    --argjson untracked_count "${untracked_count:-0}" \
-    --argjson lfs_present "$lfs_present" \
-    --arg source_fingerprint "$source_fingerprint" \
-    --arg source_path "$source_path" \
-    --arg dest_path "$dest_path" \
-    --arg created_at "$(rw_now_iso)" \
-    '{format_version: 1, direction: $direction, branch: $branch, head_commit: $head_commit,
-      detached: $detached, bundle_present: $bundle_present, staged_present: $staged_present,
-      unstaged_present: $unstaged_present, untracked_count: $untracked_count,
-      lfs_present: $lfs_present,
-      source_fingerprint: $source_fingerprint, source_path: $source_path, dest_path: $dest_path,
-      created_at: $created_at}' >"$snap_dir/meta.json"
-
-  # --- generation / divergence state ---------------------------------------
-  local gen_json prev_generation prev_fingerprint next_generation
+  # --- generation / divergence state (git roots) ----------------------------
+  # Baseline: the `#git` row of the destination's stored manifest when the
+  # caller passed one, else the endpoint/state-file generation record.
+  local gen_json prev_generation prev_fingerprint next_generation baseline_fp=""
   if [ -n "$endpoint_id" ]; then
     gen_json="$(rw_sync_gen_read_endpoint "$endpoint_id")"
   elif [ -n "$state_file" ]; then
@@ -317,63 +373,154 @@ cmd_sync() {
   prev_generation="$(printf '%s' "$gen_json" | jq -r '.generation // 0')"
   prev_fingerprint="$(printf '%s' "$gen_json" | jq -r '.fingerprint // empty')"
   next_generation=$((prev_generation + 1))
+  if [ "$dest_manifest_set" = "true" ]; then
+    baseline_fp="$(rw_sync_manifest_git_fp "$dest_manifest")"
+  fi
+  if [ -z "$baseline_fp" ] && [ "$prev_generation" -gt 0 ]; then
+    baseline_fp="$prev_fingerprint"
+  fi
 
-  if [ "$prev_generation" -gt 0 ] && [ -n "$prev_fingerprint" ] && [ "$force_diverged" != "true" ]; then
+  if [ "$kind" = "git" ] && [ -n "$baseline_fp" ] && [ "$force_diverged" != "true" ]; then
     local dest_fp_now
     dest_fp_now="$(rw_sync_fingerprint_via exec_dest_script "$dest_path" 2>/dev/null || echo EMPTY)"
     dest_fp_now="$(printf '%s' "$dest_fp_now" | tr -d '\r\n')"
-    if [ "$dest_fp_now" != "$prev_fingerprint" ]; then
+    # EMPTY: the destination is gone or not a repository -- nothing there
+    # can be lost, so it never counts as divergence.
+    if [ "$dest_fp_now" != "EMPTY" ] && [ "$dest_fp_now" != "$baseline_fp" ]; then
       duration_ms="$(rw_elapsed_ms "$start_ts")"
       rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
-        "diverged: destination fingerprint changed since generation $prev_generation without going through handoff"
-      rw_warn "handoff sync: destination has diverged from synchronization generation $prev_generation."
+        "diverged: destination git state changed since it was last synchronized"
+      rw_warn "handoff sync: the destination's git state (commits, staged/unstaged changes, untracked file list) changed since it was last synchronized."
       rw_warn "Neither side has been touched. Reconcile manually (inspect '$dest_path'), or re-run with --force-diverged to overwrite it (a destination backup is still taken first)."
       return 2
     fi
   fi
 
-  # --- transfer into a destination STAGING dir (never the live workspace) --
-  local staging_ts
-  staging_ts="$(date +%s)"
-  local staging_dir="$staging_root/$backup_token/g$next_generation-$staging_ts"
-  local mkstage="$work_dir/mkstage.sh"
-  {
-    printf 'set -uo pipefail\n'
-    printf 'mkdir -p %q\n' "$staging_dir"
-  } >"$mkstage"
-  exec_dest_script "$mkstage" || rw_die "handoff sync: could not prepare staging directory on destination" 1
-
-  if ! tar -C "$snap_dir" -cf - . | exec_dest "tar -C $(rw_sync_shquote "$staging_dir") -xf -"; then
-    duration_ms="$(rw_elapsed_ms "$start_ts")"
-    rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "transfer_interrupted"
-    rw_warn "handoff sync: transfer to destination was interrupted. The live destination at '$dest_path' was never touched; the source at '$source_path' was never touched. Partial staging data (if any) is inert at '$staging_dir' on the destination and safe to delete."
-    return 3
+  # =========================================================================
+  # Manifest gate (owner wins): compare the copy about to be overwritten
+  # with its stored manifest. Without a stored manifest the baseline is the
+  # incoming source: only files that would really be replaced or deleted
+  # count.
+  # =========================================================================
+  local renamed_count=0 overwritten_count=0
+  if [ "$dest_manifest_set" = "true" ]; then
+    local dest_now="$work_dir/dest-now.tsv" conflicts="$work_dir/conflicts.tsv"
+    rw_sync_manifest_via exec_dest_script "$dest_path" "$kind" >"$dest_now" 2>/dev/null || : >"$dest_now"
+    if [ -s "$dest_manifest" ]; then
+      rw_sync_manifest_diff "$dest_manifest" "$dest_now" >"$conflicts"
+    else
+      local src_now="$work_dir/source-now.tsv"
+      rw_sync_manifest_via exec_source_script "$source_path" "$kind" >"$src_now" 2>/dev/null || : >"$src_now"
+      rw_sync_manifest_diff "$src_now" "$dest_now" --no-deleted >"$conflicts"
+    fi
+    if [ -s "$conflicts" ]; then
+      case "$resolve" in
+        '' | abort)
+          duration_ms="$(rw_elapsed_ms "$start_ts")"
+          rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
+            "manifest_conflict:$(wc -l <"$conflicts" | tr -d ' ')"
+          rw_warn "handoff sync: $(wc -l <"$conflicts" | tr -d ' ') file(s) in '$dest_path' changed since it was last synchronized; nothing was touched. Re-run with --resolve overwrite|keep-both|abort."
+          cat "$conflicts"
+          return 5
+          ;;
+        overwrite)
+          overwritten_count="$(wc -l <"$conflicts" | tr -d ' ')"
+          rw_warn "handoff sync: overwriting $overwritten_count changed file(s) in '$dest_path' (--resolve overwrite)."
+          ;;
+        keep-both)
+          local kb_script="$work_dir/keep-both.sh" kb_stamp
+          kb_stamp="$(date '+%Y%m%d-%H%M%S')"
+          {
+            printf 'set -u\n'
+            printf 'cd %q || exit 1\n' "$dest_path"
+            # shellcheck disable=SC2016 # $1 belongs to the generated script
+            printf '__rw_kb() { if [ -e "$1" ] || [ -L "$1" ]; then mv -f -- "$1" "$1.local-%s" && printf "%%s\\n" "$1.local-%s"; fi; }\n' "$kb_stamp" "$kb_stamp"
+            awk -F '\t' '$3 != "deleted" { print $2 }' "$conflicts" | while IFS= read -r kb_path; do
+              printf '__rw_kb %q\n' "$kb_path"
+            done
+          } >"$kb_script"
+          if ! exec_dest_script "$kb_script" >"$protect_list" 2>"$work_dir/keep-both.err"; then
+            rw_warn "handoff sync: keep-both rename failed on the destination: $(cat "$work_dir/keep-both.err")"
+            return 1
+          fi
+          renamed_count="$(wc -l <"$protect_list" | tr -d ' ')"
+          rw_warn "handoff sync: kept $renamed_count destination file(s) as <file>.local-$kb_stamp (--resolve keep-both)."
+          ;;
+      esac
+    fi
   fi
 
-  # --- verify staging landed intact -----------------------------------------
-  local remote_meta
-  remote_meta="$(exec_dest "cat $(rw_sync_shquote "$staging_dir/meta.json") 2>/dev/null || true")"
-  local remote_head
-  remote_head="$(printf '%s' "$remote_meta" | jq -r '.head_commit // empty' 2>/dev/null || true)"
-  if [ "$remote_head" != "$head_commit" ]; then
-    duration_ms="$(rw_elapsed_ms "$start_ts")"
-    rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "staging_verify_failed"
-    rw_warn "handoff sync: staged transfer at '$staging_dir' on the destination failed verification (meta.json missing or head_commit mismatch). The live destination at '$dest_path' was never touched; the source was never touched."
-    return 3
-  fi
+  # =========================================================================
+  # Git channel, part 2: stage, back up, apply, verify.
+  # =========================================================================
+  local backup_dir="" dest_fp_after=""
+  if [ "$kind" = "git" ]; then
+    cp "$protect_list" "$snap_dir/protect.list"
+    local untracked_count
+    untracked_count="$(tr -cd '\0' <"$untracked_list" | wc -c | tr -d ' ')"
 
-  # --- destination backup (only if dest already has committed content) -----
-  local backup_dir="" dest_is_repo
-  dest_is_repo="$(exec_dest "git -C $(rw_sync_shquote "$dest_path") rev-parse --is-inside-work-tree 2>/dev/null || echo false")"
-  dest_is_repo="$(printf '%s' "$dest_is_repo" | tr -d '\r\n')"
-  if [ "$dest_is_repo" = "true" ]; then
-    backup_dir="$backup_root/$backup_token/$next_generation"
-    local bkscript="$work_dir/backup.sh"
+    jq -nc \
+      --arg direction "$direction" \
+      --arg branch "$branch" \
+      --arg head_commit "$head_commit" \
+      --argjson detached "$detached" \
+      --argjson bundle_present "$bundle_present" \
+      --argjson staged_present "$staged_present" \
+      --argjson unstaged_present "$unstaged_present" \
+      --argjson untracked_count "${untracked_count:-0}" \
+      --argjson lfs_present "$lfs_present" \
+      --arg source_fingerprint "$source_fingerprint" \
+      --arg source_path "$source_path" \
+      --arg dest_path "$dest_path" \
+      --arg created_at "$(rw_now_iso)" \
+      '{format_version: 2, direction: $direction, branch: $branch, head_commit: $head_commit,
+        detached: $detached, bundle_present: $bundle_present, staged_present: $staged_present,
+        unstaged_present: $unstaged_present, untracked_count: $untracked_count,
+        lfs_present: $lfs_present,
+        source_fingerprint: $source_fingerprint, source_path: $source_path, dest_path: $dest_path,
+        created_at: $created_at}' >"$snap_dir/meta.json"
+
+    # --- transfer into a destination STAGING dir (never the live workspace)
+    local staging_ts
+    staging_ts="$(date +%s)"
+    local staging_dir="$staging_root/$backup_token/g$next_generation-$staging_ts"
+    local mkstage="$work_dir/mkstage.sh"
     {
       printf 'set -uo pipefail\n'
-      printf '__RW_BK_PATH=%q\n' "$dest_path"
-      printf '__RW_BK_DIR=%q\n' "$backup_dir"
-      cat <<'EOS'
+      printf 'mkdir -p %q\n' "$staging_dir"
+    } >"$mkstage"
+    exec_dest_script "$mkstage" || rw_die "handoff sync: could not prepare staging directory on destination" 1
+
+    if ! tar -C "$snap_dir" -cf - . | exec_dest "tar -C $(rw_sync_shquote "$staging_dir") -xf -"; then
+      duration_ms="$(rw_elapsed_ms "$start_ts")"
+      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "transfer_interrupted"
+      rw_warn "handoff sync: transfer to destination was interrupted. The live destination at '$dest_path' was never touched; the source at '$source_path' was never touched. Partial staging data (if any) is inert at '$staging_dir' on the destination and safe to delete."
+      return 3
+    fi
+
+    # --- verify staging landed intact ---------------------------------------
+    local remote_meta remote_head
+    remote_meta="$(exec_dest "cat $(rw_sync_shquote "$staging_dir/meta.json") 2>/dev/null || true")"
+    remote_head="$(printf '%s' "$remote_meta" | jq -r '.head_commit // empty' 2>/dev/null || true)"
+    if [ "$remote_head" != "$head_commit" ]; then
+      duration_ms="$(rw_elapsed_ms "$start_ts")"
+      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "staging_verify_failed"
+      rw_warn "handoff sync: staged transfer at '$staging_dir' on the destination failed verification (meta.json missing or head_commit mismatch). The live destination at '$dest_path' was never touched; the source was never touched."
+      return 3
+    fi
+
+    # --- destination backup (only if dest already has committed content) ----
+    local dest_is_repo
+    dest_is_repo="$(exec_dest "git -C $sq_dest rev-parse --is-inside-work-tree 2>/dev/null || echo false")"
+    dest_is_repo="$(printf '%s' "$dest_is_repo" | tr -d '\r\n')"
+    if [ "$dest_is_repo" = "true" ]; then
+      backup_dir="$backup_root/$backup_token/$next_generation-$staging_ts"
+      local bkscript="$work_dir/backup.sh"
+      {
+        printf 'set -uo pipefail\n'
+        printf '__RW_BK_PATH=%q\n' "$dest_path"
+        printf '__RW_BK_DIR=%q\n' "$backup_dir"
+        cat <<'EOS'
 mkdir -p "$__RW_BK_DIR"
 if git -C "$__RW_BK_PATH" rev-parse HEAD >/dev/null 2>&1; then
   git -C "$__RW_BK_PATH" bundle create "$__RW_BK_DIR/bundle.git" HEAD >/dev/null 2>&1 || true
@@ -388,32 +535,32 @@ COPYFILE_DISABLE=1 tar -C "$__RW_BK_PATH" --null -T "$__rw_bk_list" -cf "$__RW_B
 rm -f "$__rw_bk_list"
 printf 'backup-ok\n'
 EOS
-    } >"$bkscript"
-    local bkout
-    bkout="$(exec_dest_script "$bkscript" 2>"$work_dir/backup.err")"
-    if [ "$bkout" != "backup-ok" ]; then
-      duration_ms="$(rw_elapsed_ms "$start_ts")"
-      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "backup_failed"
-      rw_warn "handoff sync: could not create the pre-overwrite destination backup ($(cat "$work_dir/backup.err" 2>/dev/null)); refusing to overwrite '$dest_path'. Source and (previous) destination content are both untouched."
-      return 1
+      } >"$bkscript"
+      local bkout
+      bkout="$(exec_dest_script "$bkscript" 2>"$work_dir/backup.err")"
+      if [ "$bkout" != "backup-ok" ]; then
+        duration_ms="$(rw_elapsed_ms "$start_ts")"
+        rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "backup_failed"
+        rw_warn "handoff sync: could not create the pre-overwrite destination backup ($(cat "$work_dir/backup.err" 2>/dev/null)); refusing to overwrite '$dest_path'. Source and (previous) destination content are both untouched."
+        return 1
+      fi
+      rw_warn "handoff: backed up destination's prior state to $backup_dir on the destination host"
     fi
-    rw_warn "handoff: backed up destination's prior state to $backup_dir on the destination host"
-  fi
 
-  # --- apply: staging -> live destination -----------------------------------
-  local apply_script="$work_dir/apply.sh"
-  {
-    printf 'set -uo pipefail\n'
-    printf '__RW_A_DEST=%q\n' "$dest_path"
-    printf '__RW_A_STAGE=%q\n' "$staging_dir"
-    printf '__RW_A_BRANCH=%q\n' "$branch"
-    printf '__RW_A_HEAD=%q\n' "$head_commit"
-    printf '__RW_A_DETACHED=%q\n' "$detached"
-    printf '__RW_A_BUNDLE=%q\n' "$bundle_present"
-    printf '__RW_A_STAGED=%q\n' "$staged_present"
-    printf '__RW_A_UNSTAGED=%q\n' "$unstaged_present"
-    printf '__RW_A_LFS=%q\n' "$lfs_present"
-    cat <<'EOS'
+    # --- apply: staging -> live destination ---------------------------------
+    local apply_script="$work_dir/apply.sh"
+    {
+      printf 'set -uo pipefail\n'
+      printf '__RW_A_DEST=%q\n' "$dest_path"
+      printf '__RW_A_STAGE=%q\n' "$staging_dir"
+      printf '__RW_A_BRANCH=%q\n' "$branch"
+      printf '__RW_A_HEAD=%q\n' "$head_commit"
+      printf '__RW_A_DETACHED=%q\n' "$detached"
+      printf '__RW_A_BUNDLE=%q\n' "$bundle_present"
+      printf '__RW_A_STAGED=%q\n' "$staged_present"
+      printf '__RW_A_UNSTAGED=%q\n' "$unstaged_present"
+      printf '__RW_A_LFS=%q\n' "$lfs_present"
+      cat <<'EOS'
 mkdir -p "$__RW_A_DEST"
 if ! git -C "$__RW_A_DEST" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git init -q "$__RW_A_DEST"
@@ -426,11 +573,7 @@ fi
 
 # -f/--force: the whole point of reaching this step is an intentional
 # overwrite of the destination's working tree (a recoverable backup was
-# already taken above when the destination was a managed repo). Without
-# -f, `checkout -B` refuses whenever the destination has local
-# modifications that would conflict with the incoming content -- exactly
-# the case a handoff/return/--force-diverged overwrite needs to push
-# through.
+# already taken when the destination was a managed repo).
 if [ "$__RW_A_BUNDLE" = "true" ]; then
   git -C "$__RW_A_DEST" fetch -q --no-tags "$__RW_A_STAGE/bundle.git" '+HEAD:refs/rw-incoming/head' || exit 21
   if [ "$__RW_A_DETACHED" = "true" ]; then
@@ -448,10 +591,8 @@ else
 fi
 
 if [ "$__RW_A_STAGED" = "true" ]; then
-  # --index (not --cached): a staged rename/add/delete patch must land in
-  # BOTH the index and the working tree, or the working tree is left
-  # inconsistent with the new index (e.g. an added file staged but absent
-  # on disk). --cached only touches the index.
+  # --index (not --cached): a staged rename/add/delete must land in BOTH
+  # the index and the working tree.
   git -C "$__RW_A_DEST" apply --binary --index "$__RW_A_STAGE/staged.patch" || exit 23
 fi
 if [ "$__RW_A_UNSTAGED" = "true" ]; then
@@ -460,82 +601,160 @@ fi
 
 tar -C "$__RW_A_DEST" -xf "$__RW_A_STAGE/untracked.tar" || exit 25
 
+# Owner wins for untracked files too: delete destination untracked
+# (non-ignored) files the source no longer has, except keep-both copies
+# (<file>.local-YYYYMMDD-HHMMSS), which no sync ever deletes. Newline-separated lists; bash 3.2-safe (no comm -z on macOS).
+__rw_dest_list="$(mktemp "${TMPDIR:-/tmp}/rw-apply-dest.XXXXXX")"
+__rw_keep_list="$(mktemp "${TMPDIR:-/tmp}/rw-apply-keep.XXXXXX")"
+git -C "$__RW_A_DEST" ls-files --others --exclude-standard -z 2>/dev/null | tr '\0' '\n' | LC_ALL=C sort >"$__rw_dest_list"
+cat "$__RW_A_STAGE/untracked.list" "$__RW_A_STAGE/protect.list" 2>/dev/null | LC_ALL=C sort -u >"$__rw_keep_list"
+LC_ALL=C comm -23 "$__rw_dest_list" "$__rw_keep_list" |
+  grep -Ev '\.local-[0-9]{8}-[0-9]{6}$' | while IFS= read -r __rw_gone; do
+  [ -n "$__rw_gone" ] || continue
+  rm -f -- "$__RW_A_DEST/$__rw_gone" || exit 26
+done
+rm -f "$__rw_dest_list" "$__rw_keep_list"
+
 rm -rf "$__RW_A_STAGE"
 printf 'apply-ok\n'
 EOS
-  } >"$apply_script"
+    } >"$apply_script"
 
-  local apply_out apply_status
-  apply_out="$(exec_dest_script "$apply_script" 2>"$work_dir/apply.err")"
-  apply_status=$?
-  if [ "$apply_status" -ne 0 ] || [ "$apply_out" != "apply-ok" ]; then
-    duration_ms="$(rw_elapsed_ms "$start_ts")"
-    rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "apply_failed:exit=$apply_status"
-    rw_warn "handoff sync: apply step failed on the destination (exit $apply_status): $(cat "$work_dir/apply.err" 2>/dev/null)."
-    if [ -n "$backup_dir" ]; then
-      rw_warn "The pre-overwrite destination backup is at '$backup_dir' on the destination host and can be restored manually (git fetch its bundle.git, git apply its patches, tar -x its untracked.tar)."
-    fi
-    return 4
-  fi
-
-  # --- post-apply verification: dest content must match captured source ---
-  local dest_fp_after
-  dest_fp_after="$(rw_sync_fingerprint_via exec_dest_script "$dest_path" 2>/dev/null || echo EMPTY)"
-  dest_fp_after="$(printf '%s' "$dest_fp_after" | tr -d '\r\n')"
-  if [ "$dest_fp_after" != "$source_fingerprint" ]; then
-    duration_ms="$(rw_elapsed_ms "$start_ts")"
-    # Distinguish the two very different causes before wording the failure:
-    # if the SOURCE tree no longer fingerprints the way it did at capture,
-    # a concurrent writer (live agent, editor, autosave) mutated it
-    # mid-handoff -- the transfer is torn, not corrupted (2026-08-08: a
-    # resident claude agent editing the dotfiles worktree during handoff
-    # produced exactly this, and the old message read as data corruption).
-    local source_fp_now
-    source_fp_now="$(rw_sync_fingerprint_via exec_source_script "$source_path" 2>/dev/null || echo EMPTY)"
-    source_fp_now="$(printf '%s' "$source_fp_now" | tr -d '\r\n')"
-    if [ "$source_fp_now" != "$source_fingerprint" ]; then
-      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "source_changed_during_sync"
-      rw_warn "handoff sync: the SOURCE workspace changed while the handoff was in flight (another writer -- a running agent, editor, or autosave -- is mutating '$source_path'). Nothing is corrupted; the destination holds the mid-flight snapshot. Stop or pause the other writer and re-run the handoff."
+    local apply_out apply_status
+    apply_out="$(exec_dest_script "$apply_script" 2>"$work_dir/apply.err")"
+    apply_status=$?
+    if [ "$apply_status" -ne 0 ] || [ "$apply_out" != "apply-ok" ]; then
+      duration_ms="$(rw_elapsed_ms "$start_ts")"
+      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "apply_failed:exit=$apply_status"
+      rw_warn "handoff sync: apply step failed on the destination (exit $apply_status): $(cat "$work_dir/apply.err" 2>/dev/null)."
+      if [ -n "$backup_dir" ]; then
+        rw_warn "The pre-overwrite destination backup is at '$backup_dir' on the destination host and can be restored manually (git fetch its bundle.git, git apply its patches, tar -x its untracked.tar)."
+      fi
       return 4
     fi
-    rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "post_apply_verify_mismatch"
-    rw_warn "handoff sync: destination content does not match the captured source snapshot after apply (fingerprint mismatch). Destination was modified but is not verified correct -- inspect '$dest_path'; a pre-overwrite backup is at '${backup_dir:-<none, dest was empty>}'."
+
+    # --- post-apply verification: dest content must match captured source -
+    dest_fp_after="$(rw_sync_fingerprint_via exec_dest_script "$dest_path" 2>/dev/null || echo EMPTY)"
+    dest_fp_after="$(printf '%s' "$dest_fp_after" | tr -d '\r\n')"
+    if [ "$dest_fp_after" != "$source_fingerprint" ]; then
+      duration_ms="$(rw_elapsed_ms "$start_ts")"
+      # A concurrent writer (live agent, editor, autosave) mutating the
+      # source mid-handoff tears the transfer; it does not corrupt it.
+      local source_fp_now
+      source_fp_now="$(rw_sync_fingerprint_via exec_source_script "$source_path" 2>/dev/null || echo EMPTY)"
+      source_fp_now="$(printf '%s' "$source_fp_now" | tr -d '\r\n')"
+      if [ "$source_fp_now" != "$source_fingerprint" ]; then
+        rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "source_changed_during_sync"
+        rw_warn "handoff sync: the SOURCE workspace changed while the handoff was in flight (another writer -- a running agent, editor, or autosave -- is mutating '$source_path'). Nothing is corrupted; the destination holds the mid-flight snapshot. Stop or pause the other writer and re-run the handoff."
+        return 4
+      fi
+      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "post_apply_verify_mismatch"
+      rw_warn "handoff sync: destination content does not match the captured source snapshot after apply (fingerprint mismatch). Destination was modified but is not verified correct -- inspect '$dest_path'; a pre-overwrite backup is at '${backup_dir:-<none, dest was empty>}'."
+      return 4
+    fi
+  else
+    exec_dest "mkdir -p $sq_dest" >/dev/null 2>&1 ||
+      rw_die "handoff sync: could not create the destination directory '$dest_path'" 1
+  fi
+
+  # =========================================================================
+  # rsync channel.
+  # =========================================================================
+  local entries="$work_dir/ignored.entries" rules="$work_dir/rsync.rules"
+  : >"$entries"
+  if [ "$kind" = "git" ]; then
+    # Union of both sides' collapsed ignored entries; the destination's list
+    # is read AFTER apply so it uses the source's .gitignore.
+    {
+      rw_sync_ignored_via exec_source_script "$source_path"
+      rw_sync_ignored_via exec_dest_script "$dest_path"
+    } 2>/dev/null | tr -d '\r' | awk 'NF' | LC_ALL=C sort -u >"$entries"
+  fi
+  rw_sync_write_rsync_rules "$kind" "$entries" "$protect_list" "$rules"
+
+  local rsync_src rsync_dst
+  local rsync_args=(-rlptD --delete "--exclude-from=$rules")
+  if [ "$dest_mode" = "ssh" ]; then
+    rsync_args+=(-e "$(rw_ssh_bin) -o BatchMode=yes -o ConnectTimeout=$(rw_ssh_connect_timeout)")
+  fi
+  if [ "$pull" != "true" ]; then
+    rsync_src="$source_path/"
+    rsync_dst="$(rsync_far_path "$dest_path")/"
+  else
+    rsync_src="$(rsync_far_path "$source_path")/"
+    rsync_dst="$dest_path/"
+  fi
+  if ! COPYFILE_DISABLE=1 rsync "${rsync_args[@]}" "$rsync_src" "$rsync_dst" >"$work_dir/rsync.out" 2>"$work_dir/rsync.err"; then
+    duration_ms="$(rw_elapsed_ms "$start_ts")"
+    rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "rsync_failed"
+    local backup_note=""
+    [ -n "$backup_dir" ] && backup_note=" (git backup at $backup_dir)"
+    rw_warn "handoff sync: the rsync channel failed: $(tail -n 5 "$work_dir/rsync.err" 2>/dev/null). The destination may be partially updated; re-run the same command to converge$backup_note."
     return 4
   fi
 
-  # --- record the new synchronization generation ----------------------------
-  local sync_json
-  sync_json="$(jq -nc \
-    --argjson generation "$next_generation" \
-    --arg fingerprint "$dest_fp_after" \
-    --arg direction "$direction" \
-    --arg synced_at "$(rw_now_iso)" \
-    --arg head_commit "$head_commit" \
-    --arg branch "$branch" \
-    --arg backup_dir "$backup_dir" \
-    '{generation: $generation, fingerprint: $fingerprint, direction: $direction,
-      synced_at: $synced_at, head_commit: $head_commit, branch: $branch,
-      backup_dir: (if $backup_dir == "" then null else $backup_dir end)}')"
-  if [ -n "$endpoint_id" ]; then
-    rw_sync_gen_write_endpoint "$endpoint_id" "$sync_json"
-  elif [ -n "$state_file" ]; then
-    rw_sync_gen_write_statefile "$state_file" "$sync_json"
+  # --- post-transfer manifests: both sides must now list the same files ----
+  local source_post="$work_dir/source.tsv" dest_post="$work_dir/dest.tsv"
+  rw_sync_manifest_via exec_source_script "$source_path" "$kind" >"$source_post" 2>/dev/null || : >"$source_post"
+  rw_sync_manifest_via exec_dest_script "$dest_path" "$kind" >"$dest_post" 2>/dev/null || : >"$dest_post"
+  if ! rw_sync_manifests_equal "$source_post" "$dest_post"; then
+    duration_ms="$(rw_elapsed_ms "$start_ts")"
+    rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "rsync_verify_mismatch"
+    rw_warn "handoff sync: after the rsync channel the two copies still differ ($(rw_sync_manifest_diff "$source_post" "$dest_post" | wc -l | tr -d ' ') file(s), e.g. $(rw_sync_manifest_diff "$source_post" "$dest_post" | head -n 3 | cut -f2 | paste -sd, -)). Usually another writer (a running agent, dev server, or build) is changing '$source_path'; stop it and re-run."
+    return 4
+  fi
+  if [ "$kind" = "git" ]; then
+    printf '#git\t%s\n' "$dest_fp_after" >>"$source_post"
+    printf '#git\t%s\n' "$dest_fp_after" >>"$dest_post"
+  fi
+  if [ -n "$manifest_out" ]; then
+    mkdir -p "$manifest_out"
+    cp "$source_post" "$manifest_out/source.tsv"
+    cp "$dest_post" "$manifest_out/dest.tsv"
+  fi
+
+  # --- record the new synchronization generation (git roots) ---------------
+  if [ "$kind" = "git" ]; then
+    local sync_json
+    sync_json="$(jq -nc \
+      --argjson generation "$next_generation" \
+      --arg fingerprint "$dest_fp_after" \
+      --arg direction "$direction" \
+      --arg synced_at "$(rw_now_iso)" \
+      --arg head_commit "$head_commit" \
+      --arg branch "$branch" \
+      --arg backup_dir "$backup_dir" \
+      '{generation: $generation, fingerprint: $fingerprint, direction: $direction,
+        synced_at: $synced_at, head_commit: $head_commit, branch: $branch,
+        backup_dir: (if $backup_dir == "" then null else $backup_dir end)}')"
+    if [ -n "$endpoint_id" ]; then
+      rw_sync_gen_write_endpoint "$endpoint_id" "$sync_json"
+    elif [ -n "$state_file" ]; then
+      rw_sync_gen_write_statefile "$state_file" "$sync_json"
+    fi
   fi
 
   duration_ms="$(rw_elapsed_ms "$start_ts")"
-  rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "success" "generation=$next_generation"
+  rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "success" \
+    "kind=$kind generation=$next_generation files=$(wc -l <"$dest_post" | tr -d ' ') renamed=$renamed_count overwritten=$overwritten_count"
 
   jq -nc \
     --argjson ok true \
+    --arg kind "$kind" \
     --argjson generation "$next_generation" \
     --arg backup_dir "$backup_dir" \
     --arg head_commit "$head_commit" \
     --arg branch "$branch" \
     --arg fingerprint "$dest_fp_after" \
+    --argjson renamed "$(jq -R . <"$protect_list" | jq -s .)" \
+    --argjson overwritten "$overwritten_count" \
     --argjson duration_ms "$duration_ms" \
-    '{ok: $ok, generation: $generation, backup_dir: (if $backup_dir == "" then null else $backup_dir end),
-      head_commit: $head_commit, branch: $branch, fingerprint: $fingerprint,
-      duration_ms: $duration_ms}'
+    '{ok: $ok, kind: $kind, generation: $generation,
+      backup_dir: (if $backup_dir == "" then null else $backup_dir end),
+      head_commit: (if $head_commit == "" then null else $head_commit end),
+      branch: (if $branch == "" then null else $branch end),
+      fingerprint: (if $fingerprint == "" then null else $fingerprint end),
+      renamed: $renamed, overwritten: $overwritten, duration_ms: $duration_ms}'
   return 0
 }
 
@@ -556,6 +775,7 @@ shift
 case "$command" in
   sync) cmd_sync "$@"; exit $? ;;
   fingerprint) cmd_fingerprint "$@"; exit $? ;;
+  manifest) cmd_manifest "$@"; exit $? ;;
   -h | --help | help) usage; exit 0 ;;
   *)
     printf 'handoff: unknown command: %s\n\n' "$command" >&2

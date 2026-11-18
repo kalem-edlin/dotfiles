@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # tmux-remote-workspaces command dispatcher.
 #
-# Usage: rw <ensure|handoff|return|close|status|doctor> [args...]
+# Usage: rw <handoff|handback|open|forget|reclaim|status|close|doctor> [args...]
 #
-# There is no separate attach/reconnect verb -- `rw ensure` is idempotent and
-# handles both first establishment and reattachment of an existing pane's
-# endpoint (docs/tmux-remote-workspaces.md, "Endpoint and state model").
+# The unit of handoff is a directory root (a worktree or a plain folder);
+# see docs/tasks/mini-remote-sessions.md for the model and contracts.
 
 set -uo pipefail
 
@@ -27,32 +26,43 @@ usage() {
 usage: rw <command> [args...]
 
 commands:
-  ensure --worker <alias> [--workspace <path>|auto]
-      Idempotent establish/re-establish of a durable remote endpoint for the
-      current pane.
+  handoff --worker <alias> [--root <path>] [--pane <pane-id>] [--check-lfs]
+          [--force-diverged] [--resolve overwrite|keep-both|abort]
+      Hand a directory root (default: the pane's git worktree, or its
+      directory) and every pane working inside it to <alias>. The remote
+      copy becomes the only source of truth; the local copy stays, frozen.
+
+  handback [--root <path>] [--pane <pane-id>] [--check-lfs]
+           [--force-diverged] [--resolve overwrite|keep-both|abort]
+      Bring a remote root and all of its panes (and their agents) back.
+
+  open [--worker <alias>] [--root <path>] [--pane <pane-id>]
+      A new remote pane in a root that is already remote. No sync.
+      Reattaches instead when the pane already has an endpoint.
+
+  forget <root> [--worker <alias>]
+      The root is gone: close its remote panes and delete every remote
+      copy of it. An unreachable remote is cleaned up on next contact.
+
+  reclaim --force <root>
+      Take a remote root back from the frozen local copy while its remote
+      is unreachable. Remote work since the handoff is not brought back.
+
+  status [--json]
+      Remote roots (owner, worker, panes, pending) and endpoints.
 
   close [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
-      Lifecycle-aware intentional close of a remote-backed pane.
-
-  status
-      Human-readable table of registered endpoints.
+      Close one remote pane and its remote session.
 
   doctor
-      Diagnostics: local prerequisites, per-worker preflight, local tmux
-      durability, registry/live-pane consistency, clipboard/passthrough
-      checks. Does not modify endpoints, workspaces, or worker state, but
-      is not literally side-effect free: per-worker preflight appends
-      entries to the events log like any other operation.
+      Diagnostics: local prerequisites, per-worker preflight, registry and
+      live-pane consistency, clipboard/passthrough checks. Report only.
 
-  handoff --worker <alias> [--workspace <path>|auto] [--pane <pane-id>]
-          [--keep-local] [--check-lfs] [--force-diverged]
-      Transactional handoff of the current pane's workspace (and, if a
-      supported AI agent is running there, its conversation) to a durable
-      remote endpoint on <alias>.
-
-  return [--pane <pane-id>] [--keep-remote] [--check-lfs] [--force-diverged]
-      Mirror of handoff: bring a remote-backed pane's workspace (and agent,
-      if one was handed off) back to the focus machine.
+exit codes: 0 ok, 1 failure, 2 git history diverged, 3 agent CLI too old,
+  5 files changed on the copy being overwritten (stdout lists
+  conflict<TAB>path<TAB>changed|added|deleted; re-run with --resolve),
+  6 remote unreachable, 7 root invalid or not in the required state,
+  64 usage.
 EOF
 }
 
@@ -65,12 +75,14 @@ command="$1"
 shift
 
 case "$command" in
-  ensure) exec "$SCRIPT_DIR/rw-ensure.sh" "$@" ;;
-  close) exec "$SCRIPT_DIR/rw-close.sh" "$@" ;;
-  status) exec "$SCRIPT_DIR/rw-status.sh" "$@" ;;
-  doctor) exec "$SCRIPT_DIR/rw-doctor.sh" "$@" ;;
   handoff) exec "$SCRIPT_DIR/rw-handoff.sh" "$@" ;;
-  return) exec "$SCRIPT_DIR/rw-return.sh" "$@" ;;
+  handback) exec "$SCRIPT_DIR/rw-handback.sh" "$@" ;;
+  open) exec "$SCRIPT_DIR/rw-open.sh" "$@" ;;
+  forget) exec "$SCRIPT_DIR/rw-forget.sh" "$@" ;;
+  reclaim) exec "$SCRIPT_DIR/rw-reclaim.sh" "$@" ;;
+  status) exec "$SCRIPT_DIR/rw-status.sh" "$@" ;;
+  close) exec "$SCRIPT_DIR/rw-close.sh" "$@" ;;
+  doctor) exec "$SCRIPT_DIR/rw-doctor.sh" "$@" ;;
   -h | --help | help)
     usage
     exit 0

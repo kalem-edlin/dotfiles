@@ -109,6 +109,15 @@ smoke_pi() {
   else
     bad "pi: no transcript file found under $dest_dir"
   fi
+  local placed header_cwd
+  placed="$(find "$dest_dir" -maxdepth 1 -type f -name '*.jsonl' 2>/dev/null | head -n1)"
+  header_cwd="$(head -n1 "$placed" 2>/dev/null | jq -r '.cwd // empty')"
+  if [ "$header_cwd" = "$dest_project" ] &&
+    [ "$(tail -n +2 "$placed")" = '{"type":"message","role":"user","content":"smoke test"}' ]; then
+    ok "pi: session header cwd rewritten to the destination, body untouched"
+  else
+    bad "pi: header cwd is '$header_cwd' (want $dest_project) or the body changed"
+  fi
 
   local resume_cmd resume_status=0
   resume_cmd="$(HOME="$sandbox" "$ADAPTERS_DIR/pi" resume-cmd --dest-path "$dest_project" \
@@ -117,7 +126,7 @@ smoke_pi() {
     bad "pi resume-cmd ($(cat "$sandbox/resume.err"))"
   else
     case "$resume_cmd" in
-      *"$session_id"*) ok "pi: resume-cmd resolves the session by id/path -- points at it ($resume_cmd)" ;;
+      "cd $dest_project && pif --session "*"$session_id"*) ok "pi: resume-cmd runs pif from the destination and points at the session ($resume_cmd)" ;;
       *) bad "pi: resume-cmd did not reference the session id: $resume_cmd" ;;
     esac
   fi
@@ -285,15 +294,16 @@ smoke_mode_flags() {
   # run non-root per docs/headless-workers.md; operator decision 2026-08-05.
   cmd="$("$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
     --mode-flags "--dangerously-skip-permissions" 2>/dev/null)"
-  if [ "$cmd" = "cd /tmp/rw-smoke-mode && claude --dangerously-skip-permissions --resume abc" ]; then
-    ok "claude resume-cmd: bypass flag replayed verbatim, no injected workarounds"
+  # claudef always passes --dangerously-skip-permissions itself.
+  if [ "$cmd" = "cd /tmp/rw-smoke-mode && claudef --resume abc" ]; then
+    ok "claude resume-cmd: resumes through claudef (which carries the bypass flag), no injected workarounds"
   else
     bad "claude resume-cmd: got '$cmd'"
   fi
 
   cmd="$("$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
     --mode-flags "--permission-mode acceptEdits" 2>/dev/null)"
-  if [ "$cmd" = "cd /tmp/rw-smoke-mode && claude --permission-mode acceptEdits --resume abc" ]; then
+  if [ "$cmd" = "cd /tmp/rw-smoke-mode && claudef --permission-mode acceptEdits --resume abc" ]; then
     ok "claude resume-cmd: --permission-mode replayed verbatim"
   else
     bad "claude resume-cmd: got '$cmd'"
@@ -330,7 +340,7 @@ echo
 echo "== manual step (not exercised by this script) =="
 echo "note: none of the above completes a real interactive resume -- authentication,"
 echo "      TTY rendering, and actually continuing a real conversation are unexercised."
-echo "      Run one real 'claude --resume', 'pi --session', or 'codex resume' by hand"
+echo "      Run one real 'claudef --resume', 'pif --session', or 'codex resume' by hand"
 echo "      against an installed transcript before trusting a live handoff end-to-end."
 echo
 echo "smoke-test: $PASS passed, $FAIL failed"

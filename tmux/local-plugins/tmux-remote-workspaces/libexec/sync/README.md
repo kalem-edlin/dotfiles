@@ -1,26 +1,36 @@
 # Workspace handoff sync
 
-Implements the transactional handoff described in
-`docs/tmux-remote-workspaces.md`. Moves dirty git state -- unpushed
-commits, staged changes, unstaged changes, tracked renames/deletions,
-untracked files, and referenced Git LFS content -- between two worktrees
-without any commit/push/pull ceremony, with a destination backup and a
-divergence check before ever overwriting a managed destination.
+Moves one directory root -- a git worktree or a plain folder -- between the
+focus machine and a worker, for `rw handoff` / `rw handback`
+(`docs/tasks/mini-remote-sessions.md`, Q4 and contracts C1/C2). Two
+channels:
+
+- **git channel** (git roots): unpushed commits, staged changes, unstaged
+  changes, tracked renames/deletions, untracked files and referenced Git LFS
+  content, without any commit/push/pull ceremony, with a destination backup
+  and a divergence check before a managed destination is overwritten.
+  Untracked files the owner no longer has are deleted on the other side.
+- **rsync channel**: everything the git channel ignores -- for a git root
+  exactly the gitignored set (`.env*`, `node_modules`, build output), for a
+  plain root the whole tree -- with delete semantics.
+
+Before either channel touches the destination, the **manifest gate**
+compares the destination copy with its stored manifest (owner wins; exit 5
+unless `--resolve`).
 
 ## Files
 
-- `handoff` -- the transfer core. A standalone executable with two
-  subcommands (`sync`, `fingerprint`); testable and usable on its own,
-  independent of tmux.
+- `handoff` -- the transfer core. A standalone executable with three
+  subcommands (`sync`, `fingerprint`, `manifest`); testable and usable on
+  its own, independent of tmux.
 - `common.sh` -- sourced-only helpers for the destination exec wrapper,
-  content fingerprints, and generation-state read/write. It extends
-  `../../scripts/common.sh`.
+  content fingerprints, manifests, the ignored-entry listing, rsync rules,
+  and generation-state read/write. It extends `../../scripts/common.sh`.
 
-`../../scripts/rw-handoff.sh` and `../../scripts/rw-return.sh` are the
-command-surface callers (`rw handoff` / `rw return`); they own tmux and pane
-concerns, worker preflight, and the agent-adapter contract. This directory owns
-none of that -- it is a pure two-worktree
-sync engine that happens to be driven by them.
+`../../scripts/rw-handoff.sh` and `../../scripts/rw-handback.sh` are the
+command-surface callers; they own the ownership records, tmux and pane
+concerns, worker preflight, and the agent-adapter contract. This directory
+owns none of that -- it is a pure two-copy sync engine driven by them.
 
 ## The exec wrapper: one code path for local-dir testing and real ssh
 
@@ -29,7 +39,7 @@ an "exec wrapper" -- an argv prefix (binary + fixed args) that the actual
 command is appended to:
 
 ```text
---dest-mode ssh    --dest-worker mini            -> ssh -o BatchMode=yes -o ConnectTimeout=N mini <cmd>
+--dest-mode ssh    --dest-worker <alias>         -> ssh -o BatchMode=yes -o ConnectTimeout=N <alias> <cmd>
 --dest-mode local                                 -> bash -c <cmd>              (same-host testing)
 --dest-mode custom --dest-exec-bin X --dest-exec-arg A -> X A <cmd>             (test doubles: throttling/dropping/etc.)
 ```
@@ -37,7 +47,7 @@ command is appended to:
 By default (push, used by `rw handoff`) `--source-path` is read directly --
 this process runs on the focus machine, where the source content already
 lives -- and `--dest-path` is reached over the wrapper (the worker). Pass
-`--pull` (used by `rw return`, which also always runs on the focus machine)
+`--pull` (used by `rw handback`, which also always runs on the focus machine)
 to invert that: `--source-path` is then reached over the wrapper and
 `--dest-path` is read/written directly. Internally this is four small
 functions (`exec_source`/`exec_source_script`/`exec_dest`/`exec_dest_script`)
@@ -49,6 +59,93 @@ backup, apply) is generated as a small script with paths pre-substituted via
 side, piped over stdin -- this sidesteps any ambiguity about what the far
 login shell is, and keeps quoting to one well-tested layer instead of
 nesting shell-in-shell escaping.
+
+rsync reaches the far side with `-e "<ssh> -o BatchMode=yes -o
+ConnectTimeout=N"` and `<alias>:<path>` in ssh mode (the path shell-escaped
+with `%q`, since openrsync has no `--protect-args`), and as a plain local
+path in local/custom mode.
+
+## Command line
+
+```text
+handoff sync --direction handoff|handback --source-path <path> --dest-path <path>
+     --dest-mode local|ssh|custom [--dest-worker <alias>]
+     [--dest-exec-bin <bin>] [--dest-exec-arg <arg>]... [--pull]
+     [--kind git|plain]                    default: git when the source is a worktree toplevel
+     [--dest-manifest <file>]              enables the manifest gate (file may be absent)
+     [--resolve overwrite|keep-both|abort]
+     [--manifest-out <dir>]                writes source.tsv and dest.tsv after success
+     [--endpoint <id> | --state-file <path>] [--token <name>]
+     [--backup-root <path>] [--staging-root <path>]
+     [--check-lfs] [--force-diverged]
+handoff fingerprint --path <path> --dest-mode ... [...]
+handoff manifest --path <path> [--kind git|plain] --dest-mode ... [...]
+```
+
+Exit codes: 0 ok, 2 diverged (nothing touched), 3 transfer verify failed
+(destination untouched), 4 post-apply verify failed or rsync channel failed
+(destination partially applied -- see backup; re-running converges), 5
+manifest conflict (stdout lists `conflict\t<relpath>\t<changed|added|deleted>`,
+nothing touched), 64 usage. On success stdout is one JSON object:
+`{ok, kind, generation, backup_dir, head_commit, branch, fingerprint,
+renamed[], overwritten, duration_ms}`.
+
+## Manifests and the manifest gate
+
+A manifest has one `<relpath>\t<size>\t<mtime-epoch>` row per file the
+rsync channel carries, byte-sorted (symlinks record mtime 0: rsync does not
+carry symlink times), and for git roots a final `#git\t<fingerprint>` row.
+`.DS_Store` files and keep-both copies are never listed. The caller stores
+the two manifests `--manifest-out` writes, one per side, at every ownership
+change.
+
+With `--dest-manifest`, before anything is touched the destination's current
+manifest is diffed against the stored one: every row that changed, appeared
+or vanished is a conflict. When the stored manifest does not exist (first
+handoff onto an existing directory), the baseline is the incoming source's
+manifest instead and only files that would be replaced or deleted conflict.
+Conflicts exit 5 unless `--resolve` says otherwise:
+
+- `overwrite` -- proceed; the owner's copy wins.
+- `keep-both` -- first rename each changed or added destination file to
+  `<file>.local-<YYYYMMDD-HHMMSS>` (listed in the result's `renamed`).
+  Keep-both copies are excluded from both channels' deletes, from manifests
+  and from the git fingerprint, so no later sync removes them or reports
+  them as changes; they stay on the side they were made on.
+- `abort` -- same as no flag.
+
+The stored manifest's `#git` row is also the baseline of the git divergence
+gate (below); without one, the endpoint/state-file generation record is used.
+
+## rsync channel
+
+Apple openrsync (protocol 29) on both machines. Flags:
+
+```text
+COPYFILE_DISABLE=1 rsync -rlptD --delete --exclude-from=<rules> [-e "<ssh> ..."] <src>/ <dst>/
+```
+
+`-rlptD` is `-a` without `-o`/`-g`: the two machines run different users,
+and ownership is the receiving user's. Rules (first match wins):
+
+```text
+- .DS_Store
+- *.local-[0-9]{8}-[0-9]{6}          (spelled as bracket classes)
+- /<each keep-both path renamed in this run>
+plain roots:  - /.git                 (everything else travels; nested repositories whole)
+git roots:    + /<ancestor>/ ...      for each collapsed ignored entry
+              + /<entry>/  + /<entry>/**   (directories)  or  + /<entry>  (files)
+              - *
+```
+
+The collapsed ignored entries are the `!!` rows of `git --no-optional-locks
+status --porcelain=v1 -z --ignored=matching --untracked-files=normal`, read
+from the source and from the destination after the git channel applied
+(the union, so an entry the owner no longer has is deleted on the other
+side). Excluded paths are never sent and never deleted, so tracked files,
+untracked files and `.git` are left to the git channel. Wildcard characters
+in paths are escaped. After the transfer the source and destination
+manifests must be identical (exit 4 otherwise: usually another writer).
 
 ## Wire format: what travels, in what order
 
@@ -76,7 +173,9 @@ destination and verifies the result:
      correctness does not depend on it (a plain delete+add reconstructs the
      same tree).
    - `untracked.tar` -- `tar` of `git ls-files --others --exclude-standard`
-     (non-ignored untracked files only).
+     (non-ignored untracked files only), plus `untracked.list` (their
+     names) and `protect.list` (this run's keep-both renames) for the
+     untracked-file deletion in the apply step.
    - `lfs-snapshot.tar` -- present only with `--check-lfs` on a repository
      that has Git LFS configured: `git lfs pull` first (best-effort, so
      changed content is materialized locally), then the whole
@@ -90,43 +189,41 @@ destination and verifies the result:
 
    `<state-dir>` resolution differs by side and is intentionally asymmetric:
    - **Local-machine default** (no `--backup-root`/`--staging-root` passed --
-     e.g. `rw return`'s pull direction, where the destination being backed
+     e.g. `rw handback`'s pull direction, where the destination being backed
      up/staged is this same focus machine): `common.sh`'s `rw_state_dir()`,
      i.e. `$TMUX_REMOTE_WORKSPACES_STATE_DIR` if set, else
      `$XDG_STATE_HOME/tmux-remote-workspaces`, else
      `$HOME/.local/state/tmux-remote-workspaces`.
-   - **Remote-worker default** (a caller writing to a genuinely remote
-     worker, e.g. `rw-handoff.sh`'s push direction, always passes both flags
-     itself): `common.sh`'s `rw_state_dir_at(<worker-home>)`, computed from
-     the worker's own queried `$HOME` (from `preflight.sh`), never this
-     process's local `$HOME`/`$XDG_STATE_HOME` -- those describe the local
-     machine and are meaningless for a path that must exist on the worker.
-     In real (non-test) use this is a **fixed** default: a genuine remote
-     ssh session never inherits this process's local environment, so
-     `$TMUX_REMOTE_WORKSPACES_STATE_DIR`/`$XDG_STATE_HOME` are never actually
-     set on that side. `rw_state_dir_at()` still *checks* those local env
-     vars (not the worker's) purely so a test harness running a fake worker
-     on the same machine (`RW_SSH_BIN` pointed at a same-host fake ssh, which
-     inherits this process's env) can redirect both sides into one isolated
-     sandbox with a single override variable.
+   - **Remote-worker default** (a caller writing to a remote worker, e.g.
+     `rw-handoff.sh`'s push direction, always passes both flags itself):
+     `common.sh`'s `rw_state_dir_at(<worker-home>)`, computed from the
+     worker's own queried `$HOME` (from `preflight.sh`), never this
+     process's local `$HOME`/`$XDG_STATE_HOME`. It honors only
+     `$TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR` (contract C4), which a
+     same-host fake-ssh harness sets so the worker side lands in its own
+     sandbox; `$TMUX_REMOTE_WORKSPACES_STATE_DIR` redirects the focus side
+     only.
 3. **Verify staging**: read back `staging/meta.json` over the wrapper and
    confirm its `head_commit` matches what was captured. A truncated/missing
    file here means the transfer was interrupted -- **exit 3**, live
    destination untouched, source untouched.
-4. **Divergence check**: skipped on a first-ever sync (no prior recorded
-   generation). Otherwise, compute the destination's current content
-   fingerprint (HEAD + hash of staged/unstaged/untracked state, see below)
-   and compare it to the fingerprint recorded after the last successful
-   sync through this endpoint/state-file. A mismatch means the destination
-   was modified independently of this tool since -- **exit 2**, both sides
-   left exactly as they were, no backup taken, no last-writer-wins.
-   `--force-diverged` explicitly overrides (a backup is still taken).
+4. **Divergence check** (runs before staging, together with the manifest
+   gate): compute the destination's current content fingerprint (HEAD +
+   hash of staged/unstaged/untracked state, see below) and compare it to
+   the baseline -- the `#git` row of `--dest-manifest`, else the
+   fingerprint recorded after the last sync through this
+   endpoint/state-file. Skipped when there is no baseline, and when the
+   destination fingerprints `EMPTY` (absent or not a repository: nothing
+   there can be lost). A mismatch means the destination was modified
+   independently since -- **exit 2**, both sides left exactly as they were,
+   no backup taken, no last-writer-wins. `--force-diverged` explicitly
+   overrides (a backup is still taken).
 5. **Backup**: only when the destination is already a git worktree. Runs
    entirely on the destination host (bundle + staged/unstaged patches +
    untracked tar of the destination's *own current* state, same format as
    the main snapshot) into
-   `$HOME/.local/state/tmux-remote-workspaces/handoff-backups/<token>/<generation>/`
-   -- the exact path the plan specifies. Recoverable with ordinary git
+   `<state-dir>/handoff-backups/<token>/<generation>-<timestamp>/` (`rw`
+   passes `--token root-<root_id>`). Recoverable with ordinary git
    commands (`git fetch bundle.git 'HEAD:refs/heads/x'`, `git apply
    *.patch`, `tar -x untracked.tar`) even without this tool.
 6. **Apply** (staging -> live destination): `git init` if the destination
@@ -137,12 +234,15 @@ destination and verifies the result:
    required here because the destination may have local modifications the
    overwrite is meant to discard (the backup above is what makes that
    safe); apply `staged.patch` with `--index` (not `--cached` -- see
-   Correctness notes) then `unstaged.patch` plain; extract `untracked.tar`.
+   Correctness notes) then `unstaged.patch` plain; extract `untracked.tar`;
+   delete destination untracked (non-ignored) files absent from the
+   source's list, except keep-both copies.
 7. **Verify**: recompute the destination's fingerprint and compare to the
    fingerprint captured from the source before anything was touched. A
    mismatch is reported as **exit 4** (destination was modified but is not
    verified correct; the pre-overwrite backup from step 5 is still there).
-8. **Record generation**: on success, write
+8. **rsync channel**, then the manifest check (see "rsync channel").
+9. **Record generation**: on success, write
    `{generation, fingerprint, direction, synced_at, head_commit, branch, backup_dir}`
    either onto the endpoint registry's `workspace.sync` (`--endpoint <id>`)
    or a plain JSON file (`--state-file <path>`) -- both are interchangeable
@@ -158,8 +258,8 @@ section.
 
 ## Content fingerprint
 
-`HEAD-commit:sha256(unstaged diff):sha256(staged diff):sha256(sorted
-untracked file list)`, computed by an identical generated script on
+`HEAD-commit:sha256(staged diff):sha256(unstaged diff):sha256(sorted
+newline-separated untracked file list, keep-both copies excluded)`, computed by an identical generated script on
 whichever side is asked (`rw_sync_fingerprint_via` + `exec_*_script`). An
 empty/non-repository path fingerprints as the literal string `EMPTY`. Two
 worktrees with this fingerprint equal have byte-identical HEAD, staged,
@@ -212,10 +312,18 @@ Correctness notes).
   it is not "provably inert" the way an interrupted transfer is. A real
   two-host smoke test should include killing the ssh connection during
   apply specifically, not just during transfer.
+- **The rsync channel is not staged.** It writes into the live destination
+  (per-file temp names, then rename). An interrupted run leaves some
+  ignored/plain files updated and some not; the ownership record has not
+  changed yet, so re-running the same command converges. Plain roots have
+  no backup: the manifest gate is what protects their destination.
+- **mtime is second-resolution.** Manifests compare size and whole-second
+  mtime; an edit that keeps both (same size, same second) is invisible.
+- **Paths containing a tab or newline** are not supported by manifests.
 - **Ownership boundary**: this directory does not create, close, or
-  reconcile tmux endpoints, does not implement provider adapters, and does
-  not decide when to stop a local/remote AI agent -- see
-  `../../scripts/rw-handoff.sh`, `../../scripts/rw-return.sh`, and
+  reconcile tmux endpoints or ownership records, does not implement provider
+  adapters, and does not decide when to stop a local/remote AI agent -- see
+  `../../scripts/rw-handoff.sh`, `../../scripts/rw-handback.sh`, and
   `../adapters/README.md`.
 
 ## Testing without a reachable worker or real ssh
@@ -231,7 +339,10 @@ Correctness notes).
 - `--dest-mode local` plus two plain local directories is enough to
   exercise the entire capture/backup/divergence/apply/verify pipeline with
   real git repositories and no tmux/ssh/registry involvement at all.
-- `--state-file <path>` decouples generation/divergence tracking from the
-  full tmux endpoint registry, so `sync` is fully testable standalone;
-  `rw-handoff.sh`/`rw-return.sh` pass `--endpoint <id>` instead for the
-  real integration.
+- `--state-file <path>` (or `--dest-manifest`) decouples divergence
+  tracking from any registry, so `sync` is fully testable standalone;
+  `rw-handoff.sh`/`rw-handback.sh` pass `--dest-manifest` from the ownership
+  record.
+- `../../tests/run.sh` exercises all of the above (round trips of a plain
+  folder and a linked worktree, conflicts, keep-both, divergence, the ssh
+  wrapper with rsync `-e`) with a fake same-host ssh and no tmux.

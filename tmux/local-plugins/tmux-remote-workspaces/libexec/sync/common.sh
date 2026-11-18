@@ -86,10 +86,7 @@ rw_sync_dest_exec_script() {
 # POSIX-safe single-quote escaping for embedding a value inside a command
 # STRING passed to rw_sync_dest_run (as opposed to rw_sync_dest_exec_script,
 # where paths are embedded via heredoc expansion instead).
-rw_sync_shquote() {
-  local s="$1"
-  printf "'%s'" "${s//\'/\'\\\'\'}"
-}
+rw_sync_shquote() { rw_shquote "$1"; }
 
 # ---------------------------------------------------------------------------
 # Content fingerprint: HEAD commit + hash of staged/unstaged/untracked state.
@@ -119,7 +116,10 @@ fi
 __rw_head="$(git -C "$__RW_FP_PATH" rev-parse HEAD)"
 __rw_staged="$(git -C "$__RW_FP_PATH" diff --binary --cached | rw_sync_hash)"
 __rw_unstaged="$(git -C "$__RW_FP_PATH" diff --binary | rw_sync_hash)"
-__rw_untracked="$(git -C "$__RW_FP_PATH" ls-files --others --exclude-standard -z | LC_ALL=C sort -z | rw_sync_hash)"
+# Keep-both copies (<file>.local-YYYYMMDD-HHMMSS, see the manifest gate in
+# ./handoff) are deliberately invisible to divergence tracking.
+__rw_untracked="$(git -C "$__RW_FP_PATH" ls-files --others --exclude-standard -z | tr '\0' '\n' |
+  grep -Ev '\.local-[0-9]{8}-[0-9]{6}$' | LC_ALL=C sort | rw_sync_hash)"
 printf '%s:%s:%s:%s\n' "$__rw_head" "$__rw_staged" "$__rw_unstaged" "$__rw_untracked"
 EOS
 }
@@ -203,4 +203,201 @@ rw_sync_gen_read_statefile() {
 rw_sync_gen_write_statefile() {
   local file="$1" sync_json="$2"
   rw_write_json_atomic "$file" "$sync_json"
+}
+
+# ---------------------------------------------------------------------------
+# rsync channel and manifests (docs/tasks/mini-remote-sessions.md, Q4/C1).
+#
+# The rsync channel carries everything the git channel ignores: for a `git`
+# root, exactly the gitignored set (`.env*`, node_modules, build output);
+# for a `plain` root, the whole tree. A manifest lists every file that
+# channel carries, one `<relpath>\t<size>\t<mtime-epoch>` row each (symlinks
+# record mtime 0, since rsync does not carry symlink times), sorted
+# byte-wise, plus a final `#git\t<fingerprint>` row for git roots (added by
+# the caller). `.DS_Store` files and keep-both copies
+# (`<file>.local-YYYYMMDD-HHMMSS`) are never listed.
+# ---------------------------------------------------------------------------
+
+# rw_sync_kind_probe <path> -- a shell command printing "git" when <path>
+# is a worktree toplevel, else "plain".
+rw_sync_kind_probe() {
+  local q
+  q="$(rw_sync_shquote "$1")"
+  printf '%s' "cd $q 2>/dev/null && git rev-parse --is-inside-work-tree >/dev/null 2>&1 && [ -z \"\$(git rev-parse --show-prefix 2>/dev/null)\" ] && echo git || echo plain"
+}
+
+# The collapsed gitignored entries of a worktree are the `!!` rows of
+# `git status --ignored=matching`: every path that itself matches an ignore
+# rule, directories collapsed and ending in "/". (`git ls-files -o -i
+# --directory` is NOT equivalent: it also lists untracked parent
+# directories that merely contain ignored paths, e.g. `pkgs/` for
+# `pkgs/app/node_modules/`.) --no-optional-locks keeps a frozen copy's
+# index untouched. Requires git >= 2.16.
+RW_SYNC_IGNORED_LIST_CMD='git --no-optional-locks status --porcelain=v1 -z --ignored=matching --untracked-files=normal 2>/dev/null | tr '"'"'\0'"'"' '"'"'\n'"'"' | sed -n '"'"'s/^!! //p'"'"''
+
+# Script body listing the collapsed gitignored entries of the worktree at
+# $__RW_I_PATH, one per line. Empty when the path does not exist or is not
+# a worktree.
+rw_sync_ignored_script_body() {
+  # shellcheck disable=SC2016 # expands in the generated script
+  printf 'cd "$__RW_I_PATH" 2>/dev/null || exit 0\n'
+  printf '%s\n' "$RW_SYNC_IGNORED_LIST_CMD"
+}
+
+rw_sync_write_ignored_script() {
+  {
+    printf '__RW_I_PATH=%q\n' "$1"
+    rw_sync_ignored_script_body
+  } >"$2"
+}
+
+# Script body printing the manifest rows of $__RW_M_PATH for kind
+# $__RW_M_KIND. Portable across BSD (macOS) and GNU stat; bash 3.2-safe.
+rw_sync_manifest_script_body() {
+  printf '__rw_m_ignored() { %s; }\n' "$RW_SYNC_IGNORED_LIST_CMD"
+  cat <<'EOS'
+cd "$__RW_M_PATH" 2>/dev/null || exit 0
+__rw_m_list() {
+  if [ "$__RW_M_KIND" = "git" ]; then
+    __rw_m_ignored | while IFS= read -r __rw_e; do
+        case "$__rw_e" in
+          '') : ;;
+          */) find "./${__rw_e%/}" \( -type f -o -type l \) -print0 2>/dev/null ;;
+          *) if [ -e "$__rw_e" ] || [ -L "$__rw_e" ]; then printf './%s\0' "$__rw_e"; fi ;;
+        esac
+      done
+  else
+    find . -path ./.git -prune -o \( -type f -o -type l \) -print0 2>/dev/null
+  fi
+}
+if stat --version >/dev/null 2>&1; then
+  __rw_m_stat() { xargs -0 stat --printf '%F\t%s\t%Y\t%n\n' 2>/dev/null; }
+else
+  __rw_m_stat() { xargs -0 stat -f '%HT%t%z%t%m%t%N' 2>/dev/null; }
+fi
+__rw_m_list | __rw_m_stat | awk -F '\t' '
+  {
+    t = tolower($1); s = $2; m = $3; p = $0
+    sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", p)
+    sub(/^\.\//, "", p)
+    n = p; sub(/.*\//, "", n)
+    if (n == ".DS_Store") next
+    if (p ~ /\.local-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]$/) next
+    if (t ~ /symbolic/) m = 0
+    printf "%s\t%s\t%s\n", p, s, m
+  }' | LC_ALL=C sort
+exit 0
+EOS
+}
+
+rw_sync_write_manifest_script() {
+  {
+    printf '__RW_M_PATH=%q\n' "$1"
+    printf '__RW_M_KIND=%q\n' "$2"
+    rw_sync_manifest_script_body
+  } >"$3"
+}
+
+# rw_sync_manifest_local <path> <kind> -- manifest of a path on this host.
+rw_sync_manifest_local() {
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rw-sync-manifest.XXXXXX")"
+  rw_sync_write_manifest_script "$1" "$2" "$tmp"
+  bash "$tmp"
+  rm -f "$tmp"
+}
+
+# rw_sync_manifest_via <exec-script-fn> <path> <kind>
+rw_sync_manifest_via() {
+  local exec_fn="$1" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rw-sync-manifest.XXXXXX")"
+  rw_sync_write_manifest_script "$2" "$3" "$tmp"
+  "$exec_fn" "$tmp"
+  rm -f "$tmp"
+}
+
+# rw_sync_ignored_via <exec-script-fn> <path>
+rw_sync_ignored_via() {
+  local exec_fn="$1" tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/rw-sync-ignored.XXXXXX")"
+  rw_sync_write_ignored_script "$2" "$tmp"
+  "$exec_fn" "$tmp"
+  rm -f "$tmp"
+}
+
+# rw_sync_manifest_git_fp <manifest-file> -- the `#git` fingerprint row.
+rw_sync_manifest_git_fp() {
+  [ -f "$1" ] || return 0
+  awk -F '\t' '$1 == "#git" { print $2; exit }' "$1"
+}
+
+# rw_sync_manifest_diff <stored> <current> [--no-deleted]
+# Prints `conflict\t<relpath>\t<changed|added|deleted>` for every file row
+# that differs between a stored manifest and a copy's current manifest,
+# sorted by path. `#` rows are ignored (the git fingerprint has its own
+# divergence gate). --no-deleted drops rows only in <stored>; used when the
+# baseline is the incoming source (a missing destination file is then
+# simply about to be created, never at risk).
+rw_sync_manifest_diff() {
+  local stored="$1" current="$2" deleted=1
+  [ "${3:-}" = "--no-deleted" ] && deleted=0
+  [ -f "$stored" ] || stored=/dev/null
+  [ -f "$current" ] || current=/dev/null
+  awk -F '\t' -v deleted="$deleted" '
+    FNR == NR { if ($1 ~ /^#/) next; s[$1] = $2 "\t" $3; next }
+    $1 ~ /^#/ { next }
+    {
+      seen[$1] = 1
+      if (!($1 in s)) printf "conflict\t%s\tadded\n", $1
+      else if (s[$1] != $2 "\t" $3) printf "conflict\t%s\tchanged\n", $1
+    }
+    END { if (deleted) for (k in s) if (!(k in seen)) printf "conflict\t%s\tdeleted\n", k }
+  ' "$stored" "$current" | LC_ALL=C sort -t "$(printf '\t')" -k2,2
+}
+
+# rw_sync_manifests_equal <a> <b> -- file rows identical (ignores # rows).
+rw_sync_manifests_equal() {
+  [ -z "$(rw_sync_manifest_diff "$1" "$2")" ]
+}
+
+# rw_sync_rsync_escape -- escape rsync wildcard characters in a path read
+# from stdin, so every rule below matches literally.
+rw_sync_rsync_escape() { sed 's/[][*?\\]/\\&/g'; }
+
+# rw_sync_write_rsync_rules <kind> <entries-file> <protect-file> <out>
+# Filter rules for the rsync channel, first match wins:
+#   - .DS_Store anywhere, keep-both copies anywhere, and every protected
+#     path are excluded: never sent, and never removed by --delete (a
+#     keep-both copy stays on the side it was made on until the user deals
+#     with it; a retried sync must not delete it);
+#   - plain: the root's own .git (if any) is excluded, everything else
+#     travels;
+#   - git: each collapsed ignored entry (the union of both sides' lists, so
+#     an entry that vanished on the owner is deleted on the other side) is
+#     included with its ancestor directories, and everything else -- the
+#     git channel's tracked and untracked files, .git itself -- is excluded
+#     and therefore also protected from --delete.
+rw_sync_write_rsync_rules() {
+  local kind="$1" entries="$2" protect="$3" out="$4"
+  {
+    printf -- '- .DS_Store\n'
+    printf -- '- *.local-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]\n'
+    if [ -s "$protect" ]; then
+      rw_sync_rsync_escape <"$protect" | awk 'NF { print "- /" $0 }'
+    fi
+    if [ "$kind" = "plain" ]; then
+      printf -- '- /.git\n'
+    else
+      if [ -s "$entries" ]; then
+        rw_sync_rsync_escape <"$entries" | awk '
+          NF {
+            e = $0; dir = (e ~ /\/$/); sub(/\/+$/, "", e)
+            n = split(e, part, "/"); pre = ""
+            for (i = 1; i < n; i++) { pre = pre part[i] "/"; print "+ /" pre }
+            if (dir) { print "+ /" e "/"; print "+ /" e "/**" } else print "+ /" e
+          }' | LC_ALL=C sort -u
+      fi
+      printf -- '- *\n'
+    fi
+  } >"$out"
 }

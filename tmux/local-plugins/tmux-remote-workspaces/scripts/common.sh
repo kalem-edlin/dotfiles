@@ -15,19 +15,16 @@ rw_state_dir() {
 }
 
 # rw_state_dir_at <home>
-# Same construction as rw_state_dir(), parameterized by an explicit $HOME --
-# used for a REMOTE worker's default state root (from preflight's queried
-# `.home`, not this process's own $HOME/$XDG_STATE_HOME, which describe the
-# LOCAL machine and are meaningless for a path that must exist on the
-# worker). Still honors TMUX_REMOTE_WORKSPACES_STATE_DIR so a test harness
-# running a fake worker on the SAME machine (RW_SSH_BIN pointed at a
-# same-host fake ssh) can redirect both sides into one isolated sandbox with
-# a single override env var; in real production use (no override set) this
-# is a fixed, non-configurable `$worker_home/.local/state/...` default,
-# since a real ssh session never inherits this process's local env.
+# The state root on a WORKER, from preflight's queried `.home` (never this
+# process's own $HOME/$XDG_STATE_HOME, which describe the focus machine).
+# TMUX_REMOTE_WORKSPACES_STATE_DIR is deliberately NOT consulted here: it
+# redirects the focus-side state dir only (contract C4). A same-host
+# fake-ssh harness sets TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR as well, so
+# both sides land in separate sandboxes; a real-worker smoke test sets only
+# the focus-side override.
 rw_state_dir_at() {
   local home="$1"
-  printf '%s\n' "${TMUX_REMOTE_WORKSPACES_STATE_DIR:-${XDG_STATE_HOME:-$home/.local/state}/tmux-remote-workspaces}"
+  printf '%s\n' "${TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR:-$home/.local/state/tmux-remote-workspaces}"
 }
 
 rw_machine_id_file() { printf '%s/machine-id\n' "$(rw_state_dir)"; }
@@ -58,6 +55,14 @@ rw_log() {
 }
 
 rw_warn() { printf 'rw: %s\n' "$1" >&2; }
+
+# POSIX single-quote escaping for embedding a value in a command string run
+# by a remote (or local) shell.
+rw_shquote() {
+  local s="$1" q="'\\''"
+  printf "'%s'" "${s//\'/$q}"
+}
+
 rw_die() {
   rw_warn "$1"
   exit "${2:-1}"
@@ -342,25 +347,47 @@ rw_close_endpoint_core() {
   return 0
 }
 
+# rw_hidden_session_options_cmd <session_name>
+# The tmux command string that turns <session_name> into a hidden endpoint
+# session: no prefix (the laptop's prefix stays the only one), no status
+# line, no mouse, and the session dies with its last client-visible window.
+# Shared by rw_create_remote_session (sent over ssh) and
+# rw_apply_hidden_session_options (run on the machine that hosts the
+# session, e.g. the worker-side post-restore).
+rw_hidden_session_options_cmd() {
+  local t
+  t="$(rw_shquote "${1:?session name required}")"
+  printf '%s' "tmux set-option -t $t prefix None &&
+    tmux set-option -t $t prefix2 None &&
+    tmux set-option -t $t detach-on-destroy on &&
+    tmux set-option -t $t mouse off &&
+    tmux set-option -t $t escape-time 10 &&
+    tmux set-option -t $t status off &&
+    tmux set-option -t $t set-titles on &&
+    tmux set-option -t $t set-titles-string '#{pane_current_path}'"
+}
+
+# rw_apply_hidden_session_options <session_name>
+# Re-applies the hidden endpoint options to a session on THIS machine's tmux
+# server (contract C6). tmux-resurrect does not save session options, so a
+# restored rw-* session comes back with a live prefix and status line until
+# this runs.
+rw_apply_hidden_session_options() {
+  bash -c "$(rw_hidden_session_options_cmd "${1:?session name required}")"
+}
+
 # rw_create_remote_session <worker> <session_name> <remote_path> <timeout>
-# Create the durable endpoint session on <worker> with the recommended
-# endpoint session config (docs/tmux-remote-workspaces.md, "Persistence and
+# Create the durable endpoint session on <worker> with the hidden endpoint
+# session options (docs/tmux-remote-workspaces.md, "Persistence and
 # reconciliation").
-# Shared by rw-ensure.sh (first establishment) and attach-loop.sh (case d:
+# Shared by rw-open.sh, rw-handoff.sh, and attach-loop.sh (case d:
 # rebuilding a session lost to worker infrastructure loss, "as if being
 # established again"). Exit status is the ssh command's own exit status.
 rw_create_remote_session() {
   local worker="$1" session_name="$2" remote_path="$3" timeout="$4"
   rw_ssh_batch "$worker" "$timeout" "
-    tmux new-session -d -s '$session_name' -c '$remote_path' &&
-    tmux set-option -t '$session_name' prefix None &&
-    tmux set-option -t '$session_name' prefix2 None &&
-    tmux set-option -t '$session_name' detach-on-destroy on &&
-    tmux set-option -t '$session_name' mouse off &&
-    tmux set-option -t '$session_name' escape-time 10 &&
-    tmux set-option -t '$session_name' status off &&
-    tmux set-option -t '$session_name' set-titles on &&
-    tmux set-option -t '$session_name' set-titles-string '#{pane_current_path}'
+    tmux new-session -d -s $(rw_shquote "$session_name") -c $(rw_shquote "$remote_path") &&
+    $(rw_hidden_session_options_cmd "$session_name")
   "
 }
 
@@ -386,16 +413,6 @@ rw_worker_known() {
   local alias="$1" found
   found="$(rw_worker_config "$alias")"
   [ -n "$found" ]
-}
-
-rw_workspace_root() {
-  local raw
-  # shellcheck disable=SC2088  # literal "~" is intentional; substituted for
-  # the relevant host's $HOME by callers (e.g. resolve-workspace.sh), never
-  # meant to expand here.
-  raw="$(rw_config_query '.workspace_root' '~/rw-workspaces/<focus-machine-id>')"
-  raw="${raw/<focus-machine-id>/$(rw_machine_id)}"
-  printf '%s\n' "$raw"
 }
 
 # ---------------------------------------------------------------------------
@@ -470,7 +487,7 @@ rw_ps_tree_matches() {
 # Same scoping as rw_ps_tree_matches, but prints the PIDs of the matching
 # processes (one per line) instead of a boolean -- for callers that must
 # signal exactly the provider's own processes and nothing else
-# (rw-handoff.sh Step 4). The pattern is tested against the command line
+# (rw-handoff.sh, stopping the local agent). The pattern is tested against the command line
 # alone (never the pid column), so anchored patterns like '(^|/)claude'
 # keep working.
 rw_ps_tree_match_pids() {
@@ -548,7 +565,7 @@ rw_wait_remote_provider_started() {
 }
 
 # rw_wait_local_provider_started <pane_id> <provider> [tries]
-# Local mirror of the above, used by rw-return.sh to verify a local resume
+# Local mirror of the above, used by rw-handback.sh to verify a local resume
 # actually started before stopping the remote agent.
 rw_wait_local_provider_started() {
   local pane_id="$1" provider="$2" tries="${3:-7}"
@@ -618,4 +635,268 @@ rw_git_remote_identity() {
 
 rw_git_toplevel() {
   git -C "$1" rev-parse --show-toplevel 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Directory roots and ownership records (docs/tasks/mini-remote-sessions.md,
+# contract C1). The unit of handoff is a directory root: the git toplevel of
+# a worktree, or a plain folder. Paths travel relative to $HOME (`root_rel`)
+# so the two machines never need the same user name.
+#
+#   owned/<root_id>/record.json         root_id, root_rel, root_local, kind,
+#                                       worker, worker_root, owner, since,
+#                                       endpoints[], pending?, stale_worker?,
+#                                       focus_machine_id
+#   owned/<root_id>/manifest.focus.tsv  rsync-channel manifest of the focus copy
+#   owned/<root_id>/manifest.worker.tsv rsync-channel manifest of the worker copy
+#   held/<worker>/<root_id>.json        index of worker copies this focus
+#                                       machine created (kept after hand-back,
+#                                       so `rw forget` knows where copies live)
+#
+# A focus record exists only while a root is worker-owned or has a pending
+# action. The worker keeps a mirror (same layout, root_local = the worker's
+# own path) under its own state dir; it survives hand-back with owner=focus
+# so the next handoff can check the worker copy against its manifest.
+# ---------------------------------------------------------------------------
+
+rw_owned_dir() { printf '%s/owned\n' "$(rw_state_dir)"; }
+rw_owned_record_dir() { printf '%s/%s\n' "$(rw_owned_dir)" "${1:?root id required}"; }
+rw_owned_record_file() { printf '%s/record.json\n' "$(rw_owned_record_dir "$1")"; }
+rw_held_dir() { printf '%s/held\n' "$(rw_state_dir)"; }
+rw_held_file() { printf '%s/%s/%s.json\n' "$(rw_held_dir)" "${1:?worker required}" "${2:?root id required}"; }
+
+# rw_physical_path <path>
+# Physical absolute path of an existing directory (symlinks resolved, the
+# form tmux reports as pane_current_path); a non-directory is printed as
+# given, minus any trailing slash.
+rw_physical_path() {
+  local p="${1:?path required}"
+  if [ -d "$p" ]; then
+    (cd -P "$p" 2>/dev/null && pwd -P) && return 0
+  fi
+  [ "$p" = "/" ] || p="${p%/}"
+  printf '%s\n' "$p"
+}
+
+# rw_root_rel <abs-path> [home]
+# Prints <abs-path> relative to <home> (default: this machine's $HOME).
+# Exit 7 when the path is $HOME itself or lies outside it -- such roots are
+# refused (contract C1). Never prints a leading "/" or "~".
+rw_root_rel() {
+  local path home rel
+  path="$(rw_physical_path "${1:?path required}")"
+  home="$(rw_physical_path "${2:-$HOME}")"
+  case "$path" in
+    "$home"/?*) rel="${path#"$home"/}" ;;
+    *) return 7 ;;
+  esac
+  case "/$rel/" in
+    */../* | */./*) return 7 ;;
+  esac
+  printf '%s\n' "$rel"
+}
+
+# rw_root_id <root_rel> -- first cksum field; identical on every machine.
+rw_root_id() {
+  printf '%s' "${1:?root_rel required}" | cksum | awk '{print $1}'
+}
+
+# rw_root_kind <abs-path> -- "git" when the path is a git worktree's
+# toplevel, "inside-git" when it is a subdirectory of one, else "plain".
+rw_root_kind() {
+  local path="$1" top
+  top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -z "$top" ]; then
+    printf 'plain\n'
+  elif [ "$(rw_physical_path "$top")" = "$(rw_physical_path "$path")" ]; then
+    printf 'git\n'
+  else
+    printf 'inside-git\n'
+  fi
+}
+
+# rw_default_root_for_path <abs-path>
+# The root a pane at <abs-path> belongs to when no --root is given: the
+# worker-owned root enclosing it if there is one, else its git toplevel,
+# else the directory itself.
+rw_default_root_for_path() {
+  local path id top
+  path="$(rw_physical_path "${1:?path required}")"
+  if id="$(rw_owned_root_for_path "$path")"; then
+    jq -r '.root_local' "$(rw_owned_record_file "$id")"
+    return 0
+  fi
+  top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$top" ]; then
+    rw_physical_path "$top"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+rw_owned_record_read() {
+  local file
+  file="$(rw_owned_record_file "${1:?root id required}")"
+  [ -f "$file" ] || return 1
+  cat "$file"
+}
+
+rw_owned_record_write() {
+  local root_id="${1:?root id required}" json="${2:?json required}"
+  rw_ensure_private_dir "$(rw_owned_dir)"
+  rw_write_json_atomic "$(rw_owned_record_file "$root_id")" "$json"
+}
+
+# rw_owned_record_remove <root_id> -- deletes the whole record directory.
+rw_owned_record_remove() {
+  local dir
+  dir="$(rw_owned_record_dir "${1:?root id required}")"
+  [ -d "$dir" ] || return 0
+  rm -f "$dir"/record.json "$dir"/manifest.focus.tsv "$dir"/manifest.worker.tsv
+  rm -f "$dir"/.record.json.* 2>/dev/null
+  rmdir "$dir" 2>/dev/null || true
+}
+
+# rw_owned_records_json -- every record as one JSON array (one jq process).
+rw_owned_records_json() {
+  local dir
+  dir="$(rw_owned_dir)"
+  if [ -d "$dir" ] && compgen -G "$dir/*/record.json" >/dev/null; then
+    jq -s 'sort_by(.root_rel)' "$dir"/*/record.json 2>/dev/null || printf '[]\n'
+  else
+    printf '[]\n'
+  fi
+}
+
+# rw_owned_root_for_path <abs-path>
+# Prints the root_id of the worker-owned record whose root_local is <path>
+# or an ancestor of it (longest match wins); exit 1 when there is none.
+rw_owned_root_for_path() {
+  local path id
+  path="$(rw_physical_path "${1:?path required}")"
+  id="$(rw_owned_records_json | jq -r --arg p "$path" '
+    [ .[] | select(.owner == "worker")
+      | select(.root_local as $r | $p == $r or ($p | startswith($r + "/"))) ]
+    | sort_by(.root_local | length) | last | .root_id // empty' 2>/dev/null)"
+  [ -n "$id" ] || return 1
+  printf '%s\n' "$id"
+}
+
+# rw_owned_overlap <abs-root>
+# Prints the root_local of a worker-owned record that encloses <abs-root> or
+# lies inside it (roots never nest across an ownership boundary); exit 1
+# when there is none.
+rw_owned_overlap() {
+  local path hit
+  path="$(rw_physical_path "${1:?path required}")"
+  hit="$(rw_owned_records_json | jq -r --arg p "$path" '
+    [ .[] | select(.owner == "worker") | .root_local
+      | select(. as $r | $p == $r or ($p | startswith($r + "/")) or ($r | startswith($p + "/"))) ]
+    | first // empty' 2>/dev/null)"
+  [ -n "$hit" ] || return 1
+  printf '%s\n' "$hit"
+}
+
+# rw_record_new <root_id> <root_rel> <root_local> <kind> <worker> <worker_root>
+# Prints a fresh record object (owner focus, no endpoints).
+rw_record_new() {
+  jq -nc \
+    --arg root_id "$1" --arg root_rel "$2" --arg root_local "$3" --arg kind "$4" \
+    --arg worker "$5" --arg worker_root "$6" --arg since "$(rw_now_iso)" \
+    --arg focus_machine_id "$(rw_machine_id)" \
+    '{root_id: $root_id, root_rel: $root_rel, root_local: $root_local, kind: $kind,
+      worker: $worker, worker_root: $worker_root, owner: "focus", since: $since,
+      endpoints: [], focus_machine_id: $focus_machine_id}'
+}
+
+# rw_record_add_endpoint <root_id> <endpoint_id> / rw_record_remove_endpoint
+rw_record_add_endpoint() {
+  local json
+  json="$(rw_owned_record_read "$1")" || return 1
+  json="$(printf '%s' "$json" | jq -c --arg e "$2" '.endpoints = ((.endpoints // []) + [$e] | unique)')"
+  rw_owned_record_write "$1" "$json"
+}
+
+rw_record_remove_endpoint() {
+  local json
+  json="$(rw_owned_record_read "$1")" || return 0
+  json="$(printf '%s' "$json" | jq -c --arg e "$2" '.endpoints = ((.endpoints // []) - [$e])')"
+  rw_owned_record_write "$1" "$json"
+}
+
+# rw_held_mark <worker> <root_id> <root_rel> <worker_root>
+rw_held_mark() {
+  rw_write_json_atomic "$(rw_held_file "$1" "$2")" "$(jq -nc \
+    --arg worker "$1" --arg root_id "$2" --arg root_rel "$3" --arg worker_root "$4" \
+    --arg since "$(rw_now_iso)" \
+    '{worker: $worker, root_id: $root_id, root_rel: $root_rel, worker_root: $worker_root, since: $since}')"
+}
+
+rw_held_unmark() { rm -f "$(rw_held_file "$1" "$2")"; }
+
+# rw_held_workers <root_id> -- workers known to hold a copy of the root.
+rw_held_workers() {
+  local dir f
+  dir="$(rw_held_dir)"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*/"$1".json; do
+    [ -f "$f" ] || continue
+    basename "$(dirname "$f")"
+  done
+}
+
+# rw_worker_mirror_dir <worker_home> <root_id>
+rw_worker_mirror_dir() {
+  printf '%s/owned/%s\n' "$(rw_state_dir_at "${1:?worker home required}")" "${2:?root id required}"
+}
+
+# rw_worker_mirror_push <worker> <worker_home> <root_id> <local-dir>
+# Writes record.json and manifest.*.tsv from <local-dir> into the worker's
+# mirror record dir, over the ssh exec wrapper. Atomic per file (tar into a
+# temp dir, then rename).
+rw_worker_mirror_push() {
+  local worker="$1" worker_home="$2" root_id="$3" src="$4" dest q
+  dest="$(rw_worker_mirror_dir "$worker_home" "$root_id")"
+  q="$(rw_shquote "$dest")"
+  tar -C "$src" -cf - . 2>/dev/null | rw_ssh_batch "$worker" "$(rw_ssh_connect_timeout)" "
+    set -e
+    mkdir -p $q
+    chmod 0700 $q 2>/dev/null || true
+    tmp=\$(mktemp -d $q/.incoming.XXXXXX)
+    tar -xf - -C \"\$tmp\"
+    for f in \"\$tmp\"/*; do [ -e \"\$f\" ] && mv -f \"\$f\" $q/; done
+    rmdir \"\$tmp\"
+  " >/dev/null 2>&1
+}
+
+# rw_worker_mirror_fetch <worker> <worker_home> <root_id> <file> <out>
+# Copies one file from the worker's mirror dir to <out>; an absent file
+# leaves <out> absent. Returns 6 when the worker cannot be reached.
+rw_worker_mirror_fetch() {
+  local worker="$1" worker_home="$2" root_id="$3" name="$4" out="$5" path status=0
+  path="$(rw_worker_mirror_dir "$worker_home" "$root_id")/$name"
+  rm -f "$out"
+  rw_ssh_batch "$worker" "$(rw_ssh_connect_timeout)" \
+    "if [ -f $(rw_shquote "$path") ]; then printf 'present\n'; cat $(rw_shquote "$path"); else printf 'absent\n'; fi" \
+    </dev/null >"$out.raw" 2>/dev/null || status=$?
+  if [ "$status" -ne 0 ]; then
+    rm -f "$out.raw"
+    return 6
+  fi
+  if [ "$(head -n1 "$out.raw")" = "present" ]; then
+    tail -n +2 "$out.raw" >"$out"
+  fi
+  rm -f "$out.raw"
+  return 0
+}
+
+# rw_preflight_exit <preflight-json>
+# Maps a failed preflight to the rw exit code: 6 when the worker could not
+# be reached at all, 1 when it was reached but is missing something.
+rw_preflight_exit() {
+  if [ "$(printf '%s' "$1" | jq -r '.ssh_reachable // false' 2>/dev/null)" = "true" ]; then
+    printf '1\n'
+  else
+    printf '6\n'
+  fi
 }

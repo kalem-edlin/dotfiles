@@ -146,6 +146,11 @@ cmd_versions() {
     exit 3
   fi
 
+  # Resumes go through the focus launcher (decision D13); refuse before
+  # anything moves when the worker cannot resolve it.
+  ca_worker_has_launcher "$worker" claudef ||
+    ca_die "'claudef' does not resolve on worker '$worker' (resumes run through it). Run 'make setup-headless' there, then retry." 1
+
   jq -nc --arg local "$local_version" --arg worker "$worker_version" --arg policy "$policy" \
     '{local: $local, worker: $worker, policy: $policy}'
 }
@@ -319,24 +324,34 @@ cmd_resume_cmd() {
   ca_require "$dest_path" "--dest-path"
   ca_require "$session_id" "--session-id"
 
-  local launch="claude"
+  # claudef, never bare claude (decision D13): the focus launcher carries the
+  # profile, plugins, hooks (agent-state publisher, resurrect session
+  # record) and --dangerously-skip-permissions itself, so a resumed session
+  # behaves exactly like one started by hand. The command is typed into the
+  # endpoint pane's interactive login shell, where claudef resolves whether
+  # it is the ~/.local/bin script or the zsh function delegating to it.
+  # claudef always passes --dangerously-skip-permissions; drop a captured
+  # copy so the flag is not given twice.
+  local launch="claudef" tok kept=""
   if [ -n "$mode_flags" ]; then
     ca_validate_mode_flags "$mode_flags" ||
       ca_die "resume-cmd: --mode-flags contains unsafe tokens: $mode_flags" 1
-    launch="claude $mode_flags"
+    for tok in $mode_flags; do
+      [ "$tok" = "--dangerously-skip-permissions" ] && continue
+      kept="$kept $tok"
+    done
+    [ -n "$kept" ] && launch="claudef${kept}"
   fi
 
-  # Deliberately NO root workaround here (no IS_SANDBOX, no sandbox-mode
-  # rewriting): claude refuses --dangerously-skip-permissions under
-  # root/sudo, and the sanctioned fix is running workers as a non-root
-  # user (docs/headless-workers.md requires it). On a root destination the
-  # replayed command fails with claude's own explicit error, rw-handoff's
-  # never-stop-local-before-remote-resume invariant leaves the local
-  # session untouched, and the refusal surfaces in the picker popup.
-
-  # Claude resolves the session by cwd-derived project slug, so the resume
-  # command must be run from dest-path. $launch is spliced unquoted on
-  # purpose: mode flags are individually validated tokens, not one word.
+  # No root workaround: claude refuses --dangerously-skip-permissions under
+  # root, and the sanctioned fix is a non-root worker user
+  # (docs/headless-workers.md); the refusal surfaces before the local agent
+  # is ever stopped.
+  #
+  # Claude resolves the session by the cwd-derived project slug, so the
+  # resume runs from dest-path (the destination's PHYSICAL path, which is
+  # also what install slugged). $launch is spliced unquoted on purpose: mode
+  # flags are individually validated tokens, not one word.
   if [ "$fork" -eq 1 ]; then
     printf 'cd %q && %s --resume %q --fork-session\n' "$dest_path" "$launch" "$session_id"
   else

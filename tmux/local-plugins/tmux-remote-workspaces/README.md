@@ -1,11 +1,16 @@
 # tmux-remote-workspaces
 
 Personal local plugin that lets the laptop tmux server stay the single
-visible coordination layer while selectively elevating one pane to a
-persistent remote tmux endpoint on an always-on worker (`ssh mini`, Linux
-VMs). Local-first: remote is opt-in per pane, never the default. Worker names
-are logical identities: OpenSSH may route `mini` over its LAN listener or
-Tailscale without the plugin treating those paths as different workers.
+visible coordination layer while handing whole directories -- a git
+worktree or a plain folder, and every pane working in it -- to an always-on
+worker (an ssh alias for an always-on Mac, or a Linux VM). Local-first:
+remote is opt-in per directory, never the default. Worker names are logical
+identities: OpenSSH may route an alias over a LAN listener or Tailscale
+without the plugin treating those paths as different workers.
+
+The model ("the unit is a directory, and whoever holds the directory owns
+it"), its decisions and the binding contracts live in
+[`docs/tasks/mini-remote-sessions.md`](../../../docs/tasks/mini-remote-sessions.md).
 
 The maintained system design and decision record live in
 [`docs/tmux-remote-workspaces.md`](../../../docs/tmux-remote-workspaces.md).
@@ -23,18 +28,40 @@ itself.
 One dispatcher, `scripts/rw`:
 
 ```text
-rw ensure --worker <alias> [--workspace <path>|auto]
-rw close  [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
-rw status
+rw handoff --worker <alias> [--root <path>] [--pane <pane-id>] [--check-lfs]
+           [--force-diverged] [--resolve overwrite|keep-both|abort]
+rw handback [--root <path>] [--pane <pane-id>] [--check-lfs]
+            [--force-diverged] [--resolve overwrite|keep-both|abort]
+rw open    [--worker <alias>] [--root <path>] [--pane <pane-id>]
+rw forget  <root> [--worker <alias>]
+rw reclaim --force <root>
+rw status  [--json]
+rw close   [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
 rw doctor
-rw handoff --worker <alias> [--workspace <path>|auto] [--pane <pane-id>] [--keep-local] [--check-lfs]
-rw return  [--pane <pane-id>] [--keep-remote] [--check-lfs]
 ```
 
-There is no separate `attach`/`reconnect` verb. `rw ensure` is idempotent: run
-against a pane with no endpoint it establishes one; run against a pane that
-already has a live `@rw-endpoint`, it revalidates and reattaches instead of
-creating a second endpoint.
+- `handoff` moves a root to a worker: by default the pane's git toplevel,
+  or the pane's directory when it is not in a repository. Every pane on the
+  laptop server whose cwd is the root or inside it (any depth, any session)
+  moves with it; the rest of a mixed session stays local.
+- `handback` brings the root and all of its panes (and their agents) back.
+  It replaces `rw return`.
+- `open` is a new remote pane in a root that is already remote (splits and
+  the picker use it). No sync. Idempotent: on a pane that already has a
+  live endpoint it reattaches instead. It replaces `rw ensure`.
+- `forget` is for a root that is gone (deleted worktree or session): it
+  closes the root's remote panes and deletes every remote copy this machine
+  handed off. An unreachable worker is cleaned up on next contact.
+- `reclaim --force` takes a remote root back from the frozen local copy
+  when its worker is unreachable; remote work since the handoff stays on
+  the (now stale) remote copy.
+- `status` lists roots (owner, worker, panes, pending) and endpoints; it
+  never touches ssh. `--json` prints the ownership records as one array.
+
+Exit codes: 0 ok, 1 failure, 2 git history diverged, 3 agent CLI version
+gate, 5 files changed on the copy about to be overwritten (stdout:
+`conflict<TAB><relpath><TAB>changed|added|deleted`), 6 worker unreachable,
+7 root invalid or not in the required state, 64 usage.
 
 `rw` is linked onto `$PATH` by `make install`/`make install-headless`
 (`~/.local/bin/rw` -> this repo's `scripts/rw`), so `rw <command>` works
@@ -54,8 +81,8 @@ directly after setup. It can still be invoked by full path,
   2026-08-05 rw-dispatch forwarding layer this replaced cost ~150ms per
   forwarded key and produced two operator-facing incidents; it is gone.)
 - `prefix \` / `prefix /`: unchanged local splits, *unless* the source pane
-  is remote-backed, in which case the new pane inherits the same
-  worker+workspace and becomes its own pane-scoped endpoint via `rw ensure`.
+  is remote-backed, in which case the new pane opens in the same remote
+  root as its own endpoint via `rw open`.
 - `prefix &`: now closes any remote endpoints owned by panes in the window
   before killing it (`rw-close-window.sh`), behind the same confirmation
   prompt tmux ships by default.
@@ -94,20 +121,32 @@ setup and does not open a local sidebar that could be mistaken for the remote
 filesystem; `rw doctor` reports these optional-per-endpoint prerequisites per
 worker.
 
-## How a pane becomes remote
+## How a directory becomes remote
 
 ```text
-rw ensure --worker mini
-  -> preflight mini over ssh (tmux, git, git-lfs; consume-never-provision)
-  -> resolve workspace placement (worktree-specific checkout | plain $HOME)
-  -> create/validate rw-<focus-short-id>-<endpoint-id> on mini's own tmux server
-  -> write endpoints/<endpoint-id>.json (source of truth)
-  -> set endpoint-intent cache: @rw-endpoint @rw-worker @rw-workspace
-  -> exec attach-loop.sh <endpoint-id>   (this pane's foreground process from here on)
-  -> attach-loop sets execution cache: @remote-host @workspace-resurrect-skip
+rw handoff --worker <alias>
+  -> resolve the root (git toplevel or plain directory; must be under ~)
+  -> preflight the worker (tmux, git, rsync, physical $HOME; consume-never-provision)
+  -> per pane in the root: detect a supported agent, check its CLI version
+     (one exit-3 block aborts everything before any pane is touched)
+  -> ONE sync of the root to <worker home>/<path relative to ~>
+       git channel (git roots): bundle, staged/unstaged patches, untracked tar
+       rsync channel: the gitignored set (git roots) or the whole tree (plain)
+       divergence gate (exit 2) and manifest gate (exit 5 unless --resolve)
+  -> owned/<root_id>/record.json: owner = worker; mirror written on the worker
+  -> per pane: hidden worker session rw-<focus-short-id>-<endpoint-id> in the
+     pane's mapped directory; agent export/install/resume there (claudef/pif);
+     the local agent stops only after the remote one verifiably started;
+     endpoints/<endpoint-id>.json; pane options; the pane is replaced by
+     attach-loop.sh <endpoint-id> (same pane id, layout, window)
 ```
 
-`attach-loop.sh` runs `ssh -t mini tmux new-session -A -s <endpoint>` in a
+While the root is remote the worker copy is the single source of truth. The
+laptop copy stays on disk, frozen (a linked worktree's registration lives in
+its main checkout, the picker needs the path, and hand-back is then a delta).
+An edit made to the frozen copy is caught by the manifest gate at hand-back.
+
+`attach-loop.sh` runs `ssh -t <alias> tmux new-session -A -s <endpoint>` in a
 capped exponential backoff loop (1s -> 2s -> 4s ... capped at 30s, reset on a
 connection that stays up). Before each retry it checks for a tombstone or a
 missing registry entry -- that is an *intentional* close, so the loop exits
@@ -117,42 +156,109 @@ it resets local mouse-tracking state and redraws, working around the known
 "unclean inner-session end leaves the outer pane with garbled mouse state"
 terminal artifact.
 
-For the Mini specifically, always pass `mini` to `rw`. The SSH package makes
-that alias location-aware: it prefers the Mini's `.local` LAN hostname when the
-verified LAN listener is reachable and otherwise uses the Tailscale address. The
-explicit `mini-lan` alias is diagnostic/maintenance-only and must not be added
-to `config.json` as another worker.
+Each laptop pane attaches to its own hidden worker session (`prefix None`,
+`status off`; `rw_apply_hidden_session_options` in `common.sh` re-applies
+them after a worker-side restore). There is no nested tmux UI.
+
+Always pass the worker's logical alias to `rw`. For the always-on Mac the SSH
+package makes that alias location-aware (LAN listener when reachable,
+otherwise Tailscale); the explicit LAN-only alias is diagnostic/maintenance
+only and must not be added to `config.json` as another worker.
+
+## Paths and placement
+
+Every synced path is relative to `$HOME`: a root at `~/<root_rel>` on the
+laptop lives at `<worker home>/<root_rel>` on the worker, where the worker
+home is preflight's physical `$HOME` (`pwd -P` on the worker).
+Roots outside `~`, and `~` itself, are refused (exit 7); so is a directory
+inside a git worktree (hand off the worktree). `root_id` is the first field
+of `printf '%s' "$root_rel" | cksum`, identical on both machines. Nothing is
+ever written under `~/rw-workspaces` any more, and `config.json` has no
+`workspace_root`. `scripts/resolve-workspace.sh` is the pure (no ssh) form
+of this mapping.
+
+Agents resume at the worker's physical path: Claude's project slug and the
+transcript `cwd` fields, and pi's session header `cwd`, are rewritten to it.
+
+## Sync, manifests and conflicts
+
+`libexec/sync/handoff` (see `libexec/sync/README.md`) moves a root over two
+channels and records a manifest -- `<relpath>\t<size>\t<mtime>` for every
+file the rsync channel carries, plus `#git\t<fingerprint>` for git roots --
+on both sides at every ownership change.
+
+Owner wins. Before a copy is overwritten (the worker copy at handoff, the
+frozen laptop copy at hand-back) it is compared with its stored manifest:
+unchanged is silent; a change exits 5 with one `conflict` line per file and
+nothing touched. `--resolve overwrite` overwrites, `--resolve keep-both`
+first renames each losing file to `<file>.local-<YYYYMMDD-HHMMSS>`,
+`--resolve abort` (or no flag) stops. Keep-both copies are never deleted by
+any later sync and never count as changes. A copy with no stored manifest
+(first handoff onto an existing remote directory) is compared with the
+incoming source instead, so only files that would really be replaced or
+deleted are listed. Changes to committed, staged, unstaged or untracked git
+state are the git channel's divergence gate (exit 2, `--force-diverged`
+overrides after a backup).
 
 ## Registry (state root: `~/.local/state/tmux-remote-workspaces/`)
 
 ```text
-machine-id            single-line UUID, lazily created (uuidgen)
-sessions.jsonl         stable session UUID <-> tmux session name, latest line wins
-endpoints/<id>.json    source of truth for a live endpoint (deleted on close)
-tombstones/<id>.json   close-intent record, written BEFORE the endpoint dies
-events.jsonl           append-only observability log (create/attach/reconnect/close)
-locks/                 short-lived mkdir-mutexes for check-then-act sequences
-rw.log                 free-text diagnostic log
+machine-id                       single-line UUID, lazily created (uuidgen)
+sessions.jsonl                   stable session UUID <-> tmux session name, latest line wins
+owned/<root_id>/record.json      ownership record (see below)
+owned/<root_id>/manifest.focus.tsv   manifest of the laptop copy at the last ownership change
+owned/<root_id>/manifest.worker.tsv  manifest of the worker copy at the last ownership change
+held/<worker>/<root_id>.json     worker copies this machine created (survives hand-back;
+                                 `rw forget` uses it to find every copy)
+endpoints/<id>.json              source of truth for a live endpoint (deleted on close)
+tombstones/<id>.json             close-intent record, written BEFORE the endpoint dies
+events.jsonl                     append-only observability log
+locks/                           short-lived mkdir-mutexes for check-then-act sequences
+rw.log                           free-text diagnostic log
 ```
 
-`@session-uuid`, `@rw-endpoint`, `@rw-worker`, `@rw-workspace`, `@remote-host`
-are tmux user options and are **cache only** -- they do not survive a server
-restart. The jsonl/json files under the state root are authoritative.
-`@remote-host` specifically means the local pane is currently owned by an
-attach loop; it is not inferred merely from endpoint intent. Host/directory
-chips and remote-aware bindings use that execution marker, and config reload
-repairs it from the live pane process tree. This prevents a failed or racing
-handoff from labeling a still-local agent as remote.
-`renumber-windows on` (`tmux/tmux.conf:13`) means nothing is ever keyed on
-`session:window.index`.
+`record.json` fields: `root_id`, `root_rel`, `root_local` (absolute path on
+the machine that holds the record), `kind` (`git`|`plain`), `worker`,
+`worker_root`, `owner` (`focus`|`worker`), `since`, `endpoints` (endpoint
+ids), `focus_machine_id`, and optionally `pending` (`{action:
+"forget"|"reconcile", reason, at}`) and `stale_worker: true`. A laptop record
+exists only while the root is worker-owned or has a pending action;
+`scripts/common.sh`'s `rw_owned_root_for_path <path>` returns the
+worker-owned root enclosing a path (longest match). The worker keeps a
+mirror with the same layout under its own state dir (`root_local` = the
+worker path); it survives hand-back with `owner: focus` so the next handoff
+can check the worker copy, and is deleted by `rw forget`.
 
-Override the state root or config path for testing:
+Endpoint records keep their previous shape plus `root_id`, `root_rel`,
+`focus_session_uuid`, `focus_session_name`, `focus_window_index`,
+`focus_pane_index`, and `workspace.{root_local,worker_root}`; agent
+endpoints also record `agent.project_path_focus` and
+`agent.project_path_worker`.
+
+`@session-uuid`, `@rw-endpoint`, `@rw-worker`, `@rw-workspace`,
+`@rw-root-id`, `@remote-host` are tmux user options and are **cache only** --
+they do not survive a server restart. The json files under the state root are
+authoritative. `@remote-host` specifically means the local pane is currently
+owned by an attach loop; it is not inferred merely from endpoint intent.
+Host/directory chips and remote-aware bindings use that execution marker, and
+config reload repairs it from the live pane process tree.
+`renumber-windows on` (`tmux/tmux.conf:13`) means nothing is ever keyed on
+`session:window.index` alone.
+
+Overrides for testing (contract C4):
 
 ```sh
-TMUX_REMOTE_WORKSPACES_STATE_DIR=/tmp/rw-test-state \
+TMUX_REMOTE_WORKSPACES_STATE_DIR=/tmp/rw-focus-state \
+TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR=/tmp/rw-worker-state \
 TMUX_REMOTE_WORKSPACES_CONFIG=/path/to/alt-config.json \
+RW_SSH_BIN=/path/to/fake-ssh \
   ~/.config/tmux/local-plugins/tmux-remote-workspaces/scripts/rw status
 ```
+
+`TMUX_REMOTE_WORKSPACES_STATE_DIR` redirects only the laptop's state dir;
+`TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR` redirects the worker-side one
+(default `<worker home>/.local/state/tmux-remote-workspaces`). A same-host
+fake-ssh harness sets both; a real-worker smoke test sets only the first.
 
 ## config.json
 
@@ -162,44 +268,27 @@ TMUX_REMOTE_WORKSPACES_CONFIG=/path/to/alt-config.json \
     { "alias": "mini", "platform": "darwin", "notes": "..." },
     { "alias": "agents-roll", "platform": "linux", "notes": "..." }
   ],
-  "workspace_root": "~/rw-workspaces/<focus-machine-id>",
   "ssh": { "connect_timeout_seconds": 8, "preflight_timeout_seconds": 10, "status_timeout_seconds": 3 }
 }
 ```
 
-`workspace_root` is namespaced by the focus machine's stable id. Automatic Git
-workspace placement adds the normalized repository identity, the local
-worktree's directory name, and a checksum of its canonical path. Two physical
-worktrees for the same repository therefore get separate remote checkouts.
-Branch names and numbered-directory conventions do not affect placement.
-
-Workspace resolution order (`--workspace auto`, the default):
-
-1. Not a git repo (no `origin` remote) -> `plain`, worker's `$HOME`.
-2. A live `adhoc` endpoint already exists for the same canonical local
-   worktree on the same worker -> reuse its path.
-3. Otherwise -> use that worktree's stable `adhoc` checkout under
-   `workspace_root`, cloned with the *worker's own* git/ssh auth when absent.
-   A clone failure aborts with a message about registering the worker's key
-   with the Git host. This plugin never supplies or forwards credentials.
-
-`--workspace <path>` (anything other than `auto`) is used verbatim as the
-remote path (`~` substituted for the worker's home); no automatic placement
-runs.
+Only workers and ssh timeouts. Placement needs no configuration (see
+"Paths and placement").
 
 ## `rw status` / `rw doctor`
 
-`rw status` prints one row per `endpoints/*.json`: worker, mode, remote path,
-the live pane currently bound to it (re-resolved via `tmux list-panes`, not
-trusted from the registry), a short-timeout liveness check, and the last
-matching `events.jsonl` line.
+`rw status` prints one row per ownership record (root, owner, worker, pane
+count, pending action, stale remote copy), then one row per
+`endpoints/*.json`: worker, remote directory, the live pane currently bound
+to it (re-resolved via `tmux list-panes`, not trusted from the registry),
+and the last matching `events.jsonl` line. It never uses ssh.
 
 `rw doctor` is read-only: local prerequisites (jq/ssh/uuid source/config
 validity/state-dir writability), a consume-never-provision preflight report
-per configured worker, registry/live-pane consistency (orphans are reported,
-never touched),
-and clipboard/`allow-passthrough` checks on both the local and (where
-reachable) worker tmux layers. It never writes into another pane or TUI.
+per configured worker, registry/live-pane consistency (unbound endpoints are
+reported, never touched), and clipboard/`allow-passthrough` checks on both
+the local and (where reachable) worker tmux layers. It never writes into
+another pane or TUI.
 
 ## Manual durability save
 
@@ -215,76 +304,81 @@ dotfiles clone having pulled the same revision first.
 
 ## Testing without a reachable worker
 
+`tests/run.sh` runs the shell suite (`tests/test_*.sh`): path mapping and
+`root_id`, ownership records and `rw_owned_root_for_path`, worker mirrors,
+manifest generation and diff, the conflict gate (exit 5, keep-both,
+overwrite), rsync-channel set selection, sync round trips of a plain folder
+and a linked worktree (push, remote edits, pull; deletions on both
+channels; divergence exit 2; the ssh exec wrapper with rsync `-e`), and the
+`rw` command surface end to end (handoff, open, handback, conflicts,
+unreachable worker, reclaim, forget). It needs no tmux server and no ssh:
+`tests/lib.sh` puts a logging `tmux` stub and a same-host fake `ssh` (a
+separate fake worker `$HOME`) first on `PATH`, and isolates both state dirs
+and git's config.
+
 - `scripts/preflight.sh --worker <alias>` fails fast, with no ssh attempt,
   when `<alias>` is not declared in `config.json`.
 - Every script that shells out to `ssh` goes through `rw_ssh_bin`
-  (`common.sh`), which honors `RW_SSH_BIN` -- point it at a fake executable
-  to exercise the reachable/unreachable/missing-binaries paths without
-  touching a real worker.
+  (`common.sh`), which honors `RW_SSH_BIN`; rsync reaches the worker with
+  `-e "$RW_SSH_BIN -o BatchMode=yes ..."`.
 - `scripts/resolve-workspace.sh` takes the worker's `$HOME` as an explicit
-  argument (not resolved via ssh itself), so ad hoc/plain resolution logic is
-  fully testable offline.
-- Use a private tmux socket (`tmux -L <name>`) for any test that needs a real
-  tmux server -- never exercise pane/session/hook behavior against a live
-  server you also use interactively.
+  argument, so placement is testable offline.
+- Anything that needs a real tmux server uses a throwaway one
+  (`TMUX_TMPDIR=<scratch>`, `-L rw-<name>` on every call, `TMUX` unset,
+  killed when done) -- never a live server you also use interactively.
 
 ## Restore opt-out integration (implemented in the sibling plugin)
 
 The attach loop sets `@workspace-resurrect-skip` while it owns a managed pane,
 so a `tmux-workspace-resurrect` restore skips pasting a stale command such as
-an old `ssh mini` into it. `rw-refresh-indicators.sh` repairs that execution
+an old `ssh <alias>` into it. `rw-refresh-indicators.sh` repairs that execution
 marker from the live process tree after a config reload. The sibling plugin's
 `scripts/restore.sh` reads the marker and skips the pane accordingly.
 
-## `rw handoff` / `rw return`
+## Agents
 
-Implemented: transactional workspace handoff/return (`libexec/sync/handoff`
--- see `libexec/sync/README.md` for the full wire format, exit codes, and
-correctness notes). Agent handoff (detect/versions/export/install/resume-cmd) is
-wired against the adapter contract in `libexec/adapters/README.md` and all
-three provider adapters (`pi`, `claude`, `codex`) are implemented there --
-see `libexec/adapters/README.md` for per-provider details and its
-`smoke-test` dev tool. A pane with no detected agent (or a genuinely missing
-adapter file) degrades cleanly to workspace-only.
+Agent handoff (detect/versions/export/install/resume-cmd) is wired against
+the adapter contract in `libexec/adapters/README.md`; all three provider
+adapters (`pi`, `claude`, `codex`) are implemented there. Resumes go through
+the focus launchers -- `claudef --resume <id>` and `pif --session <path>`,
+typed into the endpoint pane's interactive login shell so the launcher
+resolves whether it is a script on `PATH` or a zsh function, and fnm's node
+is active -- so hooks (agent-state publisher, resurrect session record) run
+on the worker exactly as on the laptop. `versions` refuses (before anything
+moves) when the worker cannot resolve the launcher. A pane with no detected
+agent is a workspace-only pane; a busy pane no adapter recognizes aborts
+the whole handoff.
 
 ## Reconciliation
 
-`libexec/reconcile` (post-resurrection reconciliation: desired-set
-computation against tombstones/registry, closing this-focus-machine-owned
-orphans, reattach/rebuild of desired-but-missing endpoints) is implemented
-and wired onto the same `@resurrect-hook-post-restore-all` chain this
-plugin's `tmux-remote-workspaces.tmux` already appends to (after
-`rw-post-restore.sh`). `rw doctor` also runs it with `--dry-run` for a
-report-only preview.
+Rule (decision D14): a worker session is killed only by an explicit
+hand-back, `rw forget`, or `rw close`. No sweep ever closes a registered
+endpoint because its pane was not found.
 
-Two ensure-time companions complete the sweep triangle (each covers a
-class the others deliberately spare):
-
-- `libexec/reconcile-worker` — worker-side zombies: `rw-<focus-id>-*`
-  sessions a worker's own continuum restore resurrected after their
-  laptop endpoints were closed. Registry membership is authoritative
-  (registered = spared); min-age vs the ensure create-to-registry gap,
-  worker-clock ages, attached sessions never touched, unreachable =
-  zero candidates, exact-match kills.
-- `libexec/reconcile-local` — local-pane-death orphans: registry
-  endpoints whose LOCAL pane was killed without `prefix q` (attach-loop
-  dies with the pane, so nothing self-cleans). Closes only on proof the
-  binding belongs to the CURRENT local server generation (created after
-  server start, or restore-reattached after it per events.jsonl) — the
-  ambiguous-post-restore class `reconcile` protects is never eligible.
-  Min-age guards the ensure registry-write-to-pane-stamp gap.
-
-Both run best-effort at every `rw ensure`; `rw doctor` previews both
-dry-run.
+- `libexec/reconcile` (post-resurrection, on the
+  `@resurrect-hook-post-restore-all` chain after `rw-post-restore.sh`)
+  closes only worker sessions in this machine's namespace that have no
+  registry entry at all, and finishes tombstoned closes. `rw doctor` runs it
+  with `--dry-run`.
+- `libexec/reconcile-worker` (run by `rw open`) closes unregistered
+  `rw-<focus-id>-*` sessions a worker's own restore revived: registry
+  membership is authoritative, min-age vs the create-to-registry gap,
+  worker-clock ages, attached sessions never touched, unreachable = zero
+  candidates, exact-match kills.
+- `libexec/reconcile-local` is report-only: it lists registered endpoints
+  no live local pane carries (logged to `rw.log`, never closed).
+- Pending actions (`rw forget` or `rw reclaim --force` while a worker was
+  unreachable) run on the next contact with that worker: any `handoff`,
+  `handback`, `open` or `forget` that reaches it.
 
 ## Field-validation status
 
 The operator smoke campaign closed on 2026-08-08 with every bucket passing.
 Its deleted journey file remains available in git history through commit
-`be0ae44`. Smoke-verified end to end on the live laptop server: ensure /
-splits / close semantics, drop-reattach, remote Treemux (tree-as-endpoint
-v2), ad-hoc handoff/return, agent handoff with verbatim
-access-mode replay (claude + codex),
+`be0ae44`. Smoke-verified end to end on the live laptop server (before the 2026-11-18
+directory model): ensure / splits / close semantics, drop-reattach, remote
+Treemux (tree-as-endpoint v2), ad-hoc handoff/return, agent handoff with
+verbatim access-mode replay (claude + codex),
 OSC 52 clipboard from remote (shell + nvim yank), server-side copy-mode
 entry, laptop server-loss restore, worker-reboot endpoint rebuild from
 manifest, picker failure dialogs.
@@ -293,22 +387,22 @@ Pure network loss and laptop sleep rely on the same bounded attach-loop retry
 used by the verified worker-reboot path. These are accepted operating
 conditions, not missing implementation.
 
-`reconcile-local` has synthetic coverage for its created-after-start path and
-both protective guards. Ambiguous post-restore state remains report-only by
-design.
+The directory model (handoff/handback/open/forget/reclaim, manifests, the
+rsync channel) is covered by `tests/run.sh` and a throwaway-server drill;
+its live smoke test against a real worker is the plan's W6 step.
 
 ## Operational notes (learned in the field)
 
 - After a laptop tmux server loss, restore via `tmux-restore` (on PATH;
   tmux/scripts/tmux_restore.sh) from outside tmux — it refuses when
   there is no snapshot and leaves no bootstrap session behind.
-- Endpoints do NOT survive a laptop server loss: restored attach-loop
-  panes come back as plain shells, so reconcile closes the endpoints
-  cleanly (no zombies). Re-open with `prefix e`. This is the accepted restore
-  behavior.
-- Don't hand off a worktree while another local agent/editor is actively
-  writing in it — the sync verify will (correctly) refuse; the picker
-  dialog names this case. Pause the writer, retry.
+- After a laptop server loss, registered endpoints stay registered and
+  their worker sessions keep running (D14); reattaching restored panes by
+  endpoint id is the plan's W4 step. Until then, `rw open` in the root
+  starts a fresh remote pane, and `rw status` lists the unbound endpoints.
+- Don't hand off a root while a writer that is not one of its panes (a dev
+  server, a build, an agent in another root) is changing it -- the sync
+  verify will (correctly) refuse; pause the writer, retry.
 - Worker-side continuum restore revives CLOSED rw-* sessions from stale
   saves (live-endpoint durability is the point; closed ones are noise).
   Laptop-side `libexec/reconcile` protects pre-restart registry entries
