@@ -665,8 +665,23 @@ codexf() {
     instructions="$(<"$prompt_file")"$'\n'
   fi
 
+  # Focus settings live here, not in Codex's own config.toml, because Codex
+  # rewrites that file and it differs per host. -c wins over config.toml,
+  # so every host gets the same model, effort, look and notices.
+  local -a settings=(
+    -c 'model="gpt-5.6-sol"'
+    -c 'model_reasoning_effort="medium"'
+    -c 'personality="pragmatic"'
+    -c 'notice.hide_full_access_warning=true'
+    -c 'notice.model_migrations={"gpt-5.3-codex"="gpt-5.4","gpt-5.6-sol"="gpt-6-sol"}'
+    -c 'tui.theme="catppuccin-mocha"'
+    -c 'tui.status_line=["model-with-reasoning","git-branch","run-state","context-used"]'
+    -c 'tui.terminal_title=["project"]'
+  )
+
   if [[ -n "$instructions" ]]; then
     instructions_toml="$(printf '%s' "$instructions" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')" || return
+    settings+=(-c "developer_instructions=$instructions_toml")
   fi
 
   # Same root .env as pif and claudef, exported to codex only.
@@ -676,12 +691,6 @@ codexf() {
       . "$DOTFILES/.env"
       set +a
     fi
-    if [[ -n "$instructions_toml" ]]; then
-      exec codex \
-        --dangerously-bypass-approvals-and-sandbox \
-        -c "developer_instructions=$instructions_toml" \
-        "$@"
-    fi
-    exec codex --dangerously-bypass-approvals-and-sandbox "$@"
+    exec codex --dangerously-bypass-approvals-and-sandbox "${settings[@]}" "$@"
   )
 }

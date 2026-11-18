@@ -11,6 +11,18 @@ from pathlib import Path
 TEST_DIR = Path(__file__).resolve().parent
 REPO = TEST_DIR.parents[3]
 
+# The focus settings codexf passes on every launch, so all hosts match.
+SETTINGS = [
+    "-c", 'model="gpt-5.6-sol"',
+    "-c", 'model_reasoning_effort="medium"',
+    "-c", 'personality="pragmatic"',
+    "-c", "notice.hide_full_access_warning=true",
+    "-c", 'notice.model_migrations={"gpt-5.3-codex"="gpt-5.4","gpt-5.6-sol"="gpt-6-sol"}',
+    "-c", 'tui.theme="catppuccin-mocha"',
+    "-c", 'tui.status_line=["model-with-reasoning","git-branch","run-state","context-used"]',
+    "-c", 'tui.terminal_title=["project"]',
+]
+
 
 class CodexfWrapperTests(unittest.TestCase):
     def test_forwards_explicit_arguments_with_and_without_instructions(self):
@@ -36,12 +48,13 @@ class CodexfWrapperTests(unittest.TestCase):
                             env=env, text=True,
                         ).splitlines()
                         self.assertEqual(output[0], "--dangerously-bypass-approvals-and-sandbox")
-                        offset = 1
+                        self.assertEqual(output[1:1 + len(SETTINGS)], SETTINGS)
+                        offset = 1 + len(SETTINGS)
                         if instructions:
-                            self.assertEqual(output[1], "-c")
-                            self.assertEqual(output[2], "developer_instructions=" +
+                            self.assertEqual(output[offset], "-c")
+                            self.assertEqual(output[offset + 1], "developer_instructions=" +
                                              json.dumps(prompt.read_text()))
-                            offset = 3
+                            offset += 2
                         self.assertEqual(output[offset:], args)
 
 

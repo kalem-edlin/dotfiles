@@ -13,6 +13,19 @@
     "defaultMode": "bypassPermissions"
   },
   "model": "claude-fable-5-1[1m]",
+  "modelSettings": {
+    "claude-fable-5-1": {
+      "autoCompactWindow": 400000
+    },
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    },
+    "claude-sonnet-5-5": {
+      "effortLevel": "high"
+    }
+  },
+  "switchModelsOnFlag": true,
+  "feedbackDrafts": "off",
   "hooks": {
     "SessionStart": [
       {
