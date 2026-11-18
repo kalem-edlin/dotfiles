@@ -50,10 +50,10 @@ func fmtMem(kb int64) string {
 // stateAt is when the pane's state began: @agent_state_at, else @agent_at.
 func stateAt(p *state.Pane) int64 { return p.StateSince() }
 
-// paneState normalises a live agent's state; an unknown value counts as
-// idle, as in v1.
+// paneState normalises a live agent's state, remote ones included (R1); an
+// unknown value counts as idle, as in v1.
 func paneState(p *state.Pane) state.State {
-	if p.Remote || p.State == state.StateNone {
+	if p.State == state.StateNone {
 		return state.StateNone
 	}
 	if _, ok := stateBg[p.State]; !ok {

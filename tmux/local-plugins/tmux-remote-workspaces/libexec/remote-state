@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+# Remote agent state mirror (follow-up R1, contract CX1/CX2 in
+# docs/tasks/mini-remote-sessions.md, "Changes recorded by B2").
+#
+# The agent in a remote pane publishes its @agent_* options into the WORKER's
+# tmux server (scripts/agent-state, pif's agent-state.ts, run by claudef/pif
+# there exactly as on the laptop). This side channel copies them onto the
+# laptop pane that attaches that endpoint, so the picker and anything else
+# reading @agent_* on the laptop sees a remote agent like a local one.
+#
+#   remote-state watch <endpoint_id> <pane_id>
+#       The side channel. Started in the background by attach-loop.sh just
+#       before each attach, killed (SIGTERM) by it before the next attempt
+#       and on every exit. One long-lived ssh per endpoint (multiplexed on
+#       the alias's ControlMaster) runs a worker-side loop that polls the
+#       endpoint pane every RW_STATE_POLL_SECONDS (default 2) with one local
+#       `tmux display-message` and prints a line only when it changed (plus a
+#       heartbeat, so a dead connection ends the worker loop). Never one ssh
+#       per poll. When the stream ends on its own (ssh lost), the pane's
+#       @agent_state becomes `disconnected` and the channel retries with a
+#       capped backoff while the attach loop lives.
+#   remote-state clear <pane_id>
+#       Unsets every mirrored option (the pane became local again).
+#   remote-state watch-cmd <session_name>
+#       Prints the worker-side loop (inspection and tests).
+#
+# Mirrored onto the laptop pane: @agent_kind @agent_state @agent_state_at
+# @agent_at @agent_name @agent_subs @agent_empty @agent_cwd (the worker path
+# mapped back under the laptop root). @agent_pid is NOT mirrored: a worker
+# pid means nothing on the laptop (the picker would test it against local
+# processes); the worker loop checks the pid's liveness itself and reports a
+# dead agent as no agent, and the mirror unsets any stale local @agent_pid.
+#
+# Request (CX2): the worker pane's @rw-request travels in the same line. On
+# `handback` the channel clears it on the worker (one ssh over the
+# ControlMaster) and, only once that succeeded, runs `rw bg handback --pane
+# <laptop pane>` detached through `tmux run-shell -b`.
+
+set -uo pipefail
+
+RW_STATE_LIBEXEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../scripts/common.sh
+source "$RW_STATE_LIBEXEC_DIR/../scripts/common.sh"
+
+# U+241E, the picker's own separator: tmux rewrites control characters
+# (TAB included) in command output, so fields need a printable separator
+# nobody types.
+RW_STATE_SEP=$'\xe2\x90\x9e'
+
+# The value @agent_state takes while the laptop cannot see the worker. The
+# picker renders it as its own state (a grey "disconnected" chip), never as
+# a stale `working`.
+RW_STATE_DISCONNECTED="disconnected"
+
+# Every option the mirror owns on the laptop pane.
+RW_STATE_MIRRORED="@agent_kind @agent_state @agent_state_at @agent_at @agent_name @agent_subs @agent_empty @agent_cwd"
+
+# The laptop-side visibility test the publishers use to tell Done from Idle
+# (scripts/agent-state, agent-state.ts). The worker cannot use it: its hidden
+# session is attached and single-pane, so it always reads visible there.
+RW_STATE_VISIBLE='#{&&:#{pane_active},#{&&:#{window_active},#{session_attached}}}'
+
+rw_state_poll_seconds() { printf '%s\n' "${RW_STATE_POLL_SECONDS:-2}"; }
+# Polls between heartbeat lines (an unchanged line re-sent). ~30 s at 2 s.
+rw_state_heartbeat_polls() { printf '%s\n' "${RW_STATE_HEARTBEAT_POLLS:-15}"; }
+
+# rw_state_watch_cmd <session_name>
+# The worker-side loop, POSIX sh (it runs in the worker's login shell, like
+# every other rw remote command). Line format, one per change:
+#   <alive>|<kind>SEP<state>SEP<state_at>SEP<at>SEP<subs>SEP<empty>SEP<request>SEP<cwd>SEP<name>
+# <alive> is 1 (pid alive), 0 (pid dead: the agent died without clearing its
+# options) or - (no pid published). `gone` means the session or the worker's
+# tmux server is not there. The name is last so a separator in it survives.
+rw_state_watch_cmd() {
+  local session="${1:?session name required}" s="$RW_STATE_SEP" fmt
+  fmt="#{@agent_pid}|#{@agent_kind}$s#{@agent_state}$s#{@agent_state_at}$s#{@agent_at}$s#{@agent_subs}$s#{@agent_empty}$s#{@rw-request}$s#{@agent_cwd}$s#{@agent_name}"
+  # shellcheck disable=SC2016 # expanded by the worker's shell
+  printf '%s' "unset TMUX TMUX_PANE
+t=$(rw_shquote "=$session:")
+f=$(rw_shquote "$fmt")
+p='' n=0
+while :; do
+  l=\$(tmux display-message -p -t \"\$t\" \"\$f\" 2>/dev/null) || l=gone
+  [ -n \"\$l\" ] || l=gone
+  if [ \"\$l\" != gone ]; then
+    pid=\${l%%|*}
+    case \"\$pid\" in
+      '' | *[!0-9]*) a=- ;;
+      *) if kill -0 \"\$pid\" 2>/dev/null; then a=1; else a=0; fi ;;
+    esac
+    l=\"\$a|\${l#*|}\"
+  fi
+  if [ \"\$l\" != \"\$p\" ] || [ \"\$n\" -ge $(rw_state_heartbeat_polls) ]; then
+    printf '%s\n' \"\$l\" || exit 0
+    p=\$l n=0
+  else
+    n=\$((n + 1))
+  fi
+  sleep $(rw_state_poll_seconds)
+done"
+}
+
+# rw_state_split <line> -- sets RW_F to the line's fields (alive first).
+rw_state_split() {
+  local line="$1" rest
+  RW_F=("${line%%|*}")
+  rest="${line#*|}"
+  # Nine fields after <alive>: the last (name) keeps any separator in it.
+  local i=0
+  while [ "$i" -lt 8 ]; do
+    case "$rest" in
+      *"$RW_STATE_SEP"*)
+        RW_F+=("${rest%%"$RW_STATE_SEP"*}")
+        rest="${rest#*"$RW_STATE_SEP"}"
+        ;;
+      *)
+        RW_F+=("$rest")
+        rest=""
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  RW_F+=("$rest")
+}
+
+# rw_state_map_cwd <worker_cwd> <worker_root> <root_local> <root_rel>
+# The worker path back on the laptop: under the root it maps to the laptop
+# root, elsewhere under the worker home to the laptop home; anything else
+# prints nothing (an absolute worker path would mislead the picker).
+rw_state_map_cwd() {
+  local cwd="$1" worker_root="${2%/}" root_local="${3%/}" root_rel="$4" worker_home
+  [ -n "$cwd" ] || return 0
+  if [ -n "$worker_root" ] && [ -n "$root_local" ]; then
+    case "$cwd" in
+      "$worker_root") printf '%s\n' "$root_local"; return 0 ;;
+      "$worker_root"/*) printf '%s\n' "$root_local${cwd#"$worker_root"}"; return 0 ;;
+    esac
+    if [ -n "$root_rel" ]; then
+      worker_home="${worker_root%"/$root_rel"}"
+      if [ "$worker_home" != "$worker_root" ]; then
+        case "$cwd" in
+          "$worker_home") printf '%s\n' "$HOME"; return 0 ;;
+          "$worker_home"/*) printf '%s\n' "$HOME${cwd#"$worker_home"}"; return 0 ;;
+        esac
+      fi
+    fi
+  fi
+  return 0
+}
+
+# rw_state_owns_pane <pane_id> <endpoint_id> -- the pane still attaches this
+# endpoint. A hand-back releases the pane (respawn, @rw-endpoint cleared) and
+# then resumes the agent locally in it: no mirror write may land after that.
+rw_state_owns_pane() {
+  [ "$(rw_pane_get "$1" @rw-endpoint)" = "$2" ]
+}
+
+# rw_state_clear <pane_id> -- unset every mirrored option and any stale
+# local @agent_pid, in one tmux call.
+rw_state_clear() {
+  local pane_id="$1" opt cmd=()
+  for opt in $RW_STATE_MIRRORED @agent_pid; do
+    [ "${#cmd[@]}" -eq 0 ] || cmd+=(";")
+    cmd+=(set-option -pqu -t "$pane_id" "$opt")
+  done
+  tmux "${cmd[@]}" 2>/dev/null || true
+}
+
+# rw_state_mark_disconnected <pane_id> -- the worker is out of sight: an
+# agent pane shows `disconnected` (its age counted from now), a pane with no
+# mirrored agent stays as it is.
+rw_state_mark_disconnected() {
+  local pane_id="$1"
+  [ -n "$(rw_pane_get "$pane_id" @agent_kind)" ] || return 0
+  [ "$(rw_pane_get "$pane_id" @agent_state)" = "$RW_STATE_DISCONNECTED" ] && return 0
+  tmux set-option -pq -t "$pane_id" @agent_state_at "$(date +%s)" \; \
+    set-option -pq -t "$pane_id" @agent_state "$RW_STATE_DISCONNECTED" 2>/dev/null || true
+}
+
+# rw_state_handle_request <request> <worker> <session_name> <pane_id>
+# CX2. Clear the worker pane's @rw-request first (one ssh over the
+# ControlMaster; pane and session scope, whichever `rw request` used), then
+# start the hand-back detached from this channel and the attach loop, which
+# the hand-back itself replaces. Nothing runs when the clear failed: the
+# request stays on the worker and is seen again on the next connection.
+rw_state_handle_request() {
+  local request="$1" worker="$2" session_name="$3" pane_id="$4" t rw cmd
+  case "$request" in
+    handback) ;;
+    *) return 0 ;;
+  esac
+  t="$(rw_shquote "=$session_name:")"
+  if ! rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+    "tmux set-option -pqu -t $t @rw-request; tmux set-option -qu -t $t @rw-request" </dev/null >/dev/null 2>&1; then
+    rw_log "remote-state: could not clear @rw-request on $worker ($session_name); hand-back not started"
+    return 1
+  fi
+  rw="$RW_PLUGIN_DIR/scripts/rw"
+  if [ -x "$RW_PLUGIN_DIR/libexec/rw-bg" ]; then # what `rw bg` execs
+    printf -v cmd '%q bg handback --pane %q' "$rw" "$pane_id"
+  else
+    # No `rw bg` in this tree: the blocking form, detached all the same.
+    printf -v cmd '%q handback --pane %q --wait-idle 600' "$rw" "$pane_id"
+  fi
+  rw_log_event "request-handback" "$(rw_pane_get "$pane_id" @rw-endpoint)" "$worker" "" "started" "pane=$pane_id"
+  tmux run-shell -b "$cmd >/dev/null 2>&1 || true" 2>/dev/null || true
+}
+
+# rw_state_apply_stream <endpoint_id> <pane_id> <worker> <session_name>
+#   <worker_root> <root_local> <root_rel>
+# Reads the worker loop's lines on stdin and mirrors each change onto the
+# laptop pane, one tmux call per change. State and its stamp are written
+# only when the worker's (state, state_at) pair changes, so a laptop-side
+# transition (the focus hook's Done to Idle) is not undone by an unrelated
+# field change.
+rw_state_apply_stream() {
+  local endpoint_id="$1" pane_id="$2" worker="$3" session_name="$4"
+  local worker_root="$5" root_local="$6" root_rel="$7"
+  local line prev="" prev_state="" prev_state_at="" prev_request="" agent=0
+  local alive kind st st_at at subs empty request cwd name
+  while IFS= read -r line; do
+    [ "$line" = "$prev" ] && continue # heartbeat
+    prev="$line"
+    rw_state_owns_pane "$pane_id" "$endpoint_id" || return 0
+    if [ "$line" = gone ]; then
+      rw_state_mark_disconnected "$pane_id"
+      prev_state="" prev_state_at=""
+      continue
+    fi
+    rw_state_split "$line"
+    alive="${RW_F[0]}" kind="${RW_F[1]}" st="${RW_F[2]}" st_at="${RW_F[3]}" at="${RW_F[4]}"
+    subs="${RW_F[5]}" empty="${RW_F[6]}" request="${RW_F[7]}" cwd="${RW_F[8]}" name="${RW_F[9]}"
+
+    if [ "$request" != "$prev_request" ]; then
+      prev_request="$request"
+      [ -n "$request" ] && rw_state_handle_request "$request" "$worker" "$session_name" "$pane_id"
+    fi
+
+    if [ -z "$kind" ] || [ "$alive" = 0 ]; then
+      # No agent (never started, ended, or died without clearing). Also
+      # drops whatever the local agent left behind before the handoff.
+      rw_state_clear "$pane_id"
+      agent=0 prev_state="" prev_state_at=""
+      continue
+    fi
+
+    RW_CMD=()
+    # The first mirrored line drops a stale local @agent_pid (the agent
+    # stopped here at handoff): the picker would test it and hide the agent.
+    [ "$agent" = 1 ] || rw_state_add set-option -pqu -t "$pane_id" @agent_pid
+    rw_state_opt "$pane_id" @agent_kind "$kind"
+    rw_state_opt "$pane_id" @agent_at "$at"
+    rw_state_opt "$pane_id" @agent_name "$name"
+    rw_state_opt "$pane_id" @agent_subs "$subs"
+    rw_state_opt "$pane_id" @agent_empty "$empty"
+    rw_state_opt "$pane_id" @agent_cwd "$(rw_state_map_cwd "$cwd" "$worker_root" "$root_local" "$root_rel")"
+    if [ "$st" != "$prev_state" ] || [ "$st_at" != "$prev_state_at" ]; then
+      rw_state_opt "$pane_id" @agent_state_at "$st_at"
+      if [ "$st" = idle ] && [ "$prev_state" = working ]; then
+        # A turn ended. Locally the publisher decides Done or Idle by
+        # whether the pane is in view; decide it here, on the laptop pane.
+        rw_state_add if-shell -F -t "$pane_id" "$RW_STATE_VISIBLE" \
+          "set-option -pq -t $pane_id @agent_state idle" \
+          "set-option -pq -t $pane_id @agent_state finished"
+      else
+        rw_state_opt "$pane_id" @agent_state "$st"
+      fi
+    fi
+    tmux "${RW_CMD[@]}" 2>/dev/null || true
+    agent=1 prev_state="$st" prev_state_at="$st_at"
+  done
+}
+
+# One tmux invocation per change: commands collected in RW_CMD, joined by ";".
+rw_state_add() {
+  [ "${#RW_CMD[@]}" -eq 0 ] || RW_CMD+=(";")
+  RW_CMD+=("$@")
+}
+
+# rw_state_opt <pane_id> <option> <value> -- set, or unset when empty.
+rw_state_opt() {
+  if [ -n "$3" ]; then
+    rw_state_add set-option -pq -t "$1" "$2" "$3"
+  else
+    rw_state_add set-option -pqu -t "$1" "$2"
+  fi
+}
+
+# rw_state_watch <endpoint_id> <pane_id>
+rw_state_watch() {
+  local endpoint_id="${1:?endpoint id required}" pane_id="${2:?pane id required}"
+  local parent="${RW_STATE_PARENT_PID:-$PPID}"
+  local endpoint_json worker session_name worker_root root_local root_rel
+  local tmpdir fifo backoff=2 cap=30
+  RW_STATE_SSH_PID="" RW_STATE_READER_PID=""
+
+  endpoint_json="$(rw_read_endpoint "$endpoint_id")" || return 0
+  worker="$(printf '%s' "$endpoint_json" | jq -r '.worker // empty')"
+  [ -n "$worker" ] || return 0
+  worker_root="$(printf '%s' "$endpoint_json" | jq -r '.workspace.worker_root // empty')"
+  root_local="$(printf '%s' "$endpoint_json" | jq -r '.workspace.root_local // empty')"
+  root_rel="$(printf '%s' "$endpoint_json" | jq -r '.root_rel // empty')"
+  session_name="$(rw_session_name "$endpoint_id")"
+
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/rw-state.XXXXXX")" || return 1
+  fifo="$tmpdir/stream"
+  mkfifo "$fifo" || {
+    rm -rf "$tmpdir"
+    return 1
+  }
+  # Killed (attach loop cleanup, pane closed): stop the stream and leave the
+  # pane's options to whoever ended us -- never write on the way out.
+  # shellcheck disable=SC2064 # expand the path now
+  trap "kill \$RW_STATE_SSH_PID \$RW_STATE_READER_PID 2>/dev/null; rm -rf '$tmpdir'; exit 0" TERM INT HUP
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'" EXIT
+
+  while rw_state_owns_pane "$pane_id" "$endpoint_id" && kill -0 "$parent" 2>/dev/null; do
+    "$(rw_ssh_bin)" -o BatchMode=yes -o ConnectTimeout="$(rw_ssh_connect_timeout)" \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+      "$worker" "$(rw_state_watch_cmd "$session_name")" </dev/null >"$fifo" 2>/dev/null &
+    RW_STATE_SSH_PID=$!
+    rw_state_apply_stream "$endpoint_id" "$pane_id" "$worker" "$session_name" \
+      "$worker_root" "$root_local" "$root_rel" <"$fifo" &
+    RW_STATE_READER_PID=$!
+    # `wait` (not a foreground pipeline) so a TERM is handled at once.
+    wait "$RW_STATE_READER_PID"
+    kill "$RW_STATE_SSH_PID" 2>/dev/null
+    wait "$RW_STATE_SSH_PID" 2>/dev/null
+    RW_STATE_SSH_PID="" RW_STATE_READER_PID=""
+    # The stream ended on its own: ssh lost, or the worker loop died.
+    rw_state_owns_pane "$pane_id" "$endpoint_id" || break
+    rw_state_mark_disconnected "$pane_id"
+    sleep "$backoff"
+    backoff=$((backoff * 2))
+    [ "$backoff" -gt "$cap" ] && backoff="$cap"
+  done
+  return 0
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    watch)
+      shift
+      rw_state_watch "$@"
+      ;;
+    clear)
+      rw_state_clear "${2:?pane id required}"
+      ;;
+    watch-cmd)
+      rw_state_watch_cmd "${2:?session name required}"
+      printf '\n'
+      ;;
+    *)
+      echo "usage: remote-state watch <endpoint_id> <pane_id> | clear <pane_id> | watch-cmd <session_name>" >&2
+      exit 64
+      ;;
+  esac
+fi

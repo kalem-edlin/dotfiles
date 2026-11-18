@@ -267,9 +267,12 @@ func locatePaneMem() (string, error) {
 
 // buildSnapshot turns rows into the session tree and gives each discovered
 // worktree the session named after it. Rules from v1: an agent whose
-// @agent_pid is not alive is no agent; remote panes get no memory and no
-// agent; an unknown agent state reads as idle. own marks remote panes (by
-// @rw-root-id) and remote worktrees (by root) from rw's records (D10).
+// @agent_pid is not alive is no agent; remote panes get no memory; an
+// unknown agent state reads as idle. A remote pane's agent options are the
+// worker agent's, mirrored by rw with no @agent_pid (R1), so it is an agent
+// like a local one; a leftover local @agent_pid (the agent stopped at
+// handoff) is still checked and hides stale options. own marks remote panes
+// (by @rw-root-id) and remote worktrees (by root) from rw's records (D10).
 func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64, entries []worktree.Entry, own ownership) *state.Snapshot {
 	current := cl.session
 	snap := &state.Snapshot{CurrentID: current, CurrentPane: cl.pane, Now: now}
@@ -421,7 +424,7 @@ func buildPane(f []string, mem map[int]int64, w *state.Window, own ownership) *s
 			kind = "" // died without clearing its options
 		}
 	}
-	if p.Remote || kind == "" {
+	if kind == "" {
 		return p
 	}
 	p.AgentKind = kind
@@ -433,6 +436,12 @@ func buildPane(f []string, mem map[int]int64, w *state.Window, own ownership) *s
 	switch st := state.State(f[fAgentState]); st {
 	case state.StateAwaiting, state.StateDone, state.StateWorking:
 		p.State = st
+	case state.StateDisconnected:
+		if p.Remote {
+			p.State = st
+		} else {
+			p.State = state.StateIdle
+		}
 	default:
 		p.State = state.StateIdle
 	}

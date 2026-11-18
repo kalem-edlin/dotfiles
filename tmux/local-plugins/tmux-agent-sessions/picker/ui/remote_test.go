@@ -10,18 +10,29 @@ import (
 	"agentpicker/state"
 )
 
+// remoteAgent is a remote pane carrying a worker agent's state, mirrored
+// onto it by rw (R1): an agent like a local one, without memory.
+func remoteAgent(kind, name string, st state.State, ago int64) *state.Pane {
+	p := agent(kind, name, st, ago, 0)
+	p.Command, p.Remote, p.MemKB, p.HasMem = "ssh", true, 0, false
+	return p
+}
+
 // remoteFixture: a mixed session (UC-A: one window handed off, the rest
 // local), a session that is remote as a whole (UC-B), and a worktree parked
-// on a worker with no session at all.
+// on a worker with no session at all. Remote agents show their mirrored
+// state (R1): Working in the mixed session, Awaiting and one disconnected
+// in the remote one.
 func remoteFixture() *state.Snapshot {
 	mixed := sess("$1", "agentic-harness", now-60,
 		win(1, "main", true, active(agent("claude", "harness work", state.StateIdle, 300, 400))),
-		win(3, "z", false, active(remote()), shell("zsh", "ls", 10)),
+		win(3, "z", false, active(remoteAgent("pi", "ghidra batch", state.StateWorking, 120)), shell("zsh", "ls", 10)),
 		win(4, "ghidra", false, active(remote())),
 	)
 	whole := sess("$2", "scheduling-r1", now-120,
-		win(1, "agents", true, active(remote()), remote()),
+		win(1, "agents", true, active(remoteAgent("claude", "r1 builds", state.StateAwaiting, 30)), remote()),
 		win(2, "nvim", false, active(remote())),
+		win(3, "old", false, active(remoteAgent("claude", "old chat", state.StateDisconnected, 900))),
 	)
 	t := &state.Worktree{Root: "/dev/parked", Name: "parked", Repo: "content-engine", Branch: "exp/parked", ActiveAt: now - 9000, Remote: true}
 	return &state.Snapshot{CurrentID: "$9", Sessions: []*state.Session{mixed, whole},
@@ -40,7 +51,7 @@ func TestGoldenRemote(t *testing.T) {
 	}
 	mixed, whole := snap.Sessions[0], snap.Sessions[1]
 	lines = append(lines, renderGrid(rowCards(mixed), 0, 0, 120, 5, now)...)
-	lines = append(lines, renderGrid(rowCards(whole), 0, 0, 120, 5, now)...)
+	lines = append(lines, renderGrid(rowCards(whole), 0, 0, 120, 10, now)...)
 	checkWidths(t, "remote", lines, 120)
 	golden(t, "remote_120", plain(lines))
 	golden(t, "remote_120_styled", strings.Join(lines, "\n")+"\n")
@@ -62,6 +73,24 @@ func TestGoldenRemote(t *testing.T) {
 	}
 	if got := memLabel(mixed.Members()); got != "410M" {
 		t.Errorf("mixed memory %q, want local only", got)
+	}
+	if n, _ := agentSummary(whole.Members()); n != 2 {
+		t.Errorf("remote agents counted %d, want 2 (a disconnected one included)", n)
+	}
+}
+
+// R1: the Working guard covers a remote agent like a local one; a
+// disconnected one (state unknown) does not block.
+func TestRefuseRemoteWorking(t *testing.T) {
+	tr := &state.Worktree{Name: "scheduling-r1", Panes: []*state.Pane{
+		remoteAgent("claude", "r1", state.StateWorking, 10), remote(),
+	}}
+	if err := refuseChange(tr, "delete"); err == nil || err.Error() != "refusing to delete scheduling-r1: an agent is working in it" {
+		t.Errorf("remote working: %v", err)
+	}
+	tr.Panes[0].State = state.StateDisconnected
+	if err := refuseChange(tr, "delete"); err != nil {
+		t.Errorf("remote disconnected: %v", err)
 	}
 }
 

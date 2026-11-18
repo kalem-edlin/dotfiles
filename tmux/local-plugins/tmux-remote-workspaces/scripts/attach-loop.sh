@@ -52,6 +52,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
+# Remote agent state mirror (rw_state_* helpers; the side channel itself runs
+# as `libexec/remote-state watch`).
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../libexec/remote-state
+source "$RW_PLUGIN_DIR/libexec/remote-state"
 
 endpoint_id=""
 fresh="false"
@@ -62,6 +67,8 @@ backoff_cap=30
 # Retry interval while the worker reports a restore in progress.
 restoring_wait=3
 attempt=0
+role=""
+state_channel_pid=""
 
 # The worker boot restore's bootstrap session
 # (setup/templates/tmux-resurrect-restore.sh). While it exists, the worker's
@@ -89,6 +96,46 @@ reset_local_terminal() {
   [ -n "$pane_id" ] && tmux refresh-client 2>/dev/null || true
 }
 
+# --- Remote agent state side channel (R1, contract CX1) -------------------
+# One background `libexec/remote-state watch` per attach: a single
+# long-lived ssh (on the alias's ControlMaster) streaming the worker pane's
+# @agent_* and @rw-request changes onto this pane. It shares this loop's
+# process group, so closing the pane takes it down too; this loop stops it
+# before every new attach attempt and on every exit (EXIT trap, and before
+# the exec into a local shell, which runs no trap). Tree endpoints never
+# hold an agent and get none.
+state_channel_start() {
+  [ -n "$pane_id" ] || return 0
+  case "$role" in tree | tree-editor) return 0 ;; esac
+  state_channel_stop
+  RW_STATE_PARENT_PID=$$ "$RW_PLUGIN_DIR/libexec/remote-state" watch "$endpoint_id" "$pane_id" \
+    </dev/null >/dev/null 2>&1 &
+  state_channel_pid=$!
+}
+
+state_channel_stop() {
+  [ -n "$state_channel_pid" ] || return 0
+  kill -TERM "$state_channel_pid" 2>/dev/null
+  wait "$state_channel_pid" 2>/dev/null
+  state_channel_pid=""
+}
+
+# The worker is out of sight (probe failed): stop the channel now rather
+# than wait out ssh's keepalive, and show a mirrored agent as disconnected.
+state_channel_lost() {
+  state_channel_stop
+  [ -n "$pane_id" ] && ! pane_released && rw_state_mark_disconnected "$pane_id"
+  return 0
+}
+
+# On any exit: no channel outlives the loop, and the pane drops the mirrored
+# agent (a hand-back respawns this pane, then resumes the agent locally,
+# whose publisher writes its own values seconds later).
+on_exit() {
+  state_channel_stop
+  [ -n "$pane_id" ] && rw_state_clear "$pane_id"
+}
+
 exit_intentional_close() {
   forget_server_seen "$endpoint_id"
   echo "rw: endpoint $endpoint_id was intentionally closed; exiting."
@@ -113,6 +160,9 @@ exit_pane_released() {
   # observed 2026-08-08). Reset both before handing the tty over.
   printf '\033[?1004l\033[?2004l'
   echo "rw: endpoint $endpoint_id was returned; this pane is local again."
+  # exec runs no EXIT trap.
+  on_exit
+  trap - EXIT
   # This loop is normally the pane's ROOT process (rw-handoff/rw-open
   # exec it, or respawn-pane runs it directly), so a plain exit would KILL
   # the pane -- smoke lane w5r destroyed the target pane in 4/4 cross-pane
@@ -273,6 +323,7 @@ attach_loop_main() {
   if [ "${1:-}" = "--fresh" ]; then
     fresh="true"
   fi
+  trap on_exit EXIT
 
   while true; do
     if pane_released; then
@@ -290,6 +341,7 @@ attach_loop_main() {
     worker="$(printf '%s' "$endpoint_json" | jq -r '.worker')"
     remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path')"
     session_name="$(rw_session_name "$endpoint_id")"
+    role="$(printf '%s' "$endpoint_json" | jq -r '.role // empty')"
 
     # These are execution-state markers, not endpoint-intent markers. Only
     # this foreground attach loop may make the pane advertise a remote host or
@@ -305,7 +357,7 @@ attach_loop_main() {
     # that mention the script name would false-positive and suppress the
     # spawn (2026-08-05). The listener dedups itself, so a redundant spawn
     # is harmless.
-    if [ "$(printf '%s' "$endpoint_json" | jq -r '.role // empty')" = "tree" ]; then
+    if [ "$role" = "tree" ]; then
       listener_pid="$(cat "$(rw_state_dir)/tree-listener-$endpoint_id.pid" 2>/dev/null || true)"
       if [ -z "$listener_pid" ] || ! kill -0 "$listener_pid" 2>/dev/null ||
         ! ps -p "$listener_pid" -o args= 2>/dev/null | grep -q "rw-tree-listener"; then
@@ -339,6 +391,7 @@ attach_loop_main() {
         continue
         ;;
       unreachable)
+        state_channel_lost
         duration_ms="$(rw_elapsed_ms "$probe_start_ts")"
         rw_log_event "$event" "$endpoint_id" "$worker" "$duration_ms" "drop" "unreachable"
         status "reconnecting to $worker in ${backoff_seconds}s..."
@@ -453,6 +506,7 @@ attach_loop_main() {
     if [ "$event" = "reconnect" ]; then
       rw_log_event "reconnect" "$endpoint_id" "$worker" "" "attached" "attempt=$attempt"
     fi
+    state_channel_start
 
     # TERM=screen-256color: the only ssh call here that allocates a PTY, so the
     # only one that forwards TERM. The focus terminal may be one the worker's

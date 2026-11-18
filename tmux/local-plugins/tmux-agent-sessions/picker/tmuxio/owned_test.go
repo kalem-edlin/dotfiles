@@ -80,7 +80,9 @@ func TestSnapshotOwnership(t *testing.T) {
 
 	writeRecord(t, "999", parkedRecord)
 	snap = buildSnapshot(cl, rows, loadMem(t), 0, entries, readOwnership())
-	if p := findPane(t, snap, "%4"); !p.Remote || p.HasMem || p.AgentKind != "" {
+	// Remote by its root id: no memory, but its agent stays (R1: rw mirrors
+	// a remote agent's options onto the pane).
+	if p := findPane(t, snap, "%4"); !p.Remote || p.HasMem || p.AgentKind != "claude" {
 		t.Errorf("owned root id: %%4 = %+v", p)
 	}
 	got := map[string]bool{}

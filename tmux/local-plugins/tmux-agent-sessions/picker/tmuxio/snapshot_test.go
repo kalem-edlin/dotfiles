@@ -177,9 +177,13 @@ func TestParsePanes(t *testing.T) {
 		"%5": {"claude", "plan", state.StateAwaiting, 1799999200, 1799999150, "1", false, true, 3000, "pnpm branch"},
 		"%6": {"pi", "done", state.StateDone, 1799999300, 1799999250, "0", false, true, 2000, ""},
 		"%7": {"claude", "no state", state.StateIdle, 1799999400, 0, "0", false, true, 1383, ""},
-		// Remote: no memory, no agent, even with a live @agent_pid.
-		"%10": {Remote: true, LastCommand: "rw attach"},
+		// Remote: no memory. The agent options rw mirrors from the worker
+		// make an agent like a local one (R1); a set @agent_pid is still
+		// checked (here alive).
+		"%10": {"claude", "ghost", state.StateWorking, 1799999999, 1799999990, "3", true, false, 0, "rw attach"},
 		"%11": {Remote: true, LastCommand: "rw attach"},
+		// Mirrored with no @agent_pid, the channel lost: disconnected.
+		"%15": {"pi", "far away", state.StateDisconnected, 1400, 1450, "0", true, false, 0, "rw attach"},
 		// Pane pid missing from pane-mem: no memory.
 		"%12": {},
 		// A multi-line command line spreads the record over lines.
@@ -230,8 +234,8 @@ func TestParsePathsAndFocus(t *testing.T) {
 		"%3": {"/src/api", "/stale/dead agent", "/src/api", 1799999800},
 		// Live agent without a published cwd.
 		"%4": {"/src/api", "", "/src/api", 0},
-		// Remote pane: never an agent, so the path.
-		"%10": {"/home/u", "/remote/cwd", "/home/u", 1799999960},
+		// Remote pane with a mirrored agent: its (laptop-mapped) cwd.
+		"%10": {"/home/u", "/remote/cwd", "/remote/cwd", 1799999960},
 		// Multi-line command line ahead of the paths.
 		"%8": {"/home/u", "", "/home/u", 1799999950},
 		// A line break inside a path joins the record back up, raw.
@@ -280,7 +284,7 @@ func TestMemPIDs(t *testing.T) {
 	_, rows := parseRows("$2\n" + loadRows(t))
 	got := memPIDs(rows)
 	want := []string{"102", "201", "101", "103", "202", "104", "203", "105", "204", "106", "205",
-		"107", "206", "120", "111", "121", "122", "222", "131", "141", "151", "251", "161"}
+		"107", "206", "120", "111", "121", "122", "222", "131", "132", "141", "151", "251", "161"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("pids\n got %v\nwant %v", got, want)
 	}

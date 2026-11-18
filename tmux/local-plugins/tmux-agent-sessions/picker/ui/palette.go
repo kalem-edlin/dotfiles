@@ -79,6 +79,8 @@ var stateBg = map[state.State]string{
 	state.StateWorking:  cBlue,
 	state.StateAwaiting: cPeach,
 	state.StateIdle:     cOverlay0,
+	// A remote agent out of sight (R1): grey, a step under Idle.
+	state.StateDisconnected: cSurface1,
 }
 
 // Chip count, label and icon text: a darker shade of the chip's own
@@ -88,15 +90,18 @@ var stateTextFg = map[state.State]string{
 	state.StateWorking:  "#394c69",
 	state.StateAwaiting: "#694b39",
 	state.StateIdle:     "#2d2f38",
+	// Lighter than its background: a darker shade would vanish on it.
+	state.StateDisconnected: cOverlay1,
 }
 
 // Chip age text: the text shade 30% of the way toward the background, so
 // time reads lower in contrast than the count and label.
 var stateAgeFg = map[state.State]string{
-	state.StateDone:     "#719b6f",
-	state.StateWorking:  "#5e7bac",
-	state.StateAwaiting: "#ac7a5c",
-	state.StateIdle:     "#4a4d5c",
+	state.StateDone:         "#719b6f",
+	state.StateWorking:      "#5e7bac",
+	state.StateAwaiting:     "#ac7a5c",
+	state.StateIdle:         "#4a4d5c",
+	state.StateDisconnected: "#6e7288",
 }
 
 var stateIcon = map[state.State]string{
@@ -104,6 +109,9 @@ var stateIcon = map[state.State]string{
 	state.StateWorking:  "", // circle-dashed
 	state.StateAwaiting: "", // circle-question-mark
 	state.StateIdle:     "", // circle-minus
+	// Font Awesome chain-broken from Hack Nerd Font, like the lock (U+F023):
+	// no Lucide glyph, so no font-codepoint-map entry or font rebuild.
+	state.StateDisconnected: "\uf127",
 }
 
 type rgb struct{ r, g, b float64 }

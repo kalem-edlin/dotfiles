@@ -321,7 +321,9 @@ Deleting a session or worktree from the picker (`C-a D`) or with `wt rm` calls
 root is currently remote. The picker shows the word `remote` on a worktree or
 session row whose root is remote, even with zero panes, and on each window
 card in a mixed session whose panes are in a remote root. It reads the
-ownership records directly and never polls over SSH.
+ownership records directly and never polls over SSH. Remote agents show
+their state like local ones, from the options the attach loop mirrors onto
+their panes (see "Remote agent state").
 
 Provider adapters for Pi, Claude, and Codex own transcript discovery, version
 checks, export, install, resume commands, and process matching. They do not own
@@ -351,6 +353,43 @@ Remote copy-mode entry is sent once to the worker tmux server. Subsequent vi
 motions travel through the existing SSH PTY. OSC 52 passthrough returns yanks
 to the focus machine. Local paste remains useful because it types the local
 tmux buffer into the remote program.
+
+## Remote agent state
+
+An agent on the worker publishes its state into the worker's tmux server,
+through the same `claudef` and `pif` hooks as on the laptop. Each attach
+loop mirrors it onto its laptop pane, so the picker, the Working guard and
+anything else that reads `@agent_*` see a remote agent like a local one.
+
+- `attach-loop.sh` starts `libexec/remote-state watch` in the background
+  just before each attach and stops it before the next attempt and on every
+  exit. It is one long-lived ssh per endpoint on the alias's ControlMaster,
+  never one per poll, and it shares the loop's process group.
+- The ssh runs a worker-side loop, sent inline, so the worker needs nothing
+  installed. Every 2 s it reads the endpoint pane with one local
+  `tmux display-message` and prints a line only when something changed,
+  with a heartbeat so a dead connection ends it. Polling is used because
+  tmux has no hook for a user-option change and the publishers are the only
+  writers.
+- Mirrored: `@agent_kind`, `@agent_state`, `@agent_state_at`, `@agent_at`,
+  `@agent_name`, `@agent_subs`, `@agent_empty`, and `@agent_cwd` mapped back
+  to the laptop path. `@agent_pid` is not mirrored. The worker loop checks
+  the pid there, and the mirror unsets a stale local one.
+- A finished turn becomes Done or Idle by whether the laptop pane is in view,
+  as for a local agent. The worker cannot tell, because its hidden session
+  always looks visible.
+- When the worker is out of sight, `@agent_state` becomes `disconnected`,
+  never a stale `working`. This happens when the stream ends, the worker
+  reports the session gone, or the probe finds the worker unreachable. The
+  picker shows it as a grey chip. When the loop exits, it unsets every
+  mirrored option.
+- The same line carries the worker pane's `@rw-request`. An agent on the
+  worker that runs `rw request handback` sets it. The channel clears it on
+  the worker, then runs `rw bg handback --pane <laptop pane>` through
+  `tmux run-shell -b`, detached from the loop that the hand-back replaces.
+
+The contract, including the line format and the rejected alternatives, is
+"Changes recorded by B2" in `docs/tasks/mini-remote-sessions.md`.
 
 ## Persistence and reconciliation
 
@@ -479,7 +518,11 @@ stay local unless they are opened for a root that is already remote.
   `rw-reclaim.sh` implement root ownership changes.
 - `scripts/rw-open.sh`, `rw-close.sh`, `rw-close-window.sh`, and
   `rw-split.sh` implement endpoint creation and pane or window lifecycle.
-- `scripts/attach-loop.sh` owns reconnect and pane-release behavior.
+- `scripts/attach-loop.sh` owns reconnect and pane-release behavior and
+  starts and stops each endpoint's agent-state side channel.
+- `libexec/remote-state` is that side channel: the worker-side poll loop,
+  the mirror of `@agent_*` onto the laptop pane, the `disconnected` value,
+  and the `@rw-request` hand-back.
 - `scripts/preflight.sh` checks configured workers without provisioning them
   and reports the worker's physical home.
 - `scripts/resolve-workspace.sh` resolves a root and its `~`-relative worker
@@ -529,6 +572,7 @@ All `scripts/` paths in this section are relative to
 - `tests/run.sh` runs the shell tests for path mapping, ownership records,
   manifests, the rsync channel, sync round trips, and the CLI round trip
   against a same-host fake worker, with no tmux server and no network.
+  `tests/test_remote_state.sh` covers the agent-state side channel.
 
 ### Reconciliation and remote tree
 
@@ -632,6 +676,11 @@ All `scripts/` paths in this section are relative to
   so `prefix e` no longer holds the client and an agent can hand off its
   own directory (`/remote-handoff`). `rw request handback` lets the worker
   side ask for a hand-back through the `@rw-request` pane option.
+
+- **2026-11-18 (R1):** Remote agents became visible on the laptop. Each
+  attach loop runs one ssh side channel that mirrors the worker pane's
+  `@agent_*` onto its laptop pane, with `disconnected` while the worker is
+  out of sight. The same channel carries `rw request handback`.
 
 The September decision is final for this system. Do not reintroduce slots,
 claims, reflected repository rules, or a global worktree manager as a remote

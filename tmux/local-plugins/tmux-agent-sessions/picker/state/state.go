@@ -16,6 +16,12 @@ const (
 	StateDone     State = "finished" // shown as "Done" in the UI (D19)
 	StateWorking  State = "working"
 	StateIdle     State = "idle"
+	// StateDisconnected: a remote pane's agent while the laptop cannot see
+	// the worker. rw's side channel mirrors a remote agent's @agent_*
+	// onto its laptop pane and writes this value when the channel is lost
+	// (follow-up R1, docs/tasks/mini-remote-sessions.md), so a stale
+	// Working never stays up. Only remote panes carry it.
+	StateDisconnected State = "disconnected"
 )
 
 // StateOrder is the order of aggregated status chips (D21).
@@ -31,7 +37,8 @@ type Pane struct {
 	LastCommand string // @workspace-last-command, the last shell command line
 	// Remote: @remote-host is set (D3), or @rw-root-id names a root an rw
 	// ownership record says a worker holds (D10). Remote panes have no
-	// memory and no agent.
+	// memory. Their agent fields are the worker agent's, mirrored onto the
+	// laptop pane by rw (R1), so they read like a local agent's.
 	Remote   bool
 	RootID   string // @rw-root-id, the rw root the pane was handed off or opened in
 	MemKB    int64  // pane-mem footprint of the pane's process tree
@@ -48,7 +55,7 @@ type Pane struct {
 	AgentKind  string // @agent_kind: "claude" or "pi"
 	AgentName  string // @agent_name
 	AgentEmpty bool   // @agent_empty is 1: the chat has no messages yet (D59)
-	State      State  // StateNone without an agent, otherwise one of StateOrder
+	State      State  // StateNone without an agent, otherwise one of StateOrder or StateDisconnected
 	AgentAt    int64  // @agent_at, epoch seconds of the last agent event (D15)
 	StateAt    int64  // @agent_state_at, epoch seconds the state began (D29), 0 if unset
 	Subs       string // @agent_subs
