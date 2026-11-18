@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user agent (headless workers only): boot-time tmux restore. Runs
+  setup/templates/tmux-resurrect-restore.sh once when the agent loads, i.e.
+  at the worker user's login (auto-login after a reboot) and when setup
+  bootstraps it. The wrapper starts the tmux server, runs the guarded
+  restore under the lock the verified save uses, then re-applies the hidden
+  rw-* session options. A second run against a live server is a no-op. See
+  docs/headless-workers.md, "Boot-time restore".
+
+  This is a template: __WRAPPER_PATH__, __LOG_PATH__, and __TMUX_BIN__ are
+  substituted with absolute paths by setup/lib.sh
+  (install_tmux_resurrect_restore_agent) before the rendered plist is copied
+  to ~/Library/LaunchAgents/. Not usable as-is.
+
+  __TMUX_BIN__ is injected for the same reason as in the save plist:
+  launchd's PATH has no Homebrew bin directory.
+
+  ProcessType is Standard, not Background: the tmux server this job starts,
+  and every pane and agent in it, would otherwise inherit background
+  CPU and I/O throttling. AbandonProcessGroup keeps launchd from reaping the
+  server when the wrapper exits.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.kalem.tmux-resurrect-restore</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WRAPPER_PATH__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>TMUX_RESURRECT_RESTORE_TMUX_BIN</key>
+    <string>__TMUX_BIN__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>AbandonProcessGroup</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_PATH__</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_PATH__</string>
+
+  <key>ProcessType</key>
+  <string>Standard</string>
+</dict>
+</plist>

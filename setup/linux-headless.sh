@@ -706,7 +706,7 @@ verify_commands() {
 # has a working, activated fnm) -> python.sh / neovim.sh / obsidian.sh
 # (obsidian.sh activates its own fnm too, so it works standalone) -> go.sh ->
 # dotfiles via lib.sh (stow, TPM, rw, ssh dirs) -> systemd save timer + fatal
-# linger verification -> rea.sh (REA, JDK, Ghidra) -> internal
+# linger verification -> boot restore service -> rea.sh (REA, JDK, Ghidra) -> internal
 # verify_commands -> success banner (only reachable if everything above
 # succeeded).
 
@@ -752,6 +752,9 @@ install_stripe_cli || echo "warn: Stripe CLI installation failed (optional; not 
 
 install_headless_dotfiles
 install_tmux_resurrect_save_timer
+# Boot-time restore (setup/lib.sh): systemd user service enabled for the
+# next boot; linger, which it also needs, was verified just above.
+install_tmux_resurrect_restore_agent
 
 # REA checkout plus JDK and Ghidra. Needs node (activated above) and the
 # worker's GitHub-registered SSH key; last, so a missing key leaves the rest

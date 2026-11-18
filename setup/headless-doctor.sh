@@ -815,6 +815,25 @@ elif [ "$PROFILE" = "headless-linux" ]; then
   fi
 fi
 
+# Boot-time restore (headless workers only): the RunAtLoad launchd agent or
+# the systemd user service that runs setup/templates/tmux-resurrect-restore.sh
+# after a reboot. See docs/headless-workers.md, "Boot-time restore".
+if [ "$PROFILE" = "headless-macos" ]; then
+  if launchctl print "gui/$(id -u)/com.kalem.tmux-resurrect-restore" >/dev/null 2>&1; then
+    c_pass "timer:restore-loaded" "launchctl print gui/\$UID/com.kalem.tmux-resurrect-restore succeeded"
+  else
+    c_fail "timer:restore-loaded" "launchctl print gui/\$UID/com.kalem.tmux-resurrect-restore failed" "$SETUP_REMEDIATION"
+  fi
+elif [ "$PROFILE" = "headless-linux" ]; then
+  if has_cmd systemctl &&
+    restore_state="$(systemctl --user is-enabled tmux-resurrect-restore.service 2>/dev/null)" &&
+    [ "$restore_state" = "enabled" ]; then
+    c_pass "timer:restore-loaded" "tmux-resurrect-restore.service is enabled"
+  else
+    c_fail "timer:restore-loaded" "tmux-resurrect-restore.service is not enabled (state=${restore_state:-unknown})" "$SETUP_REMEDIATION"
+  fi
+fi
+
 # ===========================================================================
 # 8. REA and its tools (setup/rea.sh), and worker power policy (macOS)
 # ===========================================================================

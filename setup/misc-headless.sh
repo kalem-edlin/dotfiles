@@ -302,8 +302,20 @@ if [[ "$OS_NAME" = "Darwin" ]]; then
     exit 1
   fi
   echo "  ✓ wrapper resolves tmux and the save script under a minimal PATH"
+
+  # Boot-time restore (RunAtLoad launchd agent): after a reboot and
+  # auto-login, the worker's tmux server and its rw-* sessions come back
+  # before any laptop connects. Shared installer in setup/lib.sh; see
+  # docs/headless-workers.md, "Boot-time restore".
+  echo "Configuring tmux boot restore (launchd)..."
+  # shellcheck source=setup/lib.sh
+  . "$DOTFILES_DIR/setup/lib.sh"
+  if ! install_tmux_resurrect_restore_agent; then
+    echo "✗ tmux boot restore agent failed to install — check: launchctl print gui/$(id -u)/com.kalem.tmux-resurrect-restore" >&2
+    exit 1
+  fi
 else
-  echo "✓ Linux tmux-resurrect save timer (systemd) is managed by setup/linux-headless.sh"
+  echo "✓ Linux tmux-resurrect save timer and boot restore (systemd) are managed by setup/linux-headless.sh"
 fi
 
 ###############################################################################

@@ -1,0 +1,32 @@
+# systemd user service (headless Linux workers): boot-time tmux restore. Runs
+# setup/templates/tmux-resurrect-restore.sh once when the user manager starts
+# (at boot, with linger enabled), the Linux twin of the macOS LaunchAgent
+# com.kalem.tmux-resurrect-restore. The wrapper starts the tmux server, runs
+# the guarded restore under the lock the verified save uses, then re-applies
+# the hidden rw-* session options. A second run against a live server is a
+# no-op. See docs/headless-workers.md, "Boot-time restore".
+#
+# This is a template: __WRAPPER_PATH__ and __TMUX_BIN__ are substituted with
+# absolute paths by setup/lib.sh (install_tmux_resurrect_restore_agent)
+# before the rendered unit is copied to ~/.config/systemd/user/. Not usable
+# as-is.
+#
+# The wrapper forks the tmux server, which stays in this unit's cgroup.
+# RemainAfterExit keeps the unit (and so the server) alive after the wrapper
+# returns; KillMode=process means stopping or restarting the unit only ever
+# signals the wrapper, never the server or its panes.
+
+[Unit]
+Description=Boot-time tmux restore (headless worker)
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+KillMode=process
+TimeoutStartSec=15min
+Environment=TMUX_RESURRECT_RESTORE_TMUX_BIN=__TMUX_BIN__
+ExecStart=__WRAPPER_PATH__
+
+[Install]
+WantedBy=default.target

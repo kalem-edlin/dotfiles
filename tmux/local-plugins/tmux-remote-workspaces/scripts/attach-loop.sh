@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Attach/reconnect loop for one remote endpoint. Runs as the pane's foreground
-# process (rw-ensure.sh `exec`s into this; rw-post-restore.sh `respawn-pane`s
+# process (rw-open.sh `exec`s into this; rw-post-restore.sh `respawn-pane`s
 # into this after a laptop resurrection). Not invoked as a separate `rw`
 # subcommand. See docs/tmux-remote-workspaces.md, "Endpoint and state model".
 #
 # Usage: attach-loop.sh <endpoint-id> [--fresh]
 #
-#   --fresh   The caller (rw-ensure.sh) confirmed/created this endpoint's
+#   --fresh   The caller (rw-open.sh) confirmed/created this endpoint's
 #             remote session in this SAME invocation, moments ago. Only
 #             affects the very first loop iteration: a "session absent"
 #             reading there is treated as a transient race and retried,
@@ -27,16 +27,17 @@
 #   (c) server up, session ABSENT     -> remote-intentional-close: write a
 #                                         tombstone, log it, notify this pane
 #                                         only, exit the loop and close it.
-#   (d) no tmux server on the worker  -> infrastructure loss: ask the
-#                                         worker's own tmux-resurrect
-#                                         installation to restore
-#                                         (non-interactively, same entrypoint
-#                                         setup-headless's save timer's
-#                                         wrapper documents as $TMUX-unset
-#                                         safe), recheck, and if the session
-#                                         is still absent, rebuild it from
-#                                         the registry manifest exactly as
-#                                         `rw ensure` would (docs/tmux-remote-workspaces.md,
+#   (d) no tmux server on the worker  -> infrastructure loss: run the
+#                                         worker's boot restore wrapper
+#                                         (setup/templates/tmux-resurrect-restore.sh,
+#                                         the same one its LaunchAgent runs:
+#                                         guarded restore under the save
+#                                         lock, waits on a boot lock so
+#                                         concurrent panes never race),
+#                                         recheck, and if the session is
+#                                         still absent, rebuild it from the
+#                                         registry manifest exactly as
+#                                         `rw open` would (docs/tmux-remote-workspaces.md,
 #                                         "Local restore of remote
 #                                         attachments", steps 3-5).
 #
@@ -96,7 +97,7 @@ exit_intentional_close() {
   exit 0
 }
 
-# `rw return` releases a pane by clearing its @rw-endpoint cache and killing
+# `rw handback` releases a pane by clearing its @rw-endpoint cache and killing
 # this loop's ssh client: the endpoint registry/session survive (close is a
 # separate decision), but this pane must fall back to its local shell so the
 # return can resume the agent locally in it -- so exit WITHOUT killing the
@@ -113,7 +114,7 @@ exit_pane_released() {
   # observed 2026-08-08). Reset both before handing the tty over.
   printf '\033[?1004l\033[?2004l'
   echo "rw: endpoint $endpoint_id was returned; this pane is local again."
-  # This loop is normally the pane's ROOT process (rw-handoff/rw-ensure
+  # This loop is normally the pane's ROOT process (rw-handoff/rw-open
   # exec it, or respawn-pane runs it directly), so a plain exit would KILL
   # the pane -- smoke lane w5r destroyed the target pane in 4/4 cross-pane
   # returns before this. Become the local shell instead, in the endpoint's
@@ -154,25 +155,28 @@ remote_state() {
 }
 
 # ask_worker_to_restore_then_recheck <worker> <session_name>
-# Worker restore path: start the
-# worker's tmux server and ask its own tmux-resurrect installation to
-# restore non-interactively, then recheck for our specific session. Prints
-# "yes" or "no". The worker runs the same dotfiles, so its tmux-resurrect
-# plugin lives at the same relative path as ours
-# ($HOME/.config/tmux/plugins/tmux-resurrect) -- the exact path
-# setup/templates/tmux-resurrect-save.sh already assumes and documents as
-# safe to invoke with $TMUX unset (verified 2026-07-31, see that script's
-# header). A missing restore.sh (worker not using tmux-resurrect) or a
-# restore.sh failure is not fatal here -- the recheck below is authoritative
-# either way, and a still-absent session falls through to the manifest
-# rebuild.
+# Worker restore path: run the worker's boot restore wrapper, then recheck
+# for our specific session. Prints "yes" or "no". The wrapper lives in the
+# worker's dotfiles checkout, which ~/.config/tmux links into, so it is found
+# from there without knowing the worker's home or checkout path. It starts
+# the server with the worker's tmux.conf, runs the guarded restore
+# (tmux/scripts/resurrect_restore.sh) under the lifecycle lock the verified
+# save uses, and re-applies the hidden rw-* session options. Every caller
+# takes the wrapper's boot lock first (bounded wait), so two panes reaching
+# this branch together restore once: the second finds a live server and does
+# nothing. Its output goes to the worker's boot-restore.log. A missing
+# wrapper (worker not yet updated) or a failed restore is not fatal here --
+# the recheck below is authoritative either way, and a still-absent session
+# falls through to the manifest rebuild.
 ask_worker_to_restore_then_recheck() {
   local worker="$1" session_name="$2"
   rw_ssh_batch "$worker" "$(rw_ssh_connect_timeout)" "
-    tmux start-server 2>/dev/null
-    resurrect_restore=\"\$HOME/.config/tmux/plugins/tmux-resurrect/scripts/restore.sh\"
-    if [ -f \"\$resurrect_restore\" ]; then
-      TMUX='' bash \"\$resurrect_restore\" >/dev/null 2>&1 || true
+    unset TMUX TMUX_PANE
+    cfg=\$(cd -P \"\$HOME/.config/tmux\" 2>/dev/null && cd .. && pwd)
+    restore_wrapper=\"\$cfg/setup/templates/tmux-resurrect-restore.sh\"
+    if [ -n \"\$cfg\" ] && [ -x \"\$restore_wrapper\" ]; then
+      TMUX_RESURRECT_RESTORE_TMUX_BIN=\"\$(command -v tmux || echo tmux)\" \
+        \"\$restore_wrapper\" </dev/null >/dev/null 2>&1 || true
     fi
     tmux has-session -t '=${session_name}' 2>/dev/null && echo yes || echo no
   " 2>/dev/null
@@ -242,7 +246,7 @@ while true; do
       ;;
     no-server)
       if [ "$fresh" = "true" ] && [ "$is_first_iteration" = "true" ]; then
-        # rw-ensure.sh confirmed/created this session moments ago in this
+        # rw-open.sh confirmed/created this session moments ago in this
         # same invocation. A "no server at all" reading right now is a
         # transient race, not real infrastructure loss -- don't guess,
         # just retry (never applies past the first iteration).
@@ -254,7 +258,7 @@ while true; do
         [ "$backoff_seconds" -gt "$backoff_cap" ] && backoff_seconds="$backoff_cap"
         continue
       fi
-      status "no tmux server on $worker; requesting its own resurrection to restore..."
+      status "no tmux server on $worker; running its boot restore (waits for any restore in progress)..."
       recheck="$(ask_worker_to_restore_then_recheck "$worker" "$session_name")"
       duration_ms="$(rw_elapsed_ms "$probe_start_ts")"
       if printf '%s' "$recheck" | grep -q '^yes$'; then
@@ -277,7 +281,7 @@ while true; do
       # was written come back as unregistered sessions, and later worker
       # saves would persist them (smoke-journey 1R findings). Sweep them at
       # birth. min-age narrowed to 15s: restored zombies are seconds old,
-      # while 15s still shields a concurrent ensure's create-to-registry
+      # while 15s still shields a concurrent open's create-to-registry
       # gap (pure-local bash+jq, no network). Best effort, never blocks.
       "$RW_PLUGIN_DIR/libexec/reconcile-worker" --worker "$worker" \
         --exclude "$endpoint_id" --min-age 15 </dev/null >/dev/null 2>&1 || true

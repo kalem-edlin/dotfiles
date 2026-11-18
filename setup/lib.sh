@@ -103,6 +103,16 @@
 #     Installs and loads the macOS launchd timer after TPM has installed
 #     tmux-resurrect. Linux workers install their systemd timer separately.
 #
+#   install_tmux_resurrect_restore_agent
+#     Headless workers only (never called by `make install`). Installs the
+#     boot-time restore: on macOS renders and (re)loads the RunAtLoad launchd
+#     agent com.kalem.tmux-resurrect-restore into gui/$UID (bootout, then
+#     bootstrap, which runs the wrapper once; a live server makes that a
+#     no-op); on Linux renders tmux-resurrect-restore.service and enables it
+#     for the next boot without starting it. Both run
+#     setup/templates/tmux-resurrect-restore.sh, whose --check is proven under
+#     a minimal environment afterwards.
+#
 #   ensure_ssh_dirs
 #     Creates ~/.ssh and ~/.ssh/sockets (mkdir -p, then chmod 700 each —
 #     deliberately not `mkdir -m`, which only guarantees the mode on the
@@ -170,7 +180,7 @@ TMUX_RESURRECT_SKIP_PROCESS_CAPTURE_PATCH_MARKER="configured_processes"
 # patches above (it touches scripts/restore.sh only, so apply order against
 # them does not matter). restore.sh's restore_state()/active-window helpers
 # end a restore with `tmux switch-client` to whatever the save file said was
-# active. On a worker, the first `rw ensure`/attach-loop attach after a
+# active. On a worker, the first `rw open`/attach-loop attach after a
 # reboot is what STARTS the tmux server, which triggers continuum
 # auto-restore -- and that switch-client yanked the freshly attached client
 # off its rw-* endpoint session onto a restored session (observed live on
@@ -673,6 +683,84 @@ install_tmux_resurrect_save_timer() {
     TMUX_RESURRECT_SAVE_TMUX_BIN="$tmux_bin" \
     "$wrapper" --check >/dev/null
   echo "  -> loaded $label (verified save every 5 minutes)"
+}
+
+install_tmux_resurrect_restore_agent() {
+  local templates_dir wrapper label state_dir tmux_bin rendered destination unit_dir
+  templates_dir="$DOTFILES_DIR/setup/templates"
+  wrapper="$templates_dir/tmux-resurrect-restore.sh"
+  label="com.kalem.tmux-resurrect-restore"
+  state_dir="$HOME/.local/state/tmux-workspace-resurrect"
+  tmux_bin="$(command -v tmux 2>/dev/null || true)"
+
+  [ -x "$tmux_bin" ] || {
+    echo "ERROR: tmux is unavailable; cannot install the boot restore" >&2
+    return 1
+  }
+  chmod +x "$wrapper" 2>/dev/null || true
+  [ -x "$wrapper" ] || {
+    echo "ERROR: boot restore wrapper is not executable: $wrapper" >&2
+    return 1
+  }
+  mkdir -p "$state_dir"
+
+  case "$(uname -s)" in
+    Darwin)
+      mkdir -p "$HOME/Library/LaunchAgents"
+      destination="$HOME/Library/LaunchAgents/$label.plist"
+      rendered="$(mktemp "$HOME/Library/LaunchAgents/.tmux-resurrect-restore.XXXXXX")"
+      sed \
+        -e "s#__WRAPPER_PATH__#$wrapper#g" \
+        -e "s#__LOG_PATH__#$state_dir/boot-restore.log#g" \
+        -e "s#__TMUX_BIN__#$tmux_bin#g" \
+        "$templates_dir/$label.plist" >"$rendered"
+      if ! plutil -lint "$rendered" >/dev/null; then
+        rm -f "$rendered"
+        echo "ERROR: rendered tmux boot restore plist is invalid" >&2
+        return 1
+      fi
+      mv "$rendered" "$destination"
+      chmod 0644 "$destination"
+
+      launchctl bootout "gui/$(id -u)" "$destination" >/dev/null 2>&1 || true
+      launchctl bootstrap "gui/$(id -u)" "$destination"
+      launchctl print "gui/$(id -u)/$label" >/dev/null
+      ;;
+    Linux)
+      command -v systemctl >/dev/null 2>&1 || {
+        echo "ERROR: systemctl not found; cannot install the boot restore" >&2
+        return 1
+      }
+      unit_dir="$HOME/.config/systemd/user"
+      destination="$unit_dir/tmux-resurrect-restore.service"
+      mkdir -p "$unit_dir"
+      sed \
+        -e "s#__WRAPPER_PATH__#$wrapper#g" \
+        -e "s#__TMUX_BIN__#$tmux_bin#g" \
+        "$templates_dir/tmux-resurrect-restore.service" >"$destination.tmp"
+      mv "$destination.tmp" "$destination"
+      systemctl --user daemon-reload
+      # Enabled for the next boot only. (launchd cannot load a RunAtLoad
+      # agent without running it; systemd can, so setup never restores a
+      # snapshot into a worker whose server was stopped on purpose.)
+      systemctl --user enable tmux-resurrect-restore.service
+      [ "$(systemctl --user is-enabled tmux-resurrect-restore.service 2>/dev/null)" = "enabled" ] || {
+        echo "ERROR: tmux-resurrect-restore.service is not enabled" >&2
+        return 1
+      }
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    TMUX_RESURRECT_RESTORE_TMUX_BIN="$tmux_bin" \
+    "$wrapper" --check >/dev/null || {
+    echo "ERROR: $wrapper --check failed under a minimal environment" >&2
+    return 1
+  }
+  echo "  -> boot restore installed ($label; wrapper --check OK)"
 }
 
 ensure_ssh_dirs() {

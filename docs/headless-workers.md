@@ -104,6 +104,9 @@ this contract — not just that the installer exited zero.
 - **Durability service:** on macOS, a loaded launchd job that can find
   Homebrew tmux; on Linux, an active systemd user timer with linger enabled
   for the target user.
+- **Boot-time restore:** on macOS, the loaded RunAtLoad launchd agent
+  `com.kalem.tmux-resurrect-restore`; on Linux, the enabled user service
+  `tmux-resurrect-restore.service`. See "Boot-time restore" below.
 - **Noninteractive availability:** every command a focus machine invokes via
   `ssh worker '<command>'` resolves without an interactive or login shell —
   in particular Homebrew `tmux`/`git-lfs` on macOS and fnm-managed
@@ -116,6 +119,56 @@ this contract — not just that the installer exited zero.
   the laptop, and the same alias is declared in
   `tmux/local-plugins/tmux-remote-workspaces/config.json` (see "Focus-machine
   registration" below).
+
+## Boot-time restore
+
+A worker brings its tmux server back by itself after a reboot, before any
+laptop connects, so parked roots (`rw handoff`) have their `rw-*` sessions
+and agents running again. Headless setup installs it; `make install` on a
+laptop never does.
+
+- **Units.** macOS: launchd agent `com.kalem.tmux-resurrect-restore`
+  (template `setup/templates/com.kalem.tmux-resurrect-restore.plist`,
+  `RunAtLoad`, loaded into `gui/$UID`, so it fires at the auto-login after a
+  reboot; this is why auto-login is required). Linux: user service
+  `tmux-resurrect-restore.service` (oneshot, `WantedBy=default.target`, runs
+  when the lingering user manager starts at boot). Both are installed by
+  `install_tmux_resurrect_restore_agent` in `setup/lib.sh`, called from
+  `setup/misc-headless.sh` (macOS) and `setup/linux-headless.sh`. Rerunning
+  setup on macOS boots the agent out and back in, which runs the wrapper
+  once; on Linux the service is only enabled, not started.
+- **Wrapper** `setup/templates/tmux-resurrect-restore.sh`, also run by the
+  laptop attach loop when it finds no tmux server on the worker:
+  1. Takes the boot lock `~/.local/state/tmux-workspace-resurrect/boot-restore.lock`
+     (bounded wait, dead owner reclaimed). Concurrent callers (the agent and
+     several laptop panes) queue here; the first restores, the rest find a
+     live server and do nothing.
+  2. Live server with sessions: no-op, unless a guarded restore is running
+     on it right now, in which case it waits for that and then runs step 4.
+  3. No server and no snapshot: exit 0. Otherwise it starts the server with
+     `~/.config/tmux/tmux.conf` and a bootstrap session, publishes the
+     incomplete-restore marker for the new server pid (so no save can
+     capture the bootstrap landscape), and lets Continuum's restore-on-start
+     run the guarded restore (`tmux/scripts/resurrect_restore.sh`, which holds
+     the lifecycle lock `${TMPDIR:-/tmp}/tmux-resurrect-<pid>-verified-save.lock`
+     shared with the verified save). If Continuum does not start one within
+     10 seconds, the wrapper runs the guarded restore itself. Success is the
+     guarded restore clearing the marker.
+  4. Removes the bootstrap session and runs
+     `tmux-remote-workspaces/scripts/rw-worker-post-restore.sh`: re-applies
+     the hidden endpoint options (`prefix None`, `prefix2 None`, `status off`,
+     `mouse off`, `detach-on-destroy on`) to every `rw-*` session, and stamps
+     each mirror record under `~/.local/state/tmux-remote-workspaces/owned/<root_id>/record.json`
+     with `restored_at` and `restored_endpoints` without touching ownership.
+- **Log:** `~/.local/state/tmux-workspace-resurrect/boot-restore.log` (next to
+  the save timer's `launchd-save.log`). Exit status is nonzero only on a real
+  failure: a restore that did not complete (saves stay blocked for that
+  server until a guarded restore succeeds), a live server whose last restore
+  failed, or a lock timeout.
+- **Checks:** `make headless-doctor` reports `timer:restore-loaded`.
+  `setup/templates/tmux-resurrect-restore.sh --check` validates the tmux
+  binary, the upstream and guarded restore scripts and the worker
+  post-restore without side effects.
 
 ## Manual steps (these stay manual)
 
@@ -248,10 +301,12 @@ Durability timer, per platform:
 ```sh
 # macOS
 launchctl print "gui/$UID/com.kalem.tmux-resurrect-save"
+launchctl print "gui/$UID/com.kalem.tmux-resurrect-restore"
 
 # Linux (systemd)
 systemctl --user is-enabled tmux-resurrect-save.timer
 systemctl --user is-active tmux-resurrect-save.timer
+systemctl --user is-enabled tmux-resurrect-restore.service
 loginctl show-user "$USER" -p Linger
 ```
 
