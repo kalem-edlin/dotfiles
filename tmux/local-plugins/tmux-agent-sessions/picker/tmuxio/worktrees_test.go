@@ -110,7 +110,7 @@ func TestBuildWorktreesByName(t *testing.T) {
 		{sid: "$4", wid: "@5", widx: 1, pid: "%5", path: "/r/b"},
 	})
 	rows = named(rows, map[string]string{"$1": "b", "$2": "a", "$3": "v1_2", "$4": "home"})
-	snap := buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries)
+	snap := buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries, ownership{})
 	by := map[string]*state.Worktree{}
 	for _, t := range snap.Worktrees {
 		by[t.Root] = t
@@ -148,7 +148,7 @@ func TestBuildWorktreesByName(t *testing.T) {
 	// With no pane in either clone, the first discovered wins.
 	rows, mem = buildRows([]paneRow{{sid: "$1", wid: "@1", widx: 1, pid: "%1", path: "/tmp"}})
 	rows = named(rows, map[string]string{"$1": "a"})
-	snap = buildSnapshot(clientLine{}, rows, mem, 0, entries)
+	snap = buildSnapshot(clientLine{}, rows, mem, 0, entries, ownership{})
 	for _, t2 := range snap.Worktrees {
 		if (t2.Session != nil) != (t2.Root == "/r/a") {
 			t.Errorf("%s has session %v", t2.Root, t2.Session != nil)
@@ -176,7 +176,7 @@ func TestWorktreeOrder(t *testing.T) {
 		{sid: "$4", wid: "@4", widx: 1, pid: "%4"},
 	})
 	rows = named(rows, map[string]string{"$1": "cur", "$2": "aw", "$3": "wk", "$4": "plain"})
-	snap := buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries)
+	snap := buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries, ownership{})
 	want := []string{"/r/old", "/r/new", "/r/wk", "/r/aw", "/r/plain", "/r/cur"}
 	if got := roots(snap.Worktrees); !reflect.DeepEqual(got, want) {
 		t.Errorf("order %v, want %v", got, want)
@@ -187,7 +187,7 @@ func TestWorktreeOrder(t *testing.T) {
 		{sid: "$5", wid: "@5", widx: 1, pid: "%5", focus: 4},
 	})
 	rows = named(rows, map[string]string{"$1": "cur", "$5": "home"})
-	snap = buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries)
+	snap = buildSnapshot(clientLine{session: "$1"}, rows, mem, 0, entries, ownership{})
 	var got []string
 	for _, r := range state.ListRows(snap.Worktrees, snap.Sessions) {
 		got = append(got, r.RowID())
@@ -315,7 +315,7 @@ func BenchmarkBuildSnapshotWorktrees(b *testing.B) {
 	}
 	rows = named(rows, names)
 	cl := clientLine{session: "$0", pane: "%0"}
-	snap := buildSnapshot(cl, rows, mem, 0, entries)
+	snap := buildSnapshot(cl, rows, mem, 0, entries, ownership{})
 	n := 0
 	for _, t := range snap.Worktrees {
 		if t.Session != nil {
@@ -327,6 +327,6 @@ func BenchmarkBuildSnapshotWorktrees(b *testing.B) {
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		buildSnapshot(cl, rows, mem, 0, entries)
+		buildSnapshot(cl, rows, mem, 0, entries, ownership{})
 	}
 }

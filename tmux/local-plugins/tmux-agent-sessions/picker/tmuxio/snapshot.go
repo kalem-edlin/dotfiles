@@ -55,6 +55,7 @@ var fields = []string{
 	"#{@agent_cwd}",
 	"#{@pane_focus_at}",
 	"#{session_attached}",
+	"#{@rw-root-id}",
 }
 
 // Column indexes into a row.
@@ -85,6 +86,7 @@ const (
 	fAgentCwd
 	fFocusAt
 	fAttached
+	fRootID
 	nFields
 )
 
@@ -98,7 +100,8 @@ const clientFormat = "#{session_id}" + sep + "#{pane_id}"
 // binary"; tests point it at a fake.
 var paneMemPath = ""
 
-// Load reads one snapshot: one tmux call, then one pane-mem call.
+// Load reads one snapshot: one tmux call, then one pane-mem call, then
+// rw's ownership records (a directory read, no process; D10).
 func (a *actions) Load() (*state.Snapshot, error) {
 	var args []string
 	if a.client != "" {
@@ -120,7 +123,7 @@ func (a *actions) Load() (*state.Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buildSnapshot(cl, rows, mem, time.Now().Unix(), a.worktrees()), nil
+	return buildSnapshot(cl, rows, mem, time.Now().Unix(), a.worktrees(), readOwnership()), nil
 }
 
 // worktrees is the discovery result, read on the first load and kept for
@@ -138,10 +141,11 @@ func (a *actions) worktrees() []worktree.Entry {
 	return a.discovered
 }
 
-// parseSnapshot is parseRows plus buildSnapshot, for tests.
+// parseSnapshot is parseRows plus buildSnapshot without ownership
+// records, for tests.
 func parseSnapshot(raw string, mem map[int]int64, now int64, entries ...worktree.Entry) *state.Snapshot {
 	cl, rows := parseRows(raw)
-	return buildSnapshot(cl, rows, mem, now, entries)
+	return buildSnapshot(cl, rows, mem, now, entries, ownership{})
 }
 
 // clientLine is the invoking client's first line: its session id and active
@@ -264,8 +268,9 @@ func locatePaneMem() (string, error) {
 // buildSnapshot turns rows into the session tree and gives each discovered
 // worktree the session named after it. Rules from v1: an agent whose
 // @agent_pid is not alive is no agent; remote panes get no memory and no
-// agent; an unknown agent state reads as idle.
-func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64, entries []worktree.Entry) *state.Snapshot {
+// agent; an unknown agent state reads as idle. own marks remote panes (by
+// @rw-root-id) and remote worktrees (by root) from rw's records (D10).
+func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64, entries []worktree.Entry, own ownership) *state.Snapshot {
 	current := cl.session
 	snap := &state.Snapshot{CurrentID: current, CurrentPane: cl.pane, Now: now}
 	sessions := map[string]*state.Session{}
@@ -299,7 +304,7 @@ func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64,
 			windows[wkey] = w
 			s.Windows = append(s.Windows, w)
 		}
-		w.Panes = append(w.Panes, buildPane(f, mem, w))
+		w.Panes = append(w.Panes, buildPane(f, mem, w, own))
 	}
 
 	for _, s := range snap.Sessions {
@@ -311,6 +316,9 @@ func buildSnapshot(cl clientLine, rows [][]string, mem map[int]int64, now int64,
 	// Matching runs in tmux's session order, before the sort, so a name
 	// shared by two worktrees resolves the same way whatever the order.
 	snap.Worktrees = buildWorktrees(entries, snap.Sessions)
+	for _, t := range snap.Worktrees {
+		_, t.Remote = own.byRoot[filepath.Clean(t.Root)]
+	}
 	sortRows(snap.Sessions)
 	sortRows(snap.Worktrees)
 	return snap
@@ -387,7 +395,7 @@ func sortRows[R state.Row](rows []R) {
 	})
 }
 
-func buildPane(f []string, mem map[int]int64, w *state.Window) *state.Pane {
+func buildPane(f []string, mem map[int]int64, w *state.Window, own ownership) *state.Pane {
 	p := &state.Pane{
 		ID:          f[fPaneID],
 		Index:       atoi(f[fPaneIndex]),
@@ -395,7 +403,8 @@ func buildPane(f []string, mem map[int]int64, w *state.Window) *state.Pane {
 		PID:         atoi(f[fPanePID]),
 		Command:     clean(f[fCommand]),
 		LastCommand: clean(f[fLastCommand]),
-		Remote:      f[fRemoteHost] != "",
+		Remote:      f[fRemoteHost] != "" || (f[fRootID] != "" && own.byID[f[fRootID]]),
+		RootID:      f[fRootID],
 		Path:        f[fPath],
 		AgentCwd:    f[fAgentCwd],
 		FocusAt:     atoi64(f[fFocusAt]),

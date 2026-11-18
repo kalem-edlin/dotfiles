@@ -78,9 +78,9 @@ func TestFmtMem(t *testing.T) {
 func TestMemLabel(t *testing.T) {
 	snap := fixture()
 	tests := map[string]string{
-		"infra":                   "45M remote",
+		"infra":                   "45M",
 		"roll-carousels-3":        "1.6G",
-		"roll-web-funnel-changes": "1.2G remote",
+		"roll-web-funnel-changes": "1.2G",
 	}
 	for _, s := range snap.Sessions {
 		if want, ok := tests[s.Name]; ok {
@@ -89,7 +89,8 @@ func TestMemLabel(t *testing.T) {
 			}
 		}
 	}
-	if got := memLabel([]*state.Pane{remote()}); got != "remote" {
+	// Remote panes add nothing; the remote marker says remote (D10).
+	if got := memLabel([]*state.Pane{remote()}); got != "" {
 		t.Errorf("remote only = %q", got)
 	}
 }

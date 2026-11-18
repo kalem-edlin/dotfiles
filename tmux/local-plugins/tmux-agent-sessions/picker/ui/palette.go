@@ -58,6 +58,7 @@ var (
 	indexFg     = cLavender
 	heavyFg     = cPeach // heavy element symbols on rows (V8)
 	lockFg      = cSubtext0
+	remoteFg    = cLavender // the `remote` marker on rows and cards (D10)
 	// Preview cells (D106): one shared background, a bold value, a quieter
 	// label, and a dim pair for a zero cell.
 	previewBg      = cSurface1

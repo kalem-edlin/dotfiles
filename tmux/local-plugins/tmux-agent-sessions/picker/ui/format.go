@@ -104,28 +104,20 @@ func agentSummary(panes []*state.Pane) (n int, at int64) {
 	return n, at
 }
 
-// memLabel sums local pane memory. Remote panes have none: they show
-// "remote", after the sum when local panes exist too (as v1 did).
+// memLabel sums local pane memory. Remote panes have none and add
+// nothing; the `remote` marker on the row or card says they are remote
+// (D10), not the memory column.
 func memLabel(panes []*state.Pane) string {
 	var kb int64
-	local, remote := false, false
+	local := false
 	for _, p := range panes {
-		if p.Remote {
-			remote = true
-			continue
-		}
-		if p.HasMem {
+		if !p.Remote && p.HasMem {
 			local = true
 			kb += p.MemKB
 		}
 	}
-	switch {
-	case local && remote:
-		return fmtMem(kb) + " remote"
-	case local:
+	if local {
 		return fmtMem(kb)
-	case remote:
-		return "remote"
 	}
 	return ""
 }

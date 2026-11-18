@@ -109,6 +109,10 @@ type fakeActions struct {
 	wtEnv    state.WTEnvResult
 	wtErrs   map[string][]error
 	saveErr  error
+
+	// rw forget: the reply and error ForgetRoot returns.
+	forget    state.RWForget
+	forgetErr error
 }
 
 func (f *fakeActions) wtErr(op string) error {
@@ -132,9 +136,17 @@ func (f *fakeActions) WorktreeRepurpose(root, branch string) (state.WTResult, er
 	f.calls = append(f.calls, fmt.Sprintf("wt repurpose %s %s", root, branch))
 	return f.wtResult["repurpose"], f.wtErr("repurpose")
 }
-func (f *fakeActions) WorktreeRemove(root string) (state.WTResult, error) {
-	f.calls = append(f.calls, "wt rm "+root)
+func (f *fakeActions) WorktreeRemove(root string, discardRemote bool) (state.WTResult, error) {
+	call := "wt rm " + root
+	if discardRemote {
+		call += " --discard-remote"
+	}
+	f.calls = append(f.calls, call)
 	return f.wtResult["rm"], f.wtErr("rm")
+}
+func (f *fakeActions) ForgetRoot(root string) (state.RWForget, error) {
+	f.calls = append(f.calls, "rw forget "+root)
+	return f.forget, f.forgetErr
 }
 func (f *fakeActions) WorktreeEnvRefresh(root string, here bool) (state.WTEnvResult, error) {
 	call := "wt env-refresh " + root

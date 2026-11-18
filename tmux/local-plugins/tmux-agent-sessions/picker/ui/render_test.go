@@ -64,7 +64,9 @@ func TestGoldenSessionRows(t *testing.T) {
 		var lines []string
 		for i, s := range snap.Sessions {
 			_, pos := m.match("roll", s.Name)
-			lines = append(lines, renderRow(newSessionRow(s, pos), 11, w, i == 3, now))
+			r := newSessionRow(s, pos)
+			r.markers = sessionMarkers(s)
+			lines = append(lines, renderRow(r, 11, w, i == 3, now))
 		}
 		lines = append(lines, renderEmptyRow(w))
 		checkWidths(t, "rows", lines, w)
@@ -75,9 +77,11 @@ func TestGoldenSessionRows(t *testing.T) {
 	}
 }
 
+// The fixture's roll-web-funnel-changes is a mixed session: its
+// remote-worker window card says remote, the local ones do not (D10).
 func TestGoldenCards(t *testing.T) {
 	s := fixture().Sessions[3]
-	cards := sessionCards(s)
+	cards := rowCards(s)
 	for _, w := range widths {
 		lines := renderGrid(cards, 0, 0, w, 15, now)
 		checkWidths(t, "cards", lines, w)

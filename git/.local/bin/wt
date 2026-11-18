@@ -3,7 +3,7 @@
 #
 #   wt new <repo-root> --branch B [--from REF] [--name SLUG] [--json]
 #   wt status <root> [--json]
-#   wt rm <root> [--force] [--json]  moves it to ~/.Trash, dirt and all
+#   wt rm <root> [--force] [--discard-remote] [--json]  moves it to ~/.Trash, dirt and all
 #   wt repurpose <root> --branch B [--from REF] [--stash] [--json]
 #   wt ports <root> [--json]          next free port block, writes nothing
 #   wt env-refresh <root> [--here] [--no-pull] [--json]  pull env in main (or copy
@@ -12,8 +12,13 @@
 # exit: 0 ok, 2 usage, 3 dirty, 4 locked, 5 refused, 6 ports, 1 other
 #
 # Git only: never runs tmux, installs, or touches DerivedData or remote
-# endpoints (the picker owns those). content-engine conventions (port keys,
-# heavy paths, LFS models path) are hard-coded until a second repo differs.
+# endpoints (the picker owns those), with one exception: rm runs
+# `rw forget <root> --worker <alias>` for every worker that holds a copy of
+# the root (tmux-remote-workspaces, docs/tasks/mini-remote-sessions.md D11)
+# before deleting it here, and refuses a root that is remote right now
+# unless confirmed (a prompt on a terminal, else --discard-remote).
+# content-engine conventions (port keys, heavy paths, LFS models path) are
+# hard-coded until a second repo differs.
 # Spec: docs/tasks/worktree-native-tmux.md (V9-V12, R5-R10).
 # Bash 3.2 compatible.
 
@@ -376,8 +381,89 @@ ensure_worktree_config() {
   git config --file "$COMMON/config" extensions.worktreeConfig true
 }
 
+# --- remote copies (tmux-remote-workspaces, D11) ------------------------------
+#
+# rw keeps an ownership record per handed-off root at
+# <state>/owned/<root_id>/record.json and a held/<worker>/<root_id>.json
+# index of every worker copy (contract C1). root_id is the cksum of the
+# root's path relative to the physical home. Both are one-line JSON written
+# by jq -c, so sed reads the few fields needed; no jq dependency here.
+
+rw_state_dir() { printf '%s' "${TMUX_REMOTE_WORKSPACES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-remote-workspaces}"; }
+
+# json_str FILE KEY: the string value of KEY in one-line JSON FILE.
+json_str() { sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -n 1; }
+
+# forget_pending FILE: rw already has a forget queued for this copy.
+forget_pending() { grep -Eq '"action"[[:space:]]*:[[:space:]]*"forget"' "$1" 2>/dev/null; }
+
+rw_binary() {
+  local p
+  p=$(command -v rw 2>/dev/null) && [ -n "$p" ] && {
+    printf '%s' "$p"
+    return 0
+  }
+  for p in "$HOME/.local/bin/rw" "$HOME/.config/tmux/local-plugins/tmux-remote-workspaces/scripts/rw"; do
+    [ -x "$p" ] && {
+      printf '%s' "$p"
+      return 0
+    }
+  done
+  return 1
+}
+
+# rw_forget_copies: before ROOT is deleted here, delete every worker copy of
+# it. A root the worker owns right now is refused unless confirmed: its
+# remote copy is the only current one. An unreachable worker (rw exit 6)
+# does not block the delete: rw keeps a pending forget for the next contact.
+# A copy whose forget is already pending is left to rw. rw missing: skipped
+# with a note. Notes go to stderr (stdout carries the one JSON reply).
+rw_forget_copies() {
+  local home rel id state rec="" owner="" w workers="" f rw st answer
+  [ -n "${HOME:-}" ] || return 0
+  home=$(canon "$HOME")
+  case ${ROOT%/} in "$home"/?*) rel=${ROOT%/} rel=${rel#"$home"/} ;; *) return 0 ;; esac
+  id=$(printf '%s' "$rel" | cksum | awk '{print $1}')
+  state=$(rw_state_dir)
+  if [ -f "$state/owned/$id/record.json" ]; then
+    rec="$state/owned/$id/record.json"
+    owner=$(json_str "$rec" owner)
+    w=$(json_str "$rec" worker)
+    if [ -n "$w" ] && ! forget_pending "$rec"; then workers=" $w"; fi
+  fi
+  for f in "$state/held"/*/"$id.json"; do
+    [ -f "$f" ] || continue
+    forget_pending "$f" && continue
+    w=$(basename "$(dirname "$f")")
+    case "$workers " in *" $w "*) ;; *) workers="$workers $w" ;; esac
+  done
+  if [ "$owner" = worker ] && [ "$ARG_DISCARD_REMOTE" != 1 ]; then
+    if [ "$json" != 1 ] && [ -t 0 ] && [ -t 2 ]; then
+      printf 'wt: %s is remote and its remote copy is the only current one; delete anyway? [y/N] ' "${ROOT##*/}" >&2
+      read -r answer || answer=""
+      case $answer in y | Y | yes) ;; *) die 5 "not deleted: $ROOT is remote (hand it back first with rw handback)" ;; esac
+    else
+      die 5 "$ROOT is remote and its remote copy is the only current one: hand it back first (rw handback), or pass --discard-remote"
+    fi
+  fi
+  [ -n "$workers" ] || return 0
+  if ! rw=$(rw_binary); then
+    printf 'wt: rw is not installed; the remote copies of %s were not deleted\n' "$ROOT" >&2
+    return 0
+  fi
+  for w in $workers; do
+    "$rw" forget "$ROOT" --worker "$w" </dev/null >&2
+    st=$?
+    case $st in
+      0) printf 'wt: deleted the remote copy of %s\n' "${ROOT##*/}" >&2 ;;
+      6) printf 'wt: remote unreachable; its copy of %s is deleted on next contact\n' "${ROOT##*/}" >&2 ;;
+      *) die 1 "rw forget failed for $ROOT (exit $st); nothing deleted" ;;
+    esac
+  done
+}
+
 # arg parsing shared by subcommands
-ARG_ROOT="" ARG_BRANCH="" ARG_FROM="" ARG_NAME="" ARG_FORCE=0 ARG_STASH=0 ARG_NO_PULL=0 ARG_HERE=0
+ARG_ROOT="" ARG_BRANCH="" ARG_FROM="" ARG_NAME="" ARG_FORCE=0 ARG_STASH=0 ARG_NO_PULL=0 ARG_HERE=0 ARG_DISCARD_REMOTE=0
 parse_args() {
   local allowed=$1
   shift
@@ -394,9 +480,9 @@ parse_args() {
         case " $allowed " in *" ${1%%=*} "*) ;; *) usage "unknown option: ${1%%=*}" ;; esac
         case $1 in --branch=*) ARG_BRANCH=${1#*=} ;; --from=*) ARG_FROM=${1#*=} ;; --name=*) ARG_NAME=${1#*=} ;; esac
         ;;
-      --force | --stash | --no-pull | --here)
+      --force | --stash | --no-pull | --here | --discard-remote)
         case " $allowed " in *" $1 "*) ;; *) usage "unknown option: $1" ;; esac
-        case $1 in --force) ARG_FORCE=1 ;; --stash) ARG_STASH=1 ;; --no-pull) ARG_NO_PULL=1 ;; --here) ARG_HERE=1 ;; esac
+        case $1 in --force) ARG_FORCE=1 ;; --stash) ARG_STASH=1 ;; --no-pull) ARG_NO_PULL=1 ;; --here) ARG_HERE=1 ;; --discard-remote) ARG_DISCARD_REMOTE=1 ;; esac
         ;;
       -h | --help) usage ;;
       -*) usage "unknown option: $1" ;;
@@ -579,8 +665,12 @@ rm_missing() {
   rest=${rest#*$'\t'}
   locked=${rest%%$'\t'*}
   reason=${rest#*$'\t'}
+  if [ "$locked" = 1 ] && [ "$ARG_FORCE" != 1 ]; then
+    die 4 "locked${reason:+: $reason}: $ROOT (use --force)"
+  fi
+  # Remote copies go first: a refusal or failure there leaves the lock.
+  rw_forget_copies
   if [ "$locked" = 1 ]; then
-    [ "$ARG_FORCE" = 1 ] || die 4 "locked${reason:+: $reason}: $ROOT (use --force)"
     git -C "$MAIN" worktree unlock "$ROOT" >/dev/null 2>&1 || die 1 "git worktree unlock failed for $ROOT"
   fi
   git -C "$MAIN" worktree prune >/dev/null 2>&1
@@ -615,6 +705,7 @@ rm_main() {
   common=$(canon "$COMMON")
   case $common in "$ROOT"/*) ;; *) die 5 "the git dir $common is outside $ROOT; not moving it to the Trash" ;; esac
   branch=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null)
+  rw_forget_copies
   trash_root
   if [ "$json" = 1 ]; then
     printf '{"ok":true,"removed":%s,"branch":%s,"trashed_to":%s,"main":true}\n' \
@@ -629,7 +720,7 @@ rm_main() {
 # worktree needs --force, which unlocks it first; --force overrides
 # nothing else.
 cmd_rm() {
-  parse_args "--force" "$@"
+  parse_args "--force --discard-remote" "$@"
   if [ ! -e "$ARG_ROOT" ] && resolve_missing "$ARG_ROOT"; then
     rm_missing
     return
@@ -646,8 +737,12 @@ cmd_rm() {
   rest=${rest#*$'\t'}
   locked=${rest%%$'\t'*}
   reason=${rest#*$'\t'}
+  if [ "$locked" = 1 ] && [ "$ARG_FORCE" != 1 ]; then
+    die 4 "locked${reason:+: $reason}: $ROOT (use --force)"
+  fi
+  # Remote copies go first: a refusal or failure there leaves the lock.
+  rw_forget_copies
   if [ "$locked" = 1 ]; then
-    [ "$ARG_FORCE" = 1 ] || die 4 "locked${reason:+: $reason}: $ROOT (use --force)"
     git -C "$MAIN" worktree unlock "$ROOT" >/dev/null 2>&1 || die 1 "git worktree unlock failed for $ROOT"
   fi
   trash_root

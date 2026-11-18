@@ -129,6 +129,9 @@ func cardContent(c card, iw int, selected bool, now int64) []string {
 	if c.pane != nil && paneState(c.pane) != state.StateNone {
 		items = append(items, statusChip(c.pane, now, selected))
 	}
+	if c.remote {
+		items = append(items, paint(remoteWord, tone(remoteFg, selected), "", false))
+	}
 	if m := memLabel(c.win.Panes); m != "" {
 		items = append(items, cardMem(m, selected))
 	}
@@ -306,8 +309,8 @@ type listRow struct {
 	markers    []marker
 }
 
-// marker is one row marker after the label (V6): a heavy symbol, the lock
-// or missing.
+// marker is one row marker after the label (V6): a heavy symbol, the lock,
+// remote or missing.
 type marker struct {
 	text, fg string
 }
@@ -316,8 +319,12 @@ type marker struct {
 // font, so it needs no font-codepoint-map entry.
 const lockIcon = "\uf023"
 
+// remoteWord marks a row or card whose directory root a worker holds
+// (D10). Never a host name.
+const remoteWord = "remote"
+
 // rowMarkers lists a worktree's markers in V6 order: heavy symbols (V8),
-// the lock, then missing.
+// the lock, remote (D10: shown on a bare, parked row too), then missing.
 func rowMarkers(t *state.Worktree, heavy []string) []marker {
 	var out []marker
 	for _, h := range heavy {
@@ -326,10 +333,22 @@ func rowMarkers(t *state.Worktree, heavy []string) []marker {
 	if t.Locked {
 		out = append(out, marker{lockIcon, lockFg})
 	}
+	if t.AllRemote() {
+		out = append(out, marker{remoteWord, remoteFg})
+	}
 	if t.Missing {
 		out = append(out, marker{"missing", errorFg})
 	}
 	return out
+}
+
+// sessionMarkers is a plain session row's markers: remote when every pane
+// of it is remote (D10); a mixed session marks its cards instead.
+func sessionMarkers(s *state.Session) []marker {
+	if s.AllRemote() {
+		return []marker{{remoteWord, remoteFg}}
+	}
+	return nil
 }
 
 // markersW is the width of the markers with a space before each.

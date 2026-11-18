@@ -85,7 +85,7 @@ func TestWorktreeRemoveArgv(t *testing.T) {
 	// A linked worktree goes to the Trash, never with --force (D105).
 	fixture(t, "out-wt-rm", `{"ok":true,"removed":"/r/x","branch":"wt/x","trashed_to":"/h/.Trash/x","main":false}`)
 	a := wtActions()
-	res, err := a.WorktreeRemove("/r/x")
+	res, err := a.WorktreeRemove("/r/x", false)
 	expectOK(t, err)
 	if res.Removed != "/r/x" || res.TrashedTo != "/h/.Trash/x" || res.Main || !a.rediscover {
 		t.Errorf("res=%+v rediscover=%v", res, a.rediscover)
@@ -95,25 +95,32 @@ func TestWorktreeRemoveArgv(t *testing.T) {
 	// A main checkout goes to the Trash; a missing worktree is pruned (D102).
 	reset(t)
 	fixture(t, "out-wt-rm", `{"ok":true,"removed":"/r/main","branch":"main","trashed_to":"/h/.Trash/main","main":true}`)
-	res, err = a.WorktreeRemove("/r/main")
+	res, err = a.WorktreeRemove("/r/main", false)
 	expectOK(t, err)
 	if want := (state.WTResult{Removed: "/r/main", Branch: "main", Main: true, TrashedTo: "/h/.Trash/main"}); !reflect.DeepEqual(res, want) {
 		t.Errorf("main:\n got %+v\nwant %+v", res, want)
 	}
 	reset(t)
 	fixture(t, "out-wt-rm", `{"ok":true,"pruned":"/r/gone","branch":"wt/gone"}`)
-	res, err = a.WorktreeRemove("/r/gone")
+	res, err = a.WorktreeRemove("/r/gone", false)
 	expectOK(t, err)
 	if res.Pruned != "/r/gone" || res.Removed != "" || res.Main || !a.rediscover {
 		t.Errorf("pruned: %+v", res)
 	}
 	expectCalls(t, wtLog, argv("rm", "/r/gone", "--json"))
 
+	// A remote root the user confirmed losing (D11).
+	reset(t)
+	fixture(t, "out-wt-rm", `{"ok":true,"removed":"/r/x","branch":"wt/x","trashed_to":"/h/.Trash/x","main":false}`)
+	_, err = a.WorktreeRemove("/r/x", true)
+	expectOK(t, err)
+	expectCalls(t, wtLog, argv("rm", "/r/x", "--discard-remote", "--json"))
+
 	// The linked-worktrees refusal keeps wt's code and message.
 	reset(t)
 	fixture(t, "out-wt-rm", `{"ok":false,"code":5,"error":"main checkout has 2 linked worktrees: remove them first"}`)
 	fixture(t, "exit-wt-rm", "5")
-	_, err = a.WorktreeRemove("/r/main")
+	_, err = a.WorktreeRemove("/r/main", false)
 	var we *state.WTError
 	if !errors.As(err, &we) || we.Code != state.WTRefused || err.Error() != "wt rm: main checkout has 2 linked worktrees: remove them first" {
 		t.Errorf("linked refusal: %v", err)
@@ -165,7 +172,7 @@ func TestWTErrors(t *testing.T) {
 	fixture(t, "err-wt-rm", "wt: locked: keep me: /r/x (use --force)\n")
 	fixture(t, "exit-wt-rm", "4")
 	a := wtActions()
-	_, err := a.WorktreeRemove("/r/x")
+	_, err := a.WorktreeRemove("/r/x", false)
 	var we *state.WTError
 	if !errors.As(err, &we) || we.Code != state.WTLocked || we.Op != "rm" {
 		t.Fatalf("err = %#v", err)

@@ -21,6 +21,9 @@ type card struct {
 	pane  *state.Pane
 	lead  *state.Pane // the window's first member pane, the subtitle of a card without an agent
 	split bool
+	// remote: the window has remote panes and its row is not remote as a
+	// whole, so the card says `remote` (D10: a mixed session's cards).
+	remote bool
 }
 
 // id identifies the selection across reloads.
@@ -80,15 +83,23 @@ func worktreeCards(t *state.Worktree) []card {
 	return sessionCards(t.Session)
 }
 
-// rowCards is the grid for a list row, nil for none.
+// rowCards is the grid for a list row, nil for none. A card is marked
+// remote only when its row is not: one fact, one placement (D10).
 func rowCards(r state.Row) []card {
+	var cards []card
+	whole := false
 	switch r := r.(type) {
 	case *state.Session:
-		return sessionCards(r)
+		cards, whole = sessionCards(r), r.AllRemote()
 	case *state.Worktree:
-		return worktreeCards(r)
+		cards, whole = worktreeCards(r), r.AllRemote()
 	}
-	return nil
+	if !whole {
+		for i := range cards {
+			cards[i].remote = cards[i].win.HasRemote()
+		}
+	}
+	return cards
 }
 
 // lastFocusedPane is the pane with the newest @pane_focus_at, or nil when

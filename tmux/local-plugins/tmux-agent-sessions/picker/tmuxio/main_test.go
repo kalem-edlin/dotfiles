@@ -19,6 +19,8 @@ var (
 	fakeDir  string // per-test fixtures: out-SUB, fail-SUB, rw-exit, mem
 	tmuxLog  string // one line per tmux call, args terminated by \x1f
 	rwLog    string
+	rwCmdLog string // the rw dispatcher shim (rw open, rw forget)
+	rwState  string // TMUX_REMOTE_WORKSPACES_STATE_DIR
 	memLog   string
 	wtLog    string
 	saveLog  string
@@ -59,6 +61,8 @@ func setupHarness(tmp string) error {
 	}
 	tmuxLog = filepath.Join(tmp, "tmux.log")
 	rwLog = filepath.Join(tmp, "rw.log")
+	rwCmdLog = filepath.Join(tmp, "rw-cmd.log")
+	rwState = filepath.Join(tmp, "rw-state")
 	memLog = filepath.Join(tmp, "mem.log")
 	wtLog = filepath.Join(tmp, "wt.log")
 	saveLog = filepath.Join(tmp, "save.log")
@@ -71,6 +75,7 @@ func setupHarness(tmp string) error {
 	shimMem := filepath.Join(bin, "pane-mem")
 	shimWT := filepath.Join(bin, "wt")
 	shimSave = filepath.Join(bin, "resurrect_save.sh")
+	shimRWCmd := filepath.Join(bin, "rw")
 	shims := map[string]string{
 		shimTmux: logArgs(tmuxLog) + fmt.Sprintf(
 			"if [ -f '%[1]s/fail-'\"$1\" ]; then /bin/cat '%[1]s/fail-'\"$1\" >&2; exit 1; fi\n"+
@@ -90,6 +95,13 @@ func setupHarness(tmp string) error {
 				"if [ -f '%[1]s/exit-wt-'\"$1\" ]; then exit \"$(/bin/cat '%[1]s/exit-wt-'\"$1\")\"; fi\n"+
 				"exit 0\n", fakeDir),
 		shimSave: logArgs(saveLog) + "exit 0\n",
+		// rw VERB: logs argv and TMUX_PANE, prints rw-out-VERB, exits
+		// with rw-exit-VERB (0 without).
+		shimRWCmd: logArgs(rwCmdLog) + fmt.Sprintf(
+			"printf 'TMUX_PANE=%%s\\n' \"${TMUX_PANE-unset}\" >>'%[2]s'\n"+
+				"if [ -f '%[1]s/rw-out-'\"$1\" ]; then /bin/cat '%[1]s/rw-out-'\"$1\"; fi\n"+
+				"if [ -f '%[1]s/rw-exit-'\"$1\" ]; then exit \"$(/bin/cat '%[1]s/rw-exit-'\"$1\")\"; fi\n"+
+				"exit 0\n", fakeDir, rwCmdLog+".env"),
 	}
 	for path, body := range shims {
 		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
@@ -121,6 +133,13 @@ func setupHarness(tmp string) error {
 	os.Setenv("TMUX_TMPDIR", filepath.Join(tmp, "tmux-tmpdir"))
 	os.Setenv("HOME", homeDir)
 	os.Unsetenv("AGENT_SESSIONS_RW_CLOSE")
+	os.Unsetenv("AGENT_SESSIONS_RW") // rw resolves on PATH, to the shim
+	// rw's records are read from a scratch state dir, never the user's.
+	os.Unsetenv("XDG_STATE_HOME")
+	os.Setenv("TMUX_REMOTE_WORKSPACES_STATE_DIR", rwState)
+	if rwBinary() != shimRWCmd || rwStateDir() != rwState {
+		return fmt.Errorf("rw resolves to %q, state dir %q", rwBinary(), rwStateDir())
+	}
 	os.Unsetenv("AGENT_SESSIONS_WT") // wt resolves on PATH, to the shim
 	// A real verified save would write the live resurrect directory.
 	os.Setenv("AGENT_SESSIONS_RESURRECT_SAVE", shimSave)
@@ -148,7 +167,8 @@ func reset(t *testing.T) {
 	for _, e := range entries {
 		os.Remove(filepath.Join(fakeDir, e.Name()))
 	}
-	for _, f := range []string{tmuxLog, rwLog, memLog, wtLog, saveLog} {
+	os.RemoveAll(rwState)
+	for _, f := range []string{tmuxLog, rwLog, rwCmdLog, rwCmdLog + ".env", memLog, wtLog, saveLog} {
 		if err := os.WriteFile(f, nil, 0o644); err != nil {
 			t.Fatal(err)
 		}

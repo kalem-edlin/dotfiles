@@ -354,7 +354,7 @@ func TestListFormat(t *testing.T) {
 		t.Fatalf("%d fields, %d columns", len(fields), nFields)
 	}
 	if !strings.HasPrefix(listFormat, "#{session_id}"+sep+"#{session_name}") ||
-		!strings.HasSuffix(listFormat, sep+"#{@agent_empty}"+sep+"#{pane_current_path}"+sep+"#{@agent_cwd}"+sep+"#{@pane_focus_at}"+sep+"#{session_attached}") {
+		!strings.HasSuffix(listFormat, sep+"#{@agent_empty}"+sep+"#{pane_current_path}"+sep+"#{@agent_cwd}"+sep+"#{@pane_focus_at}"+sep+"#{session_attached}"+sep+"#{@rw-root-id}") {
 		t.Errorf("format %q", listFormat)
 	}
 }

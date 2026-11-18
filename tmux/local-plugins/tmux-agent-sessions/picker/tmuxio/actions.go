@@ -81,9 +81,17 @@ func (a *actions) CreateSession(name, dir string) error {
 	}
 	// `=NAME:` is an exact session match; a bare name would also match
 	// window names in the current session.
-	args := []string{"new-session", "-d", "-s", name, "-c", dir, ";", "switch-client"}
-	args = append(args, a.clientArgs()...)
-	args = append(args, "-t", "="+name+":")
+	sw := append(append([]string{"switch-client"}, a.clientArgs()...), "-t", "="+name+":")
+	if rec, ok := remoteRootFor(dir); ok {
+		// A remote root opens on its worker (D12): the session's first
+		// pane becomes a remote pane before the client goes there.
+		if err := newPaneRemote(rec, "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", dir); err != nil {
+			return err
+		}
+		_, err := runTmux(sw...)
+		return err
+	}
+	args := append([]string{"new-session", "-d", "-s", name, "-c", dir, ";"}, sw...)
 	_, err := runTmux(args...)
 	return err
 }
@@ -100,6 +108,9 @@ func (a *actions) NewSession(name, dir string) error {
 	}
 	if dir == "" {
 		dir = home()
+	}
+	if rec, ok := remoteRootFor(dir); ok {
+		return newPaneRemote(rec, "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", name, "-c", dir)
 	}
 	_, err := runTmux("new-session", "-d", "-s", name, "-c", dir)
 	return err
@@ -126,6 +137,10 @@ func (a *actions) NewWindow(s *state.Session, dir, name string) error {
 	args := []string{"new-window", "-d", "-t", s.ID + ":", "-c", cwd}
 	if name != "" {
 		args = append(args, "-n", name)
+	}
+	if rec, ok := remoteRootFor(cwd); ok {
+		// A window in a remote root opens on its worker (D12).
+		return newPaneRemote(rec, append(args, "-P", "-F", "#{pane_id}")...)
 	}
 	_, err := runTmux(args...)
 	return err

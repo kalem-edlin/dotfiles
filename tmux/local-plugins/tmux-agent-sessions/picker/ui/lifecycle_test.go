@@ -234,7 +234,7 @@ func TestLifecycleRefusals(t *testing.T) {
 		t.Errorf("current row confirm: %v %q", m.pending, m.label)
 	}
 	m = send(t, m, "y")
-	expectCallList(t, f, "switch "+next.ID+" - -", "kill-session "+cur.ID, "wt rm /dev/dotfiles", "save")
+	expectCallList(t, f, "switch "+next.ID+" - -", "kill-session "+cur.ID, "rw forget /dev/dotfiles", "wt rm /dev/dotfiles", "save")
 	if !strings.Contains(input(m), "deleted dotfiles") {
 		t.Errorf("current row result: %q", input(m))
 	}
@@ -304,7 +304,7 @@ func TestDelete(t *testing.T) {
 	}
 	expectCallList(t, f)
 	m = send(t, m, "y")
-	expectCallList(t, f, "kill-session $2", "wt rm /dev/roll-hiring", "save")
+	expectCallList(t, f, "kill-session $2", "rw forget /dev/roll-hiring", "wt rm /dev/roll-hiring", "save")
 	if got := strings.TrimSpace(input(m)); m.quitting || !strings.HasPrefix(got, "deleted roll-hiring") || strings.Contains(got, "Trash") {
 		t.Errorf("status %q", got)
 	}
@@ -323,7 +323,7 @@ func TestDelete(t *testing.T) {
 		t.Errorf("bare confirm %q", input(m))
 	}
 	m = send(t, m, "y")
-	expectCallList(t, f, "wt rm /dev/yap-trial", "save")
+	expectCallList(t, f, "rw forget /dev/yap-trial", "wt rm /dev/yap-trial", "save")
 	if m.pending != promptNone {
 		t.Errorf("a second confirm opened: %v", m.pending)
 	}
@@ -367,7 +367,7 @@ func TestDeleteRefusals(t *testing.T) {
 	m, f = wtAt(t, 5)
 	f.wtErrs = map[string][]error{"rm": {wtErr("rm", state.WTLocked, "locked: late: /dev/yap-trial (use --force)")}}
 	m = send(t, m, "ctrl+a", "D", "y")
-	expectCallList(t, f, "wt rm /dev/yap-trial")
+	expectCallList(t, f, "rw forget /dev/yap-trial", "wt rm /dev/yap-trial")
 	if m.pending != promptNone || !strings.Contains(input(m), "wt rm: locked: late") {
 		t.Errorf("late lock %v %q", m.pending, input(m))
 	}
@@ -376,7 +376,7 @@ func TestDeleteRefusals(t *testing.T) {
 	m, f = wtAt(t, 6) // content-engine-9, missing
 	f.wtErrs = map[string][]error{"rm": {wtErr("rm", state.WTLocked, "locked: keep: /dev/content-engine-9 (use --force)")}}
 	m = send(t, m, "ctrl+a", "D")
-	expectCallList(t, f, "wt rm /dev/content-engine-9")
+	expectCallList(t, f, "rw forget /dev/content-engine-9", "wt rm /dev/content-engine-9")
 	if !strings.Contains(input(m), "wt rm: locked: keep") {
 		t.Errorf("missing %q", input(m))
 	}
@@ -389,7 +389,7 @@ func TestDeleteMissingPrunes(t *testing.T) {
 	f.wtResult = map[string]state.WTResult{"rm": {Pruned: "/dev/content-engine-9", Branch: "exp/gone"}}
 	loads := f.loads
 	m = send(t, m, "ctrl+a", "D")
-	expectCallList(t, f, "wt rm /dev/content-engine-9")
+	expectCallList(t, f, "rw forget /dev/content-engine-9", "wt rm /dev/content-engine-9")
 	if m.pending != promptNone || m.err != nil || !strings.Contains(input(m), "pruned content-engine-9") || f.loads != loads+1 {
 		t.Errorf("prune: %v %v %q loads+%d", m.pending, m.err, input(m), f.loads-loads)
 	}
@@ -408,7 +408,7 @@ func TestDeleteMain(t *testing.T) {
 		t.Fatalf("confirm %v\n %q\nwant %q", m.pending, input(m), want)
 	}
 	m = send(t, m, "y")
-	expectCallList(t, f, "wt status /dev/roll-hiring", "kill-session $2", "wt rm /dev/roll-hiring", "save")
+	expectCallList(t, f, "wt status /dev/roll-hiring", "kill-session $2", "rw forget /dev/roll-hiring", "wt rm /dev/roll-hiring", "save")
 	if got := strings.TrimSpace(input(m)); !strings.HasPrefix(got, "deleted repo content-engine-1") || strings.Contains(got, "moved") {
 		t.Errorf("status %q", got)
 	}

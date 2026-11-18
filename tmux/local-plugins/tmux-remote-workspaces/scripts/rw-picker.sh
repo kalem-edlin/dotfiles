@@ -1,55 +1,52 @@
 #!/usr/bin/env bash
-# Backs the `prefix e` binding (tmux.reset.conf): ONE versatile display-popup
-# picker with automatic intent detection off the focused (origin) pane --
-# no mode questions. Four outcomes, checked in this order:
+# Backs the `prefix e` binding (tmux.reset.conf): ONE display-popup whose
+# direction is decided by the focused (origin) pane's @remote-host
+# (docs/tasks/mini-remote-sessions.md, D12). The unit is a directory root
+# (P1): a worktree's git toplevel, or a plain folder, and every pane working
+# inside it moves together.
 #
-#   1. Origin pane is remote-backed (@rw-endpoint set) -> CONFIRM (tiny
-#      yes/no menu, worker + endpoint id shown), then on yes run
-#      rw-return.sh --pane <origin> DIRECTLY. Never send-keys: a
-#      remote-backed pane's foreground is a raw ssh PTY into the worker, so
-#      anything typed there lands on the WORKER's own shell (that trap cost
-#      a round trip 2026-08-05 -- `rw return` typed at the remote prompt ran
-#      the WORKER's own rw, which answered "pane %36 has no @rw-endpoint").
-#   2. Origin pane sits at a plain shell prompt:
-#      2a. cwd NOT in a git worktree -> the ORIGINAL ensure flow,
-#          unchanged: fzf worker list, then `rw ensure --worker <alias>`
-#          typed into the pane via send-keys (with a leading C-u to clear
-#          any half-typed input). The pane's cwd drives `auto` resolution.
-#      2b. cwd INSIDE a git worktree -> workspace HANDOFF by default
-#          (enter), with ctrl-o as the escape hatch back to the 2a ensure
-#          behavior. See pick_shell_workspace.
-#   3. Origin pane is busy running a HANDOFF-ELIGIBLE program (an AI coding
-#      agent -- claude/codex/pi, the same process patterns rw-handoff.sh's
-#      own adapters use -- or nvim/vim/vi) -> fzf worker list whose header
-#      says this will be a HANDOFF (move) of the running command, then run
-#      rw-handoff.sh --worker <alias> --pane <origin> DIRECTLY (never
-#      send-keys, same reasoning as above). For an editor specifically, the
-#      header also warns that unsaved buffers do NOT transfer -- workspace
-#      sync only ever copies disk state.
-#   4. Origin pane is busy with anything else -> today's refusal message.
+#   1. Remote pane (@remote-host set) -> "hand <root> back to this
+#      machine? (y/n)", then `rw handback --pane <origin>`.
+#   2. Local pane in a root that is already remote (the frozen local copy,
+#      D17) -> "open this pane remote in <root>? (y/n)", then
+#      `rw open --pane <origin>`. Only from a shell prompt: rw open replaces
+#      the pane's process.
+#   3. Any other local pane -> the worker chooser, its header naming the
+#      resolved root and how many panes move, then
+#      `rw handoff --worker <alias> --pane <origin>`.
+#
+# rw is always RUN from here, never typed into a pane with send-keys: a
+# remote pane's foreground is an ssh PTY into the worker, where anything
+# typed runs on the worker's own shell (2026-08-05). TMUX_PANE is unset for
+# the run, so rw takes its --pane branch (respawn that pane) instead of
+# exec-ing the popup into an attach loop.
+#
+# Exit codes from rw (scripts/rw usage): 5 -> the conflict dialog (the
+# files from rw's `conflict<TAB>path<TAB>kind` stdout lines, a screenful at
+# most, then overwrite / keep both / abort; the first two re-run with
+# --resolve), 6 -> "worker unreachable", 2/3/7 and anything else -> the
+# dismissible failure dialog with one cause line and one action line.
 #
 # Modes (self-invocations; the binding only ever calls `pick`):
-#   pick    run fzf inside the popup tty, then act on the focused pane
+#   pick    act on the focused pane
 #   list    emit worker lines instantly (reachability column pending)
 #   probe   emit the same lines with live online/offline status
 #
-# The list renders immediately via `list`; fzf's start event reloads it
-# from `probe` (parallel `ssh -o BatchMode=yes` probes bounded by the
+# The worker list renders immediately via `list`; fzf's start event reloads
+# it from `probe` (parallel `ssh -o BatchMode=yes` probes bounded by the
 # config's status timeout), so reachability fills in without delaying the
-# popup. fzf's stock ctrl-n/ctrl-p (down/up) are left untouched.
-#
-# Typed text that matches no listed worker is passed through as an alias
-# on enter (--print-query) for the ensure/handoff worker lists: the target
-# script rejects aliases not declared in config.json on its own.
+# popup. Typed text that matches no listed worker is passed through as an
+# alias on enter (--print-query); rw rejects aliases not in config.json.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
-# shellcheck source=common.sh
-source "$SCRIPT_DIR/common.sh"
+# shellcheck source=roots.sh
+source "$SCRIPT_DIR/roots.sh"
 
 mode="${1:-pick}"
+RW_BIN="$SCRIPT_DIR/rw"
 
 worker_line() { # alias platform status notes
   printf '%s\t[%s]\t%s\t%s\n' "$1" "$2" "$3" "$4"
@@ -65,8 +62,7 @@ list_workers() {
 # Each probe prints its own finished line (one printf, atomic well under
 # PIPE_BUF) so fzf's reload streams results in completion order: reachable
 # workers appear in ~a round trip instead of every row waiting out the
-# slowest host's timeout (a downed mini held the whole list hostage for
-# ~8s, 2026-08-05).
+# slowest host's timeout (2026-08-05).
 probe_workers() {
   local alias platform notes
   while IFS=$'\t' read -r alias platform notes; do
@@ -81,253 +77,232 @@ probe_workers() {
   wait
 }
 
-# rw_pick_worker_menu <prompt> <header> [expect-keys]
-# Shared fzf-over-the-worker-list chooser for both the ensure and handoff
-# branches. Prints the chosen (or typed, unmatched) alias on stdout; prints
-# nothing and returns 1 on abort (esc/ctrl-c) or an empty pick.
-# With expect-keys (comma-separated, fzf --expect syntax) the accept key
-# rides along: output becomes "<key>\t<alias>", where <key> is empty for a
-# plain enter. Callers without expect-keys see the original alias-only
-# output -- parsing is unchanged for them.
+# rw_pick_worker_menu <prompt> <header>
+# fzf over the worker list. Prints the chosen (or typed, unmatched) alias;
+# prints nothing and returns 1 on abort (esc/ctrl-c) or an empty pick.
 rw_pick_worker_menu() {
-  local prompt="$1" header="$2" expect="${3:-}" out status sel alias key=""
-  # The ${arr[@]+...} guard at the expansion below is load-bearing: the
-  # popup resolves `env bash` to macOS /usr/bin/bash 3.2 (tmux server PATH
-  # puts /usr/bin first), and on 3.2 an EMPTY-array "${arr[@]}" is FATAL
-  # under set -u -- it killed every no-expect menu (ensure and busy-agent
-  # handoff) the instant the popup opened, 2026-08-08.
-  local -a expect_args=()
-  [ -n "$expect" ] && expect_args=(--expect "$expect")
+  local prompt="$1" header="$2" out status sel alias
   out="$(list_workers | fzf \
     --layout=reverse --info=inline \
     --prompt="$prompt" \
     --header="$header" \
     --delimiter=$'\t' \
     --print-query \
-    ${expect_args[@]+"${expect_args[@]}"} \
     --bind "start:reload:$0 probe")"
   status=$?
-
-  # With --expect, fzf inserts the accept-key line between the query line
-  # and the selection line (empty line for plain enter); strip it into
-  # $key so the alias parsing below stays shared.
-  if [ -n "$expect" ]; then
-    key="$(printf '%s\n' "$out" | sed -n 2p)"
-    out="$(printf '%s\n' "$out" | sed 2d)"
-  fi
-
   case "$status" in
     0) sel="$(printf '%s\n' "$out" | tail -n1)" ;; # picked a listed worker
     1) sel="$(printf '%s\n' "$out" | head -n1)" ;; # typed alias, no match
     *) return 1 ;;                                 # aborted (esc / ctrl-c)
   esac
-
   alias="${sel%%$'\t'*}"
   alias="${alias//[[:space:]]/}"
   [ -n "$alias" ] || return 1
-  if [ -n "$expect" ]; then
-    printf '%s\t%s\n' "$key" "$alias"
-  else
-    printf '%s\n' "$alias"
-  fi
+  printf '%s\n' "$alias"
 }
 
-# rw_pick_handoff_kind <pane_id> <pane_current_command>
-# Prints "editor" or "agent" and returns 0 when the pane is busy running
-# something handoff-eligible; prints nothing and returns 1 otherwise. Only
-# used to decide THIS picker's own eligibility/header wording --
-# rw-handoff.sh re-detects for real via each adapter's own `detect`
-# subcommand, so a false positive here costs nothing worse than an offered
-# handoff that rw-handoff.sh itself then treats as workspace-only.
-rw_pick_handoff_kind() {
-  local pane_id="$1" cmd="$2"
-  case "$cmd" in
-    nvim | vim | vi)
-      printf 'editor\n'
-      return 0
-      ;;
-  esac
-
-  # AI coding-agent detection: walk the pane's own process tree (not just
-  # pane_current_command, which loses the distinguishing name for
-  # npm-launched CLIs like codex/pi -- they commonly surface as "node")
-  # against the same per-provider patterns rw-handoff.sh's own adapters use
-  # (libexec/adapters/common-adapter.sh's ca_patterns_claude/codex/pi,
-  # mirrored in this plugin's common.sh as rw_provider_pattern for exactly
-  # this kind of process-tree check -- see rw_wait_remote/local_provider_started).
-  local pane_pid ps_snapshot provider pattern
-  pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
-  [ -n "$pane_pid" ] || return 1
-  ps_snapshot="$(ps axo pid=,ppid=,command= 2>/dev/null)"
-  for provider in claude codex pi; do
-    pattern="$(rw_provider_pattern "$provider")"
-    if printf '%s\n' "$ps_snapshot" | rw_ps_tree_matches "$pattern" "$pane_pid"; then
-      printf 'agent\n'
-      return 0
-    fi
-  done
+# rw_pick_yes <question> -- "<question> (y/n)" on the popup tty; 0 on y.
+rw_pick_yes() {
+  local key=""
+  printf '\n  %s (y/n) ' "$1"
+  read -r -s -n 1 key 2>/dev/null </dev/tty || true
+  printf '%s\n' "$key"
+  case "$key" in y | Y) return 0 ;; esac
   return 1
 }
 
-# --- Intent 1: remote-backed origin pane -> confirm, then hand back -------
-pick_return() {
-  local origin_pane="$1" endpoint_id="$2" worker confirm_out confirm_status
-
-  worker="$(rw_pane_get "$origin_pane" @rw-worker)"
-  [ -n "$worker" ] || worker="?"
-
-  # Tiny two-line yes/no menu, not the worker list: this is a confirm, not
-  # a pick. esc/ctrl-c (nonzero fzf exit) and the explicit "stay remote"
-  # row both abort with no action taken -- returning is a real transfer,
-  # never triggered by an accidental keypress.
-  confirm_out="$(printf 'return to local\nstay remote\n' | fzf \
-    --layout=reverse --info=inline --no-multi \
-    --prompt='rw ⇒ ' \
-    --header="pane is remote-backed: worker '$worker', endpoint $endpoint_id -- return to local?")"
-  confirm_status=$?
-
-  [ "$confirm_status" -eq 0 ] && [ "$confirm_out" = "return to local" ] || exit 0
-
-  # Run rw-return.sh directly (never send-keys -- see the header comment).
-  # It targets $origin_pane explicitly via --pane, so running it here in
-  # the popup (rather than inside that pane) is fine: rw-return.sh atomically
-  # respawns that exact pane with tmux's configured local shell before it
-  # resumes an agent or releases the remote endpoint.
-  #
-  # stdin redirected from /dev/null: rw-return.sh's own normal tail
-  # (`exec "$SHELL" -l`) hands the CALLING pane a landing shell in the
-  # workspace directory -- the right move when it's run from an ordinary
-  # spare local pane, but inside this transient popup that would instead
-  # leave an idle login shell sitting in the popup until manually closed.
-  # With no tty on stdin, that final exec hits EOF and exits immediately
-  # instead, so the popup closes on its own (display-popup -E) right after
-  # rw-return.sh finishes its real work.
-  rw_pick_run_visible "rw return" \
-    "$SCRIPT_DIR/rw-return.sh" --pane "$origin_pane" </dev/null
+# rw_pick_tilde <path> -- ~/... under $HOME, for display only.
+# shellcheck disable=SC2088 # a literal ~ is the point
+rw_pick_tilde() {
+  case "$1" in
+    "$HOME") printf '~\n' ;;
+    "$HOME"/*) printf '~/%s\n' "${1#"$HOME"/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
 }
 
-# Run the handed command with output live in the popup AND captured; on
-# failure, hold the popup open as a dismissible DIALOG explaining the
-# failure in one cause line + one action line. Never a status-bar
-# display-message: refusals flashed there were unreadable/mistakable
-# (2026-08-05 invisible version block; 2026-08-06 truncated refusal;
-# 2026-08-08 operator: "a dialog I can dismiss, not useless text in the
-# command bar").
-rw_pick_run_visible() {
-  local label="$1" out_file status
-  shift
-  out_file="$(mktemp "${TMPDIR:-/tmp}/rw-picker-run.XXXXXX")"
-  "$@" 2>&1 | tee "$out_file"
+# rw_pick_plural <n> <noun> -- "1 pane", "3 panes".
+rw_pick_plural() {
+  if [ "$1" -eq 1 ]; then printf '1 %s' "$2"; else printf '%d %ss' "$1" "$2"; fi
+}
+
+# Run rw with its output live in the popup and captured in $RW_PICK_OUT.
+# rw's `conflict<TAB>...` stdout lines (exit 5; possibly thousands) are
+# captured but not echoed: the conflict dialog shows a screenful of them.
+RW_PICK_OUT=""
+rw_pick_run() {
+  local status
+  RW_PICK_OUT="$(mktemp "${TMPDIR:-/tmp}/rw-picker-run.XXXXXX")"
+  env -u TMUX_PANE "$RW_BIN" "$@" </dev/null 2>&1 | tee "$RW_PICK_OUT" | grep -v $'^conflict\t'
   status=${PIPESTATUS[0]}
-  if [ "$status" -ne 0 ]; then
-    rw_pick_failure_dialog "$label" "$out_file"
-  fi
-  \rm -f "$out_file"
   return "$status"
 }
 
-# Map every KNOWN refusal/protection to a two-line human explanation;
-# unknown failures fall back to the output tail. Keep entries SHORT: one
-# cause line, one action line -- no essays.
-rw_pick_failure_dialog() {
-  local label="$1" out_file="$2" cause="" action=""
-  if grep -q 'SOURCE workspace changed while the handoff was in flight\|source_changed_during_sync' "$out_file"; then
-    cause="another writer (a running agent or editor) edited this workspace mid-handoff"
-    action="pause/finish that writer, then retry"
-  elif grep -qi 'ssh_unreachable\|unreachable\|Connection timed out\|Could not resolve' "$out_file"; then
-    cause="worker is unreachable over ssh"
-    action="check the worker is awake/on the network, then retry"
-  elif grep -qi 'version' "$out_file" && grep -qi 'block' "$out_file"; then
-    cause="agent CLI version differs between here and the worker"
-    action="update the older side, then retry"
-  elif grep -qi 'diverged' "$out_file"; then
-    cause="the worker's copy of this workspace has diverged from local"
-    action="inspect it, or re-run with --force-diverged (backup is taken)"
-  elif grep -q 'destination content does not match' "$out_file"; then
-    cause="post-sync verification failed; the worker copy is unverified"
-    action="inspect the destination path from the log before retrying"
-  elif grep -q 'could not confirm a supported AI agent' "$out_file"; then
-    cause="the pane looked busy, but its agent session was not ready for a safe handoff"
-    action="wait for the agent to finish starting/persisting its thread, then retry"
-  elif grep -q 'attach loop was not started\|could not start the attach loop' "$out_file"; then
-    cause="the remote endpoint started, but the local pane could not safely switch into it"
-    action="the pane is still local; retry, or use rw return/close on the recorded endpoint"
+# rw_pick_transfer <verb> <args...>
+# `rw <verb> <args...>`; on exit 5 shows the conflict dialog and re-runs
+# with the chosen --resolve; any other failure gets the failure dialog.
+rw_pick_transfer() {
+  local verb="$1" status choice
+  shift
+  rw_pick_run "$verb" "$@"
+  status=$?
+  if [ "$status" -eq 5 ]; then
+    choice="$(rw_pick_conflict_dialog "$verb" "$RW_PICK_OUT")"
+    \rm -f "$RW_PICK_OUT"
+    case "$choice" in
+      overwrite | keep-both)
+        printf '\n'
+        rw_pick_run "$verb" "$@" --resolve "$choice"
+        status=$?
+        ;;
+      *)
+        printf '\n  %s aborted; nothing moved.\n' "rw $verb"
+        sleep 1
+        return 5
+        ;;
+    esac
+  fi
+  if [ "$status" -ne 0 ]; then
+    rw_pick_failure_dialog "rw $verb" "$status" "$RW_PICK_OUT"
+  fi
+  \rm -f "$RW_PICK_OUT"
+  return "$status"
+}
+
+# rw_pick_conflict_dialog <verb> <out_file>
+# Lists the conflicting files (a screenful, then "+N more") above a
+# three-way choice. Prints overwrite, keep-both, or nothing for abort.
+rw_pick_conflict_dialog() {
+  local verb="$1" out_file="$2" total rows room list title sel
+  total="$(grep -c $'^conflict\t' "$out_file" || true)"
+  rows="$(stty size </dev/tty 2>/dev/null | awk '{print $1}')"
+  case "$rows" in '' | *[!0-9]*) rows=24 ;; esac
+  # fzf's prompt, info line and three choices, the title and its blank.
+  room=$((rows - 9))
+  [ "$room" -ge 3 ] || room=3
+  if [ "$total" -gt "$room" ]; then
+    list="$(grep $'^conflict\t' "$out_file" | head -n $((room - 1)) | awk -F '\t' '{ printf "  %-8s %s\n", $3, $2 }')"
+    list="$list"$'\n'"  +$((total - room + 1)) more"
   else
-    cause="unrecognized failure -- last output:"
-    action="$(tail -n 2 "$out_file" | tr '\n' ' ')"
+    list="$(grep $'^conflict\t' "$out_file" | awk -F '\t' '{ printf "  %-8s %s\n", $3, $2 }')"
+  fi
+  case "$verb" in
+    handoff) title="$(rw_pick_plural "$total" file) changed on the remote copy since it was last synced; the local copy is about to replace it:" ;;
+    *) title="$(rw_pick_plural "$total" file) changed in the frozen local copy since the handoff; the remote copy is about to replace it:" ;;
+  esac
+  sel="$(printf '%s\n' \
+    $'overwrite\toverwrite: the incoming copy wins' \
+    $'keep-both\tkeep both: each losing file is kept as <file>.local-<date>' \
+    $'abort\tabort: nothing moves' |
+    fzf --layout=reverse --info=hidden --no-multi --no-sort \
+      --delimiter=$'\t' --with-nth=2 \
+      --prompt='conflict ⇒ ' \
+      --header="$title"$'\n'"$list")" || return 0
+  sel="${sel%%$'\t'*}"
+  case "$sel" in overwrite | keep-both) printf '%s\n' "$sel" ;; esac
+}
+
+# Hold the popup open as a dismissible DIALOG explaining the failure in one
+# cause line and one action line. Never a status-bar display-message:
+# refusals flashed there were unreadable (2026-08-05, 2026-08-06; operator
+# 2026-08-08: "a dialog I can dismiss, not useless text in the command bar").
+rw_pick_failure_dialog() {
+  local label="$1" status="$2" out_file="$3" cause="" action="" refusal
+  refusal="$(grep '^rw: ' "$out_file" | tail -n 1 | sed 's/^rw: //')"
+  case "$status" in
+    6)
+      cause="worker unreachable over ssh; nothing moved"
+      action="check the worker is awake and on the network, then retry"
+      ;;
+    2)
+      cause="the git history of the copy being overwritten has diverged"
+      action="inspect it, or re-run from a shell with --force-diverged (a backup is taken)"
+      ;;
+    3)
+      cause="agent CLI version differs between here and the worker"
+      action="update the older side, then retry"
+      ;;
+    7)
+      cause="${refusal:-the root is not in a state this allows}"
+      action="nothing moved; rw status lists remote roots"
+      ;;
+  esac
+  if [ -z "$cause" ]; then
+    if grep -q 'SOURCE workspace changed while the handoff was in flight\|source_changed_during_sync' "$out_file"; then
+      cause="another writer (a running agent or editor) edited this directory mid-transfer"
+      action="pause or finish that writer, then retry"
+    elif grep -q 'destination content does not match' "$out_file"; then
+      cause="post-sync verification failed; the copy is unverified"
+      action="inspect the destination path from the log before retrying"
+    elif grep -q 'could not confirm a supported AI agent\|neither a shell, an editor, nor a recognized agent' "$out_file"; then
+      cause="a pane in this root is busy with something that cannot move safely"
+      action="stop it, or wait for the agent to finish starting, then retry"
+    elif grep -q 'attach loop was not started\|could not start the attach loop' "$out_file"; then
+      cause="the remote side started, but a local pane could not switch into it"
+      action="retry, or check rw status for the recorded endpoint"
+    else
+      cause="${refusal:-unrecognized failure (exit $status)}"
+      action="$(tail -n 2 "$out_file" | grep -v $'^conflict\t' | tr '\n' ' ')"
+    fi
   fi
   printf '\n\033[1m%s failed\033[0m\n  cause:  %s\n  action: %s\n\n  [press any key to dismiss]\n' \
     "$label" "$cause" "$action"
-  # Popup tty, not stdin: some callers run us with stdin </dev/null.
   read -r -s -n 1 2>/dev/null </dev/tty || true
 }
 
-# --- Intent 2: plain shell prompt -> original ensure flow, unchanged ------
-pick_ensure() {
-  local origin_pane="$1" alias
-  alias="$(rw_pick_worker_menu 'rw ensure ⇒ ' \
-    $'enter: open a new window on the chosen worker\ntyped text with no match is used as the alias as-is')" || exit 0
-
-  # C-u first: clear anything half-typed at the prompt so the command
-  # lands clean. The pane's shell resolves `rw` from PATH (~/.local/bin
-  # symlink), same as typing it by hand.
-  tmux send-keys -t "$origin_pane" C-u "rw ensure --worker $alias" Enter
-}
-
-# --- Intent 2b: shell prompt INSIDE a git worktree -> handoff by default --
-# A shell pane sitting in a worktree is almost always "send this workspace
-# to a worker" (sync + this pane becomes the remote pane),
-# not "open an unrelated new window there". Default enter is a workspace
-# handoff; ctrl-o keeps the old
-# new-window ensure for when that is genuinely wanted.
-pick_shell_workspace() {
-  local origin_pane="$1" origin_cwd="$2" out key alias header
-  header="enter: HANDOFF this workspace (${origin_cwd##*/}) -- sync it and move this pane to the chosen worker
-ctrl-o: instead open a NEW remote window here (rw ensure -- no sync, remote dir used as-is)"
-
-  out="$(rw_pick_worker_menu 'rw handoff ⇒ ' "$header" 'ctrl-o')" || exit 0
-  key="${out%%$'\t'*}"
-  alias="${out#*$'\t'}"
-  [ -n "$alias" ] || exit 0
-
-  if [ "$key" = "ctrl-o" ]; then
-    tmux send-keys -t "$origin_pane" C-u "rw ensure --worker $alias" Enter
-    return
+# --- 1. Remote pane: hand its root back ------------------------------------
+pick_handback() {
+  local origin_pane="$1" root_id record="" root="" endpoint n=0
+  root_id="$(rw_pane_get "$origin_pane" @rw-root-id)"
+  if [ -z "$root_id" ]; then
+    endpoint="$(rw_pane_get "$origin_pane" @rw-endpoint)"
+    [ -n "$endpoint" ] && root_id="$(rw_read_endpoint "$endpoint" 2>/dev/null | jq -r '.root_id // empty')"
+  fi
+  [ -n "$root_id" ] && record="$(rw_owned_record_read "$root_id" 2>/dev/null || true)"
+  if [ -n "$record" ]; then
+    root="$(printf '%s' "$record" | jq -r '.root_local')"
+    # shellcheck disable=SC2046 # endpoint ids are fixed-format hex
+    n="$(rw_root_bound_panes "$root_id" $(printf '%s' "$record" | jq -r '.endpoints[]?') | wc -l | tr -d ' ')"
+  fi
+  if [ -z "$root" ]; then
+    root="$(tmux display-message -pt "$origin_pane" -F '#{pane_current_path}' 2>/dev/null || true)"
   fi
 
-  # Workspace-only handoff of the shell pane's worktree: rw-handoff.sh
-  # detects no agent in a plain shell pane and runs its normal
-  # workspace-only path (same flow the manual `rw handoff` CLI takes),
-  # then respawns $origin_pane into the attach loop itself.
-  rw_pick_run_visible "rw handoff" \
-    "$SCRIPT_DIR/rw-handoff.sh" --worker "$alias" --pane "$origin_pane"
+  printf '\n  %s is remote.' "$(rw_pick_tilde "$root")"
+  [ "$n" -gt 1 ] && printf ' %s come back with it.' "$(rw_pick_plural "$n" pane)"
+  printf '\n'
+  rw_pick_yes "hand $(rw_pick_tilde "$root") back to this machine?" || exit 0
+  printf '\n'
+  rw_pick_transfer handback --pane "$origin_pane"
 }
 
-# --- Intent 3: busy handoff-eligible pane -> fzf list, then handoff -------
-pick_handoff() {
-  local origin_pane="$1" origin_cmd="$2" kind="$3" header alias
+# --- 2. Local pane in the frozen copy of a remote root: open it remote ------
+pick_open() {
+  local origin_pane="$1" origin_cmd="$2" root="$3"
+  if ! rw_is_idle_command "$origin_cmd"; then
+    rw_dialog "$(rw_pick_tilde "$root") is remote, and this pane is busy running '$origin_cmd'. Open a new window for it from the picker instead (prefix o, then w)." \
+      "$origin_pane" "Remote workspace"
+    exit 0
+  fi
+  printf '\n  %s is remote; this local copy is frozen.\n' "$(rw_pick_tilde "$root")"
+  rw_pick_yes "open this pane remote in $(rw_pick_tilde "$root")?" || exit 0
+  printf '\n'
+  rw_pick_transfer open --root "$root" --pane "$origin_pane"
+}
 
-  case "$kind" in
-    editor)
-      header=$'enter: HANDOFF (move) the running '"$origin_cmd"$' to the chosen worker\nWARNING: unsaved buffers do NOT transfer -- workspace sync copies disk state only'
-      ;;
-    *)
-      header="enter: HANDOFF (move) the running $origin_cmd to the chosen worker"
-      ;;
-  esac
+# --- 3. Local pane: choose a worker, hand its root off ----------------------
+pick_handoff() {
+  local origin_pane="$1" root="$2" panes n editors header note alias
+  panes="$(rw_root_panes "$root")"
+  n="$(printf '%s\n' "$panes" | grep -c . || true)"
+  editors="$(printf '%s\n' "$panes" | awk -F '\t' '$8 == "nvim" || $8 == "vim" || $8 == "vi"' | grep -c . || true)"
+  note="$(rw_pick_plural "$n" pane) working in it move to the chosen worker (any session)"
+  [ "$n" -le 1 ] && note="this pane moves to the chosen worker; nothing else works in it"
+  header="hand off $(rw_pick_tilde "$root")"$'\n'"$note"
+  [ "$editors" -gt 0 ] && header="$header"$'\n'"editors move too, but unsaved buffers do not: save first"
 
   alias="$(rw_pick_worker_menu 'rw handoff ⇒ ' "$header")" || exit 0
-
-  # Run rw-handoff.sh directly (never send-keys, same reasoning as
-  # pick_return). Its own 5-step transactional design detects/stops the
-  # local agent when one is running (or, for nvim/vim/vi, leaves it a
-  # workspace-only handoff since no adapter covers editors) and, on
-  # success, respawns $origin_pane into the attach loop itself -- see
-  # rw-handoff.sh's own foreign-pane handling (its `--pane` != $TMUX_PANE
-  # branch, which now also matches nvim/vim/vi) for exactly how the pane
-  # ends up attached; this picker does not attach it.
-  rw_pick_run_visible "rw handoff" \
-    "$SCRIPT_DIR/rw-handoff.sh" --worker "$alias" --pane "$origin_pane"
+  rw_pick_transfer handoff --worker "$alias" --pane "$origin_pane"
 }
 
 pick() {
@@ -336,41 +311,33 @@ pick() {
 
   # Resolve the invoking pane BEFORE fzf: inside a popup, display-message
   # with no target resolves against the client's active pane, which is
-  # exactly the pane the popup was opened over. (Avoids relying on
-  # display-popup's own format expansion of its command.)
-  local origin_pane origin_cmd origin_endpoint handoff_kind
+  # exactly the pane the popup was opened over.
+  local origin_pane origin_cmd origin_cwd root
   origin_pane="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
   [ -n "$origin_pane" ] || exit 0
-  origin_cmd="$(tmux display-message -p '#{pane_current_command}' 2>/dev/null || true)"
 
-  origin_endpoint="$(rw_pane_get "$origin_pane" @rw-endpoint)"
-  if [ -n "$origin_endpoint" ]; then
-    pick_return "$origin_pane" "$origin_endpoint"
+  if [ -n "$(rw_pane_get "$origin_pane" @remote-host)" ]; then
+    pick_handback "$origin_pane"
     return
   fi
 
-  case "$origin_cmd" in
-    zsh | bash | sh | fish | dash | ksh)
-      local origin_cwd
-      origin_cwd="$(tmux display-message -pt "$origin_pane" -F '#{pane_current_path}' 2>/dev/null || true)"
-      if [ -n "$origin_cwd" ] &&
-        git -C "$origin_cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        pick_shell_workspace "$origin_pane" "$origin_cwd"
-      else
-        pick_ensure "$origin_pane"
-      fi
-      return
-      ;;
-  esac
+  origin_cmd="$(tmux display-message -pt "$origin_pane" -F '#{pane_current_command}' 2>/dev/null || true)"
+  origin_cwd="$(tmux display-message -pt "$origin_pane" -F '#{pane_current_path}' 2>/dev/null || true)"
+  [ -n "$origin_cwd" ] || exit 0
 
-  handoff_kind="$(rw_pick_handoff_kind "$origin_pane" "$origin_cmd")"
-  if [ -n "$handoff_kind" ]; then
-    pick_handoff "$origin_pane" "$origin_cmd" "$handoff_kind"
-  else
-    rw_dialog "Focused pane is running '$origin_cmd', not a shell prompt or supported handoff target." \
+  if rw_owned_root_for_path "$origin_cwd" >/dev/null; then
+    root="$(rw_default_root_for_path "$origin_cwd")"
+    pick_open "$origin_pane" "$origin_cmd" "$root"
+    return
+  fi
+
+  root="$(rw_default_root_for_path "$origin_cwd")"
+  if ! rw_root_rel "$root" >/dev/null; then
+    rw_dialog "$(rw_pick_tilde "$root") is not inside your home directory (or is the home directory itself); only directories under ~ can be handed off." \
       "$origin_pane" "Remote workspace"
     exit 0
   fi
+  pick_handoff "$origin_pane" "$root"
 }
 
 case "$mode" in

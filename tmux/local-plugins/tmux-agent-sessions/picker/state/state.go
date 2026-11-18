@@ -29,12 +29,16 @@ type Pane struct {
 	PID         int
 	Command     string // #{pane_current_command}
 	LastCommand string // @workspace-last-command, the last shell command line
-	Remote      bool   // @remote-host is set (D3). Remote panes have no memory and no agent.
-	MemKB       int64  // pane-mem footprint of the pane's process tree
-	HasMem      bool   // false for remote panes and when pane-mem gave no value
-	Path        string // #{pane_current_path}
-	AgentCwd    string // @agent_cwd, the agent's own working directory as its hooks last reported it
-	FocusAt     int64  // @pane_focus_at, epoch seconds the pane last gained focus, 0 if unset
+	// Remote: @remote-host is set (D3), or @rw-root-id names a root an rw
+	// ownership record says a worker holds (D10). Remote panes have no
+	// memory and no agent.
+	Remote   bool
+	RootID   string // @rw-root-id, the rw root the pane was handed off or opened in
+	MemKB    int64  // pane-mem footprint of the pane's process tree
+	HasMem   bool   // false for remote panes and when pane-mem gave no value
+	Path     string // #{pane_current_path}
+	AgentCwd string // @agent_cwd, the agent's own working directory as its hooks last reported it
+	FocusAt  int64  // @pane_focus_at, epoch seconds the pane last gained focus, 0 if unset
 	// Worktree is the worktree whose session holds the pane, nil when the
 	// session is named after no worktree.
 	Worktree *Worktree
@@ -95,6 +99,17 @@ type Window struct {
 	Session *Session
 }
 
+// HasRemote reports whether any pane of the window is remote: its card
+// shows `remote` in a mixed session (D10).
+func (w *Window) HasRemote() bool {
+	for _, p := range w.Panes {
+		if p.Remote {
+			return true
+		}
+	}
+	return false
+}
+
 // Session is one tmux session. Windows are in ascending window index.
 type Session struct {
 	ID           string // "$1"
@@ -123,6 +138,21 @@ func (s *Session) Recency() int64 {
 	return at
 }
 
+// AllRemote reports whether every pane of the session is remote, so the
+// whole row shows `remote` (D10). A session without panes is not.
+func (s *Session) AllRemote() bool {
+	n := 0
+	for _, w := range s.Windows {
+		for _, p := range w.Panes {
+			if !p.Remote {
+				return false
+			}
+			n++
+		}
+	}
+	return n > 0
+}
+
 // Members is every pane of the session, in window and pane order.
 func (s *Session) Members() []*Pane {
 	var out []*Pane
@@ -146,7 +176,11 @@ type Worktree struct {
 	Locked   bool   // git worktree lock
 	Missing  bool   // the directory is gone (prunable)
 	ActiveAt int64  // newest mtime of its HEAD and index, the last-active key without a session
-	Current  bool   // its session is the invoking client's
+	// Remote: an rw ownership record says a worker holds Root (D10, P1).
+	// The row shows `remote` with or without a session, and new windows
+	// for it open on the worker.
+	Remote  bool
+	Current bool // its session is the invoking client's
 	// Session is the session named after the worktree, nil for none: the
 	// row is then dim and has no cards.
 	Session *Session
@@ -158,6 +192,12 @@ func (t *Worktree) RowID() string    { return t.Root }
 func (t *Worktree) IsCurrent() bool  { return t.Current }
 func (t *Worktree) Members() []*Pane { return t.Panes }
 func (t *Worktree) Detached() bool   { return t.Branch == "" }
+
+// AllRemote is the row-level `remote` fact (D10): the root is held by a
+// worker, or every pane of its session is remote.
+func (t *Worktree) AllRemote() bool {
+	return t.Remote || (t.Session != nil && t.Session.AllRemote())
+}
 
 // Recency is the worktree's last activity: its session's last access
 // (newest focus stamp or attach), else the newest mtime of its HEAD and
@@ -287,8 +327,11 @@ type Actions interface {
 	// WorktreeRemove moves the worktree to the Trash, dirt and all, and
 	// prunes its registration (never its branch, D105). A main checkout
 	// with no linked worktrees moves there too; a missing directory's
-	// registration is pruned (D102). A locked worktree is refused.
-	WorktreeRemove(root string) (WTResult, error)
+	// registration is pruned (D102). A locked worktree is refused. wt rm
+	// itself runs rw forget for the workers holding root (D11) and refuses
+	// a root that is remote right now unless discardRemote (wt rm
+	// --discard-remote): the user confirmed losing the only current copy.
+	WorktreeRemove(root string, discardRemote bool) (WTResult, error)
 	// WorktreeEnvRefresh pulls the env renders afresh in the main checkout
 	// of root's repo (its `wt.envPull` git config, when set) and copies
 	// them to every linked worktree, each keeping its own ports (D109).
@@ -298,6 +341,23 @@ type Actions interface {
 	// SaveLayout starts a verified resurrect save in the background,
 	// detached, and does not wait for it.
 	SaveLayout() error
+
+	// ForgetRoot runs `rw forget <root> --worker <alias>` for every worker
+	// that holds a copy of root, as rw's records say (D11): the worker
+	// copies and their remote sessions go before the root is deleted
+	// here. Nothing runs when no worker holds it. An unreachable worker
+	// (rw exit 6) is no error: rw keeps a pending forget for the next
+	// contact, and the worker is listed in Pending. Any other failure is
+	// an error and the delete must stop.
+	ForgetRoot(root string) (RWForget, error)
+}
+
+// RWForget is what ForgetRoot did. Workers are never named in the UI (D10);
+// the counts are.
+type RWForget struct {
+	Forgotten []string // workers whose copy was deleted
+	Pending   []string // unreachable workers, deleted on next contact
+	NoRW      bool     // workers hold the root but rw is not installed
 }
 
 // wt exit codes (git/.local/bin/wt).

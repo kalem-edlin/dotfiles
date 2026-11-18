@@ -35,6 +35,9 @@ git config --file "$GIT_CONFIG_GLOBAL" init.defaultBranch main
 git config --file "$GIT_CONFIG_GLOBAL" advice.detachedHead false
 # Listeners on this machine must not move the allocator's answer.
 export WT_PORT_PROBE=0
+# rw's ownership records (wt rm, D11) live in a scratch state dir.
+export TMUX_REMOTE_WORKSPACES_STATE_DIR="$scratch/rw-state"
+unset XDG_STATE_HOME
 unset GIT_DIR GIT_WORK_TREE
 
 pass=0
@@ -541,6 +544,120 @@ git -C "$scratch/sep/main" commit -q --allow-empty -m sep
 wt rm "$scratch/sep/main" --json
 check_true "rm refuses a checkout whose git dir is outside it" "[ $rc -ne 0 ] && [ \"\$(field .ok)\" = false ]"
 check_true "outside git dir: nothing moved" "[ -d '$scratch/sep/main' ] && [ ! -e '$HOME/.Trash/main-sep' ]"
+
+# --- rm and remote copies (rw forget, D11) -------------------------------------
+#
+# A repo under the temp HOME (rw roots are relative to ~), rw records written
+# by hand as rw writes them (one-line JSON), and a fake rw first in PATH that
+# logs its argv and exits with $scratch/rw-exit (0 without).
+
+RWP="$HOME/dev/rwproj"
+git init -q "$RWP/main"
+git -C "$RWP/main" commit -q --allow-empty -m base
+for n in a b c d e f; do git -C "$RWP/main" worktree add -q -b "rw/$n" "$RWP/$n" 2>/dev/null; done
+fake_bin="$scratch/fake-rw"
+mkdir -p "$fake_bin"
+cat >"$fake_bin/rw" <<FAKE
+#!/bin/sh
+printf '%s\n' "\$*" >>'$scratch/rw.log'
+echo "rw: fake output on stdout"
+[ -f '$scratch/rw-exit' ] && exit "\$(cat '$scratch/rw-exit')"
+exit 0
+FAKE
+chmod +x "$fake_bin/rw"
+saved_path=$PATH
+PATH="$fake_bin:$PATH"
+rw_id() { printf '%s' "dev/rwproj/$1" | cksum | awk '{print $1}'; }
+rw_record() { # NAME OWNER WORKER [PENDING-ACTION]
+  local id dir pending=""
+  id=$(rw_id "$1")
+  dir="$TMUX_REMOTE_WORKSPACES_STATE_DIR/owned/$id"
+  mkdir -p "$dir"
+  [ -n "${4:-}" ] && pending=",\"pending\":{\"action\":\"$4\",\"reason\":\"remote was unreachable\",\"at\":\"x\"}"
+  printf '{"root_id":"%s","root_rel":"dev/rwproj/%s","root_local":"%s","kind":"git","worker":"%s","worker_root":"/w/dev/rwproj/%s","owner":"%s","since":"x","endpoints":[]%s}' \
+    "$id" "$1" "$RWP/$1" "$3" "$1" "$2" "$pending" >"$dir/record.json"
+}
+rw_held() { # NAME WORKER
+  mkdir -p "$TMUX_REMOTE_WORKSPACES_STATE_DIR/held/$2"
+  printf '{"worker":"%s","root_id":"%s","root_rel":"dev/rwproj/%s","worker_root":"/w","since":"x"}' \
+    "$2" "$(rw_id "$1")" "$1" >"$TMUX_REMOTE_WORKSPACES_STATE_DIR/held/$2/$(rw_id "$1").json"
+}
+rw_reset() { rm -f "$scratch/rw.log" "$scratch/rw-exit"; : >"$scratch/rw.log"; }
+
+rw_reset
+wt rm "$RWP/a" --json
+check_rc "rm with no rw records" 0
+check_eq "rm with no rw records: rw not called" "" "$(cat "$scratch/rw.log")"
+
+# Handed back earlier: the worker still holds a copy (held/ only).
+rw_reset
+rw_held b w1
+wt rm "$RWP/b" --json
+check_rc "rm of a root a worker holds a copy of" 0
+check_json "rm with rw forget (rw's own output kept off stdout)"
+check_eq "rm: rw forget called for the holder" "forget $RWP/b --worker w1" "$(cat "$scratch/rw.log")"
+check_true "rm: deleted after forget" "[ ! -e '$RWP/b' ]"
+
+# Remote right now: refused without --discard-remote, nothing called.
+rw_reset
+rw_record c worker w1
+rw_held c w1
+rw_held c w2
+wt rm "$RWP/c" --json
+check_rc "rm of a remote root without --discard-remote" 5
+check_true "rm remote refusal: says remote" "printf '%s' \"\$(field .error)\" | grep -q 'is remote and its remote copy is the only current one'"
+check_eq "rm remote refusal: rw not called" "" "$(cat "$scratch/rw.log")"
+check_true "rm remote refusal: kept" "[ -d '$RWP/c' ]"
+wt rm "$RWP/c" --discard-remote --json
+check_rc "rm --discard-remote of a remote root" 0
+check_eq "rm --discard-remote: forget per holder" "forget $RWP/c --worker w1
+forget $RWP/c --worker w2" "$(cat "$scratch/rw.log")"
+check_true "rm --discard-remote: deleted" "[ ! -e '$RWP/c' ]"
+
+# Unreachable worker (exit 6): the delete goes on, rw keeps a pending forget.
+rw_reset
+rw_record d worker w1
+echo 6 >"$scratch/rw-exit"
+wt rm "$RWP/d" --discard-remote --json
+check_rc "rm with an unreachable worker still deletes" 0
+check_eq "rm unreachable: forget was called" "forget $RWP/d --worker w1" "$(cat "$scratch/rw.log")"
+check_true "rm unreachable: deleted" "[ ! -e '$RWP/d' ]"
+check_true "rm unreachable: noted" "printf '%s' \"\$err\" | grep -q 'deleted on next contact'"
+
+# Any other rw failure blocks the delete.
+rw_reset
+rw_held e w1
+echo 1 >"$scratch/rw-exit"
+wt rm "$RWP/e" --json
+check_rc "rm with a failing rw forget" 1
+check_true "rm failing forget: kept" "[ -d '$RWP/e' ]"
+check_true "rm failing forget: says so" "printf '%s' \"\$(field .error)\" | grep -q 'rw forget failed'"
+
+# A forget already pending is rw's to finish: not called again.
+rw_reset
+rw_record e focus w1 forget
+rm -f "$TMUX_REMOTE_WORKSPACES_STATE_DIR/held/w1/$(rw_id e).json"
+wt rm "$RWP/e" --json
+check_rc "rm with a pending forget" 0
+check_eq "rm pending forget: rw not called" "" "$(cat "$scratch/rw.log")"
+
+# rw not installed: skipped with a note, the delete goes on.
+rw_reset
+rw_held f w1
+PATH=$saved_path
+no_rw_path="/usr/bin:/bin:$(dirname "$(command -v git)")"
+PATH=$no_rw_path
+if command -v rw >/dev/null 2>&1; then
+  PATH=$saved_path
+  echo "ABORT: rw still resolves without the fake ($no_rw_path)" >&2
+  exit 2
+fi
+wt rm "$RWP/f" --json
+PATH=$saved_path
+check_rc "rm without rw installed" 0
+check_true "rm without rw: deleted" "[ ! -e '$RWP/f' ]"
+check_true "rm without rw: noted" "printf '%s' \"\$err\" | grep -q 'rw is not installed'"
+check_eq "rm without rw: fake rw not reached" "" "$(cat "$scratch/rw.log")"
 
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

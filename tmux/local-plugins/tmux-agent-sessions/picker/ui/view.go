@@ -73,6 +73,7 @@ func (m model) listRow(row state.Row, pos []int, repoHit bool) listRow {
 	switch x := row.(type) {
 	case *state.Session:
 		r = newSessionRow(x, pos)
+		r.markers = sessionMarkers(x)
 		// Keep names in line with the branch labels behind the badges.
 		r.repo, r.statusOnly = strings.Repeat(" ", badgeW), m.fullRepo
 	case *state.Worktree:

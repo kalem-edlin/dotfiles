@@ -112,10 +112,14 @@ func (a *actions) WorktreeRepurpose(root, branch string) (state.WTResult, error)
 	return r, runWT("repurpose", &r, args...)
 }
 
-func (a *actions) WorktreeRemove(root string) (state.WTResult, error) {
+func (a *actions) WorktreeRemove(root string, discardRemote bool) (state.WTResult, error) {
+	args := []string{root}
+	if discardRemote {
+		args = append(args, "--discard-remote")
+	}
 	var r state.WTResult
 	a.rediscover = true
-	return r, runWT("rm", &r, root)
+	return r, runWT("rm", &r, args...)
 }
 
 func (a *actions) WorktreeEnvRefresh(root string, here bool) (state.WTEnvResult, error) {
