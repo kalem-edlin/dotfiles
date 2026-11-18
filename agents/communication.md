@@ -54,6 +54,7 @@ Apply these preferences to your own prose. Follow requested formats and project 
 
 - Agents and subagents must run persistent or interactive CLI jobs in foreground tmux panes. Put user-visible jobs (dev servers, watchers, log captures) in a `processes` window in the agent's current session (the parent's for subagents). Reserve the shared `processes` session for agent-only ad hoc CLI jobs, including short-lived interactive tools. Use short purpose names and report tmux targets and stop commands. Do not detach jobs with `&` or `nohup`. If tmux is unavailable, ask before starting persistent jobs.
 - Bound capture duration, log growth, and pane scrollback. Stop temporary jobs and their descendants when done unless I request they remain running. Do not stop unrelated jobs.
+- Before `rm`, resolve any `$(...)`, variable or glob on its own, check the paths are safe to delete, then `rm` the literal paths.
 
 ### 5. Awaiting input marker
 
