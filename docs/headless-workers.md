@@ -183,8 +183,10 @@ laptop never does.
   (start time and pid) the session was last seen on, persisted per endpoint
   in `~/.local/state/tmux-remote-workspaces/attach-seen/`; with no record the
   loop recreates the session, never closes it.
-- **Log:** `~/.local/state/tmux-workspace-resurrect/boot-restore.log` (next to
-  the save timer's `launchd-save.log`). Exit status: 0 on restore, no-op or
+- **Log:** `~/.local/state/tmux-workspace-resurrect/boot-restore.log`. Save
+  results go to `workspace-resurrect.log` in the same directory;
+  `launchd-save.log` only captures the save wrapper's own stderr and stays
+  empty on success. Exit status: 0 on restore, no-op or
   nothing to restore; 75 when another caller held the boot lock past the
   timeout (the attach loop retries, never builds an empty session); 1 on a
   restore that did not complete (saves stay blocked for that server until a

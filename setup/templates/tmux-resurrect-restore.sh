@@ -49,7 +49,7 @@
 # client-detached saves see.
 #
 # Output (this script's and every child's) is appended to
-# $STATE_DIR/boot-restore.log, next to the save timer's launchd-save.log.
+# $STATE_DIR/boot-restore.log (save results are in workspace-resurrect.log).
 # Exit status: 0 on restore, on a no-op, and when there is nothing to
 # restore; 75 when another caller held the boot lock past the timeout (try
 # again later; a caller must not build anything in the meantime); 1 on any
