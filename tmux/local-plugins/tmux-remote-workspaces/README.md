@@ -33,28 +33,41 @@ rw handoff --worker <alias> [--root <path>] [--pane <pane-id>] [--check-lfs]
 rw handback [--root <path>] [--pane <pane-id>] [--check-lfs]
             [--force-diverged] [--resolve overwrite|keep-both|abort]
 rw open    [--worker <alias>] [--root <path>] [--pane <pane-id>]
-rw forget  <root> [--worker <alias>]
-rw reclaim --force <root>
+rw forget  <root> [--worker <alias>] [--force]
+rw reclaim [--force] <root>
 rw status  [--json]
-rw close   [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
+rw close   [--pane <pane-id> | --endpoint <id>] [--no-kill-pane] [--reason <text>]
 rw doctor
 ```
 
 - `handoff` moves a root to a worker: by default the pane's git toplevel,
   or the pane's directory when it is not in a repository. Every pane on the
   laptop server whose cwd is the root or inside it (any depth, any session)
-  moves with it; the rest of a mixed session stays local.
+  moves with it; the rest of a mixed session stays local. Without an
+  explicit `--root`, a plain folder that is a top-level folder of `~` (like
+  `~/Developer`) or that holds git repositories is refused (exit 7): hand
+  off the project inside it, or pass `--root` to mean the whole folder.
 - `handback` brings the root and all of its panes (and their agents) back.
   It replaces `rw return`.
 - `open` is a new remote pane in a root that is already remote (splits and
   the picker use it). No sync. Idempotent: on a pane that already has a
   live endpoint it reattaches instead. It replaces `rw ensure`.
 - `forget` is for a root that is gone (deleted worktree or session): it
-  closes the root's remote panes and deletes every remote copy this machine
-  handed off. An unreachable worker is cleaned up on next contact.
-- `reclaim --force` takes a remote root back from the frozen local copy
-  when its worker is unreachable; remote work since the handoff stays on
-  the (now stale) remote copy.
+  deletes every remote copy this machine handed off, then closes the root's
+  remote panes. A remote directory that already existed before rw's first
+  handoff is never deleted (only rw's mirror record goes). A root that is
+  remote right now needs `--force` (its remote copy is the only current
+  one); the picker and `wt rm` pass it after asking. An unreachable worker
+  is cleaned up on next contact.
+- `reclaim` takes a remote root back from the frozen local copy when its
+  worker is unreachable: it probes the worker first and refuses when it
+  answers (use `handback`); `--force` skips the probe. Remote work since
+  the handoff stays on the (now stale) remote copy.
+- `close --endpoint <id>` closes a registered endpoint no local pane
+  carries (e.g. an agent left running on a reclaimed root's stale copy).
+- Every command that changes a root takes a per-root lock
+  (`locks/root-<root_id>`, reclaimed when its holder died); a second one
+  for the same root fails with exit 1 instead of interleaving.
 - `status` lists roots (owner, worker, panes, pending) and endpoints; it
   never touches ssh. `--json` prints the ownership records as one array.
 
@@ -125,21 +138,36 @@ worker.
 
 ```text
 rw handoff --worker <alias>
-  -> resolve the root (git toplevel or plain directory; must be under ~)
+  -> resolve the root (git toplevel or plain directory; must be under ~);
+     take the per-root lock
   -> preflight the worker (tmux, git, rsync, physical $HOME; consume-never-provision)
-  -> per pane in the root: detect a supported agent, check its CLI version
-     (one exit-3 block aborts everything before any pane is touched)
+  -> per pane in the root: detect a supported agent; refuse a working agent
+     or a busy pane no adapter recognizes; check the agent CLI version
+     (one exit-3 block aborts everything before anything is touched)
+  -> stop the local agents, so the snapshot holds their last write
   -> ONE sync of the root to <worker home>/<path relative to ~>
        git channel (git roots): bundle, staged/unstaged patches, untracked tar
        rsync channel: the gitignored set (git roots) or the whole tree (plain)
-       divergence gate (exit 2) and manifest gate (exit 5 unless --resolve)
-  -> owned/<root_id>/record.json: owner = worker; mirror written on the worker
+       divergence gate (exit 2) and manifest gate (exit 5 unless --resolve);
+       on failure the local agents are resumed and nothing moved
   -> per pane: hidden worker session rw-<focus-short-id>-<endpoint-id> in the
-     pane's mapped directory; agent export/install/resume there (claudef/pif);
-     the local agent stops only after the remote one verifiably started;
-     endpoints/<endpoint-id>.json; pane options; the pane is replaced by
-     attach-loop.sh <endpoint-id> (same pane id, layout, window)
+     pane's mapped directory; the (now final) transcript exported, installed
+     and resumed there (claudef/pif) and verified
+  -> any failure: roll everything back (worker sessions killed, local agents
+     resumed, root stays local; exit 1)
+  -> commit: owned/<root_id>/record.json (owner = worker) and the worker's
+     mirror; endpoints/<endpoint-id>.json; pane options; each pane replaced
+     by attach-loop.sh <endpoint-id> (same pane id, layout, window)
 ```
+
+`rw handback` mirrors it: lock, preflight (exit 6 leaves everything as it
+was), stop the remote agents, ONE pull (manifests stored at once, so an
+interrupted hand-back retries cleanly), export and install every
+transcript, then give each pane its local shell back and resume its agent
+there. If any pane fails, every pane goes back on its attach loop, the
+remote agents are resumed, and the root stays remote with nothing pending
+(exit 1). Only after every pane is back are the worker sessions closed and
+the record deleted.
 
 While the root is remote the worker copy is the single source of truth. The
 laptop copy stays on disk, frozen (a linked worktree's registration lives in
@@ -184,8 +212,10 @@ transcript `cwd` fields, and pi's session header `cwd`, are rewritten to it.
 
 `libexec/sync/handoff` (see `libexec/sync/README.md`) moves a root over two
 channels and records a manifest -- `<relpath>\t<size>\t<mtime>` for every
-file the rsync channel carries, plus `#git\t<fingerprint>` for git roots --
-on both sides at every ownership change.
+file whose content a sync can overwrite outside git's own diff (git roots:
+gitignored and untracked files; plain roots: every file), plus
+`#git\t<fingerprint>` for git roots -- on both sides at every ownership
+change.
 
 Owner wins. Before a copy is overwritten (the worker copy at handoff, the
 frozen laptop copy at hand-back) it is compared with its stored manifest:
@@ -196,9 +226,16 @@ first renames each losing file to `<file>.local-<YYYYMMDD-HHMMSS>`,
 any later sync and never count as changes. A copy with no stored manifest
 (first handoff onto an existing remote directory) is compared with the
 incoming source instead, so only files that would really be replaced or
-deleted are listed. Changes to committed, staged, unstaged or untracked git
-state are the git channel's divergence gate (exit 2, `--force-diverged`
-overrides after a backup).
+deleted are listed. A file the destination already holds in the incoming
+version is never a conflict (a retry after an interrupted transfer
+converges). Changes to committed, staged or unstaged git state are the git
+channel's divergence gate (exit 2, `--force-diverged` overrides after a
+backup); an existing remote repository with no record of an earlier sync
+that differs from the source is exit 2 too, never silently reset. Roots
+with git submodules are refused before anything is touched. Plain roots get
+a backup of every file a transfer replaces or deletes, and an owner copy
+with no files at all never empties the other copy without
+`--resolve overwrite`.
 
 ## Registry (state root: `~/.local/state/tmux-remote-workspaces/`)
 
@@ -307,7 +344,11 @@ dotfiles clone having pulled the same revision first.
 `tests/run.sh` runs the shell suite (`tests/test_*.sh`): path mapping and
 `root_id`, ownership records and `rw_owned_root_for_path`, worker mirrors,
 manifest generation and diff, the conflict gate (exit 5, keep-both,
-overwrite), rsync-channel set selection, sync round trips of a plain folder
+overwrite), rsync-channel set selection, the sync safety fixes
+(untracked content, existing repositories, interrupted retries, submodules,
+nested repositories, plain backups), agent ordering and rollback
+(`test_agent_flow.sh`, a pane-aware tmux stub plus fake adapters via
+`RW_ADAPTERS_DIR`), pi transcript identity, reconcile guards, sync round trips of a plain folder
 and a linked worktree (push, remote edits, pull; deletions on both
 channels; divergence exit 2; the ssh exec wrapper with rsync `-e`), and the
 `rw` command surface end to end (handoff, open, handback, conflicts,
@@ -345,7 +386,9 @@ typed into the endpoint pane's interactive login shell so the launcher
 resolves whether it is a script on `PATH` or a zsh function, and fnm's node
 is active -- so hooks (agent-state publisher, resurrect session record) run
 on the worker exactly as on the laptop. `versions` refuses (before anything
-moves) when the worker cannot resolve the launcher. A pane with no detected
+moves) when the worker cannot resolve the launcher. pi transcripts travel by
+exact id (`<timestamp>_<id>.jsonl`), so two pi agents in one root each
+resume their own session. A pane with no detected
 agent is a workspace-only pane; a busy pane no adapter recognizes aborts
 the whole handoff.
 
@@ -358,8 +401,10 @@ endpoint because its pane was not found.
 - `libexec/reconcile` (post-resurrection, on the
   `@resurrect-hook-post-restore-all` chain after `rw-post-restore.sh`)
   closes only worker sessions in this machine's namespace that have no
-  registry entry at all, and finishes tombstoned closes. `rw doctor` runs it
-  with `--dry-run`.
+  registry entry at all, are older than the min-age
+  (`RW_RECONCILE_MIN_AGE_SECONDS`, default 120: `rw open`/handoff create a
+  session a moment before registering it) and have no client attached; and
+  finishes tombstoned closes. `rw doctor` runs it with `--dry-run`.
 - `libexec/reconcile-worker` (run by `rw open`) closes unregistered
   `rw-<focus-id>-*` sessions a worker's own restore revived: registry
   membership is authoritative, min-age vs the create-to-registry gap,
@@ -367,9 +412,12 @@ endpoint because its pane was not found.
   candidates, exact-match kills.
 - `libexec/reconcile-local` is report-only: it lists registered endpoints
   no live local pane carries (logged to `rw.log`, never closed).
-- Pending actions (`rw forget` or `rw reclaim --force` while a worker was
+- Pending actions (`rw forget` or `rw reclaim` while a worker was
   unreachable) run on the next contact with that worker: any `handoff`,
-  `handback`, `open` or `forget` that reaches it.
+  `handback`, `open` or `forget` that reaches it. A reclaim's cleanup closes
+  the root's remote sessions except those running a handed-off agent, which
+  are never closed automatically (`rw close --endpoint <id>` once their work
+  is rescued).
 
 ## Field-validation status
 

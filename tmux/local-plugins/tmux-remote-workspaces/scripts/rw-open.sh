@@ -46,6 +46,8 @@ done
 start_loop() {
   local endpoint="$1" fresh="${2:-}" cmd dir
   if [ "$pane_id" = "${TMUX_PANE:-}" ]; then
+    rw_root_unlock_all # exec skips the EXIT trap
+    trap - EXIT
     exec "$SCRIPT_DIR/attach-loop.sh" "$endpoint" ${fresh:+"$fresh"}
   fi
   printf -v cmd '%q %q %s' "$SCRIPT_DIR/attach-loop.sh" "$endpoint" "$fresh"
@@ -81,6 +83,8 @@ fi
 record="$(rw_owned_record_read "$root_id" 2>/dev/null || true)"
 [ -n "$record" ] && [ "$(printf '%s' "$record" | jq -r '.owner')" = "worker" ] ||
   rw_die "rw open: ${root_arg:-$cwd} is not in a remote root. Hand it off first ('rw handoff --worker <alias>')." 7
+rw_root_lock_or_die "$root_id" "rw open"
+trap 'rw_root_unlock_all' EXIT
 rec_worker="$(printf '%s' "$record" | jq -r '.worker')"
 if [ -n "$worker" ] && [ "$worker" != "$rec_worker" ]; then
   rw_die "rw open: that root is remote on '$rec_worker', not '$worker'." 7

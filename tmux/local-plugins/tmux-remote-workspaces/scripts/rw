@@ -40,18 +40,20 @@ commands:
       A new remote pane in a root that is already remote. No sync.
       Reattaches instead when the pane already has an endpoint.
 
-  forget <root> [--worker <alias>]
-      The root is gone: close its remote panes and delete every remote
-      copy of it. An unreachable remote is cleaned up on next contact.
+  forget <root> [--worker <alias>] [--force]
+      The root is gone: delete every remote copy rw created of it, then
+      close its remote panes. An unreachable remote is cleaned up on next
+      contact. A root that is remote right now needs --force.
 
-  reclaim --force <root>
+  reclaim [--force] <root>
       Take a remote root back from the frozen local copy while its remote
-      is unreachable. Remote work since the handoff is not brought back.
+      is unreachable (probed first; --force skips the probe). Remote work
+      since the handoff is not brought back.
 
   status [--json]
       Remote roots (owner, worker, panes, pending) and endpoints.
 
-  close [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
+  close [--pane <pane-id> | --endpoint <id>] [--no-kill-pane] [--reason <text>]
       Close one remote pane and its remote session.
 
   doctor

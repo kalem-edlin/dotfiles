@@ -267,6 +267,21 @@ cmd_sync() {
       rw_die "handoff sync: --source-path is not a git worktree: $source_path" 64
   fi
 
+  # Submodules are not carried by either channel (a gitlink is just a sha;
+  # the checkout inside it is its own repository). Refuse before anything is
+  # touched rather than leave an empty or half-applied submodule behind.
+  if [ "$kind" = "git" ]; then
+    # shellcheck disable=SC2016 # expands on the side that runs it
+    local sm_probe='git ls-files --stage 2>/dev/null | awk '"'"'$1 == "160000" { print $4; exit }'"'"''
+    local sm_src sm_dst
+    sm_src="$(exec_source "cd $sq_source 2>/dev/null && $sm_probe" 2>/dev/null | tr -d '\r')"
+    sm_dst="$(exec_dest "cd $sq_dest 2>/dev/null && $sm_probe" 2>/dev/null | tr -d '\r')"
+    if [ -n "$sm_src$sm_dst" ]; then
+      rw_warn "handoff sync: '${sm_src:-$sm_dst}' is a git submodule; roots with submodules cannot be handed off (their content would not travel). Nothing was touched."
+      return 1
+    fi
+  fi
+
   local start_ts
   start_ts="$(rw_now_epoch)"
 
@@ -336,7 +351,9 @@ cmd_sync() {
     [ -s "$snap_dir/staged.patch" ] && staged_present="true"
     [ -s "$snap_dir/unstaged.patch" ] && unstaged_present="true"
 
-    exec_source "git -C $sq_source ls-files --others --exclude-standard -z" >"$untracked_list"
+    # Keep-both copies stay on the side they were made on: never carried.
+    exec_source "git -C $sq_source ls-files --others --exclude-standard -z" |
+      tr '\0' '\n' | grep -Ev "$RW_SYNC_KEEP_BOTH_ERE" | tr '\n' '\0' >"$untracked_list"
     # COPYFILE_DISABLE=1: on macOS, bsdtar otherwise embeds AppleDouble
     # (._*) companions for files carrying xattrs; a Linux destination's GNU
     # tar materializes those as literal ._* files.
@@ -380,19 +397,38 @@ cmd_sync() {
     baseline_fp="$prev_fingerprint"
   fi
 
-  if [ "$kind" = "git" ] && [ -n "$baseline_fp" ] && [ "$force_diverged" != "true" ]; then
+  # In-flight marker: written on the destination right before this sync
+  # starts modifying it, removed when it finishes. A run interrupted after
+  # that point leaves the destination in a state of OUR making, which a
+  # retry from the same baseline may overwrite (it converges instead of
+  # reporting divergence).
+  local inflight_file="$staging_root/$backup_token/inflight"
+  if [ "$kind" = "git" ] && [ "$force_diverged" != "true" ]; then
     local dest_fp_now
     dest_fp_now="$(rw_sync_fingerprint_via exec_dest_script "$dest_path" 2>/dev/null || echo EMPTY)"
     dest_fp_now="$(printf '%s' "$dest_fp_now" | tr -d '\r\n')"
-    # EMPTY: the destination is gone or not a repository -- nothing there
-    # can be lost, so it never counts as divergence.
-    if [ "$dest_fp_now" != "EMPTY" ] && [ "$dest_fp_now" != "$baseline_fp" ]; then
-      duration_ms="$(rw_elapsed_ms "$start_ts")"
-      rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
-        "diverged: destination git state changed since it was last synchronized"
-      rw_warn "handoff sync: the destination's git state (commits, staged/unstaged changes, untracked file list) changed since it was last synchronized."
-      rw_warn "Neither side has been touched. Reconcile manually (inspect '$dest_path'), or re-run with --force-diverged to overwrite it (a destination backup is still taken first)."
-      return 2
+    # EMPTY: the destination is gone or not a repository -- nothing there can
+    # be lost. Equal to the incoming source: nothing would change.
+    if [ "$dest_fp_now" != "EMPTY" ] && [ "$dest_fp_now" != "$source_fingerprint" ] &&
+      [ "$dest_fp_now" != "$baseline_fp" ]; then
+      local inflight_mark
+      inflight_mark="$(exec_dest "cat $(rw_sync_shquote "$inflight_file") 2>/dev/null" 2>/dev/null | tr -d '\r\n')"
+      if [ -n "$inflight_mark" ] && [ "$inflight_mark" = "${baseline_fp:-none}" ]; then
+        rw_warn "handoff sync: resuming an interrupted sync of '$dest_path'."
+      else
+        duration_ms="$(rw_elapsed_ms "$start_ts")"
+        if [ -z "$baseline_fp" ]; then
+          rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
+            "diverged: existing destination repository with no sync record"
+          rw_warn "handoff sync: '$dest_path' is an existing repository whose state differs from the source, and there is no record of an earlier sync to compare it with."
+        else
+          rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
+            "diverged: destination git state changed since it was last synchronized"
+          rw_warn "handoff sync: the destination's git state (commits, staged/unstaged changes, untracked file list) changed since it was last synchronized."
+        fi
+        rw_warn "Neither side has been touched. Reconcile manually (inspect '$dest_path'), or re-run with --force-diverged to overwrite it (a destination backup is still taken first)."
+        return 2
+      fi
     fi
   fi
 
@@ -403,14 +439,23 @@ cmd_sync() {
   # count.
   # =========================================================================
   local renamed_count=0 overwritten_count=0
+  local dest_now="$work_dir/dest-now.tsv" src_now="$work_dir/source-now.tsv"
+  rw_sync_manifest_via exec_dest_script "$dest_path" "$kind" >"$dest_now" 2>/dev/null || : >"$dest_now"
+  rw_sync_manifest_via exec_source_script "$source_path" "$kind" >"$src_now" 2>/dev/null || : >"$src_now"
+  # A plain owner copy with no files at all would empty the other copy:
+  # almost always a mistake (wrong mount, wiped directory), so it needs an
+  # explicit overwrite.
+  if [ "$kind" = "plain" ] && [ ! -s "$src_now" ] && [ -s "$dest_now" ] && [ "$resolve" != "overwrite" ]; then
+    rw_warn "handoff sync: '$source_path' has no files, so this would delete all $(wc -l <"$dest_now" | tr -d ' ') file(s) in '$dest_path'. Nothing was touched; re-run with --resolve overwrite if that is intended."
+    return 1
+  fi
   if [ "$dest_manifest_set" = "true" ]; then
-    local dest_now="$work_dir/dest-now.tsv" conflicts="$work_dir/conflicts.tsv"
-    rw_sync_manifest_via exec_dest_script "$dest_path" "$kind" >"$dest_now" 2>/dev/null || : >"$dest_now"
+    local conflicts="$work_dir/conflicts.tsv"
     if [ -s "$dest_manifest" ]; then
-      rw_sync_manifest_diff "$dest_manifest" "$dest_now" >"$conflicts"
+      # Changed since it was stored AND different from what the transfer
+      # would write: only those files lose something.
+      rw_sync_manifest_diff "$dest_manifest" "$dest_now" | rw_sync_conflicts_at_risk "$dest_now" "$src_now" >"$conflicts"
     else
-      local src_now="$work_dir/source-now.tsv"
-      rw_sync_manifest_via exec_source_script "$source_path" "$kind" >"$src_now" 2>/dev/null || : >"$src_now"
       rw_sync_manifest_diff "$src_now" "$dest_now" --no-deleted >"$conflicts"
     fi
     if [ -s "$conflicts" ]; then
@@ -454,6 +499,7 @@ cmd_sync() {
   # Git channel, part 2: stage, back up, apply, verify.
   # =========================================================================
   local backup_dir="" dest_fp_after=""
+  exec_dest "mkdir -p $(rw_sync_shquote "$staging_root/$backup_token") && printf '%s\n' $(rw_sync_shquote "${baseline_fp:-none}") >$(rw_sync_shquote "$inflight_file")" >/dev/null 2>&1 || true
   if [ "$kind" = "git" ]; then
     cp "$protect_list" "$snap_dir/protect.list"
     local untracked_count
@@ -560,6 +606,7 @@ EOS
       printf '__RW_A_STAGED=%q\n' "$staged_present"
       printf '__RW_A_UNSTAGED=%q\n' "$unstaged_present"
       printf '__RW_A_LFS=%q\n' "$lfs_present"
+      printf '__RW_A_REF=%q\n' "refs/rw-incoming/$(printf '%s' "$backup_token" | tr -c 'A-Za-z0-9_-' '_')"
       cat <<'EOS'
 mkdir -p "$__RW_A_DEST"
 if ! git -C "$__RW_A_DEST" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -574,21 +621,19 @@ fi
 # -f/--force: the whole point of reaching this step is an intentional
 # overwrite of the destination's working tree (a recoverable backup was
 # already taken when the destination was a managed repo).
+# The bundle lands on a per-root ref (linked worktrees share refs/, so a
+# shared name would let two concurrent hand-backs see each other's
+# commits), and the checkout names the captured sha, never the ref.
 if [ "$__RW_A_BUNDLE" = "true" ]; then
-  git -C "$__RW_A_DEST" fetch -q --no-tags "$__RW_A_STAGE/bundle.git" '+HEAD:refs/rw-incoming/head' || exit 21
-  if [ "$__RW_A_DETACHED" = "true" ]; then
-    git -C "$__RW_A_DEST" checkout -f -q --detach refs/rw-incoming/head || exit 22
-  else
-    git -C "$__RW_A_DEST" checkout -f -q -B "$__RW_A_BRANCH" refs/rw-incoming/head || exit 22
-  fi
-  git -C "$__RW_A_DEST" update-ref -d refs/rw-incoming/head || true
-else
-  if [ "$__RW_A_DETACHED" = "true" ]; then
-    git -C "$__RW_A_DEST" checkout -f -q --detach "$__RW_A_HEAD" || exit 22
-  else
-    git -C "$__RW_A_DEST" checkout -f -q -B "$__RW_A_BRANCH" "$__RW_A_HEAD" || exit 22
-  fi
+  git -C "$__RW_A_DEST" fetch -q --no-tags "$__RW_A_STAGE/bundle.git" "+HEAD:$__RW_A_REF" || exit 21
 fi
+[ "$(git -C "$__RW_A_DEST" rev-parse --verify -q "$__RW_A_HEAD^{commit}")" = "$__RW_A_HEAD" ] || exit 21
+if [ "$__RW_A_DETACHED" = "true" ]; then
+  git -C "$__RW_A_DEST" checkout -f -q --detach "$__RW_A_HEAD" || exit 22
+else
+  git -C "$__RW_A_DEST" checkout -f -q -B "$__RW_A_BRANCH" "$__RW_A_HEAD" || exit 22
+fi
+[ "$__RW_A_BUNDLE" = "true" ] && { git -C "$__RW_A_DEST" update-ref -d "$__RW_A_REF" || true; }
 
 if [ "$__RW_A_STAGED" = "true" ]; then
   # --index (not --cached): a staged rename/add/delete must land in BOTH
@@ -608,12 +653,20 @@ __rw_dest_list="$(mktemp "${TMPDIR:-/tmp}/rw-apply-dest.XXXXXX")"
 __rw_keep_list="$(mktemp "${TMPDIR:-/tmp}/rw-apply-keep.XXXXXX")"
 git -C "$__RW_A_DEST" ls-files --others --exclude-standard -z 2>/dev/null | tr '\0' '\n' | LC_ALL=C sort >"$__rw_dest_list"
 cat "$__RW_A_STAGE/untracked.list" "$__RW_A_STAGE/protect.list" 2>/dev/null | LC_ALL=C sort -u >"$__rw_keep_list"
-LC_ALL=C comm -23 "$__rw_dest_list" "$__rw_keep_list" |
-  grep -Ev '\.local-[0-9]{8}-[0-9]{6}$' | while IFS= read -r __rw_gone; do
+__rw_gone_list="$(mktemp "${TMPDIR:-/tmp}/rw-apply-gone.XXXXXX")"
+LC_ALL=C comm -23 "$__rw_dest_list" "$__rw_keep_list" | grep -Ev '\.local-[0-9]{8}-[0-9]{6}/?$' >"$__rw_gone_list"
+# Not a pipeline: a failed delete must fail the apply step itself. An entry
+# ending in "/" is an untracked nested repository (or directory).
+while IFS= read -r __rw_gone; do
   [ -n "$__rw_gone" ] || continue
-  rm -f -- "$__RW_A_DEST/$__rw_gone" || exit 26
-done
-rm -f "$__rw_dest_list" "$__rw_keep_list"
+  rm -rf -- "$__RW_A_DEST/${__rw_gone%/}" || exit 26
+  # Directories the deletion emptied go too (git never tracks them).
+  __rw_parent="$(dirname "$__RW_A_DEST/${__rw_gone%/}")"
+  while [ "$__rw_parent" != "$__RW_A_DEST" ] && rmdir "$__rw_parent" 2>/dev/null; do
+    __rw_parent="$(dirname "$__rw_parent")"
+  done
+done <"$__rw_gone_list"
+rm -f "$__rw_dest_list" "$__rw_keep_list" "$__rw_gone_list"
 
 rm -rf "$__RW_A_STAGE"
 printf 'apply-ok\n'
@@ -655,6 +708,34 @@ EOS
   else
     exec_dest "mkdir -p $sq_dest" >/dev/null 2>&1 ||
       rw_die "handoff sync: could not create the destination directory '$dest_path'" 1
+    # Plain roots have no git history to fall back on: back up, on the
+    # destination host, every file this transfer will replace or delete.
+    local at_risk="$work_dir/at-risk.list"
+    rw_sync_manifest_diff "$src_now" "$dest_now" --no-deleted | cut -f2 >"$at_risk"
+    if [ -s "$at_risk" ]; then
+      backup_dir="$backup_root/$backup_token/$next_generation-$(date +%s)"
+      local pbk="$work_dir/plain-backup.sh"
+      {
+        printf 'set -u\n'
+        printf 'mkdir -p %q || exit 1\n' "$backup_dir"
+        printf '__rw_list=%q/files.list\n' "$backup_dir"
+        printf "cat >\"\$__rw_list\" <<'__RW_PLAIN_BACKUP_LIST__'\n"
+        cat "$at_risk"
+        printf '__RW_PLAIN_BACKUP_LIST__\n'
+        # Keep-both renames already moved some listed files: back up what exists.
+        # shellcheck disable=SC2016 # expands in the generated script
+        printf 'cd %q || exit 1\n' "$dest_path"
+        # shellcheck disable=SC2016 # expands in the generated script
+        printf 'while IFS= read -r p; do if [ -e "$p" ] || [ -L "$p" ]; then printf "%%s\\n" "$p"; fi; done <"$__rw_list" >"$__rw_list.present"\n'
+        # shellcheck disable=SC2016 # expands in the generated script
+        printf 'COPYFILE_DISABLE=1 tar -cf %q/files.tar -T "$__rw_list.present" && printf "backup-ok\\n"\n' "$backup_dir"
+      } >"$pbk"
+      if [ "$(exec_dest_script "$pbk" 2>"$work_dir/plain-backup.err")" != "backup-ok" ]; then
+        rw_warn "handoff sync: could not back up the $(wc -l <"$at_risk" | tr -d ' ') destination file(s) this transfer replaces ($(cat "$work_dir/plain-backup.err" 2>/dev/null)); nothing was overwritten."
+        return 1
+      fi
+      rw_warn "handoff: backed up $(wc -l <"$at_risk" | tr -d ' ') destination file(s) to $backup_dir on the destination host"
+    fi
   fi
 
   # =========================================================================
@@ -707,6 +788,7 @@ EOS
     printf '#git\t%s\n' "$dest_fp_after" >>"$source_post"
     printf '#git\t%s\n' "$dest_fp_after" >>"$dest_post"
   fi
+  exec_dest "rm -f $(rw_sync_shquote "$inflight_file")" >/dev/null 2>&1 || true
   if [ -n "$manifest_out" ]; then
     mkdir -p "$manifest_out"
     cp "$source_post" "$manifest_out/source.tsv"

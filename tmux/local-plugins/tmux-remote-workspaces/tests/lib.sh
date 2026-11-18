@@ -74,8 +74,93 @@ rw_test_sandbox() {
 
   cat >"$SANDBOX/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-# Test stub: never a real tmux server (contract C8).
+# Test stub: never a real tmux server (contract C8). Logs every call. When
+# $FAKE_TMUX_PANES names a pane table (one pane per line, TAB-separated
+# key=value pairs: pane_id, pane_current_path, session_name, window_index,
+# pane_index, pane_current_command, pane_pid, @options...), list-panes -a,
+# display-message, show-option and set-option answer from it. Remote
+# endpoint sessions (rw-*) report $FAKE_TMUX_REMOTE_CMD as their command.
+# send-keys of a claudef/pif resume flips a pane's command to the agent when
+# $FAKE_LOCAL_RESUME_OK=1; respawn-pane resets it to a shell.
+# A fake agent "writes until stopped": reading the pane pid of
+# $FAKE_AGENT_PANE (how rw stops a local agent) appends to
+# $FAKE_AGENT_LASTWRITE; reading a remote session's pane pid appends to
+# $FAKE_REMOTE_LASTWRITE. $FAKE_EVENTS gets one ordered line per call.
 printf '%s\n' "$*" >>"${FAKE_TMUX_LOG:-/dev/null}"
+printf 'tmux %s\n' "$*" >>"${FAKE_EVENTS:-/dev/null}"
+table="${FAKE_TMUX_PANES:-}"
+[ -n "$table" ] && [ ! -f "$table" ] && : >"$table"
+expand() { # <fmt> <pane line>
+  local fmt="$1" kv k v
+  local -a kvs
+  IFS=$'\t' read -ra kvs <<<"$2"
+  for kv in "${kvs[@]}"; do
+    k="${kv%%=*}"; v="${kv#*=}"
+    fmt="${fmt//"#{$k}"/$v}"
+  done
+  printf '%s\n' "$fmt" | sed 's/#{[^}]*}//g'
+}
+line_of() { [ -n "$table" ] && grep -E "^pane_id=$1(\t|$)" "$table" | head -n1; }
+get() { line_of "$1" | tr '\t' '\n' | sed -n "s/^$2=//p" | head -n1; }
+put() { # <pane> <key> <value>
+  [ -n "$table" ] || return 0
+  awk -F '\t' -v OFS='\t' -v p="pane_id=$1" -v k="$2" -v v="$3" '
+    $1 == p { found = 0; for (i = 1; i <= NF; i++) if (index($i, k "=") == 1) { $i = k "=" v; found = 1 }
+              if (!found) $(NF + 1) = k "=" v }
+    { print }' "$table" >"$table.tmp" && mv "$table.tmp" "$table"
+}
+cmd="${1:-}"; shift
+target="" fmt="" rest=() all=0 unset_opt=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -F) fmt="$2"; shift 2 ;;
+    -*)
+      case "$1" in *a*) all=1 ;; esac
+      case "$1" in *u*) unset_opt=1 ;; esac
+      if [ "${1: -1}" = "t" ]; then target="$2"; shift 2; else shift; fi
+      ;;
+    *) rest+=("$1"); shift ;;
+  esac
+done
+target="${target#=}"
+case "$cmd" in
+  list-panes)
+    if [ -n "$target" ] && [ "${target#rw-}" != "$target" ]; then
+      case "$fmt" in *pane_pid*) [ -n "${FAKE_REMOTE_LASTWRITE:-}" ] && echo "last remote write" >>"$FAKE_REMOTE_LASTWRITE" ;; esac
+      expand "$fmt" "pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}	pane_pid=999999"
+    elif [ "$all" = 1 ] && [ -n "$table" ]; then
+      while IFS= read -r l; do [ -n "$l" ] && expand "$fmt" "$l"; done <"$table"
+    fi
+    ;;
+  display-message)
+    [ -n "$fmt" ] || fmt="${rest[${#rest[@]}-1]:-}"
+    if [ "$target" = "${FAKE_AGENT_PANE:-}" ] && [ -n "${FAKE_AGENT_LASTWRITE:-}" ]; then
+      case "$fmt" in *pane_pid*) echo "last local write" >>"$FAKE_AGENT_LASTWRITE" ;; esac
+    fi
+    l="$(line_of "$target")"
+    [ -n "$l" ] && expand "$fmt" "$l"
+    ;;
+  show-option | show-options)
+    [ -n "$target" ] && get "$target" "${rest[${#rest[@]}-1]:-}"
+    ;;
+  set-option)
+    if [ -n "$target" ] && [ -n "$(line_of "$target")" ]; then
+      if [ "$unset_opt" = 1 ]; then put "$target" "${rest[0]}" ""; else put "$target" "${rest[0]}" "${rest[1]:-}"; fi
+    fi
+    ;;
+  send-keys)
+    if [ "${FAKE_LOCAL_RESUME_OK:-0}" = 1 ] && [ -n "$(line_of "$target")" ]; then
+      case "${rest[*]}" in *claudef* | *pif*) put "$target" pane_current_command claude ;; esac
+    fi
+    ;;
+  respawn-pane)
+    [ -n "$(line_of "$target")" ] && put "$target" pane_current_command bash
+    ;;
+  list-sessions)
+    # $FAKE_TMUX_SESSIONS: "name created-epoch attached" per line.
+    [ -n "${FAKE_TMUX_SESSIONS:-}" ] && [ -f "$FAKE_TMUX_SESSIONS" ] && cat "$FAKE_TMUX_SESSIONS"
+    ;;
+esac
 exit 0
 EOF
 
@@ -94,6 +179,7 @@ while [ $# -gt 0 ]; do
 done
 cmd="$*"
 printf '%s\t%s\n' "$host" "${cmd//$'\n'/ }" >>"${FAKE_SSH_LOG:-/dev/null}"
+printf 'ssh %s\n' "${cmd//$'\n'/ }" >>"${FAKE_EVENTS:-/dev/null}"
 if [ -e "${FAKE_SSH_DOWN:-/nonexistent}" ]; then
   echo "ssh: connect to host $host port 22: Connection refused" >&2
   exit 255

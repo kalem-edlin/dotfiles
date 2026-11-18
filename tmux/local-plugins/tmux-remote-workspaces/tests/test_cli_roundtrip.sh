@@ -41,6 +41,18 @@ eq "handoff of a directory inside a remote root: exit 7" "$?" "7"
 rw handoff --worker nosuch --root "$plain" >/dev/null 2>&1
 eq "undeclared worker: exit 64" "$?" "64"
 
+# Item 5: one rw operation per root at a time.
+sleep 300 &
+holder=$!
+mkdir -p "$TMUX_REMOTE_WORKSPACES_STATE_DIR/locks/root-$(rw_root_id Developer/idol-app)"
+echo "$holder" >"$TMUX_REMOTE_WORKSPACES_STATE_DIR/locks/root-$(rw_root_id Developer/idol-app)/pid"
+rw handback --root "$plain" >/dev/null 2>"$SANDBOX/lock.err"
+eq "per-root lock: a concurrent handback is refused (exit 1)" "$?" "1"
+check "per-root lock: says another operation runs" grep -q "another rw operation on this root" "$SANDBOX/lock.err"
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+check "per-root lock: a dead holder's lock is reclaimed (open succeeds)" bash -c "'$RW_PLUGIN/scripts/rw' open --pane %8 --root '$plain' >/dev/null 2>&1"
+check "per-root lock: released after the command" test ! -e "$TMUX_REMOTE_WORKSPACES_STATE_DIR/locks/root-$(rw_root_id Developer/idol-app)"
+
 # --- open --------------------------------------------------------------------
 rw open --pane %9 --root "$plain" >/dev/null 2>"$SANDBOX/open.err"
 eq "open in a remote root: exit 0" "$?" "0"
@@ -100,16 +112,25 @@ rw handback --root "$plain" >/dev/null 2>&1
 eq "handback with the worker unreachable: exit 6" "$?" "6"
 eq "exit 6: nothing changed" "$(record Developer/idol-app | jq -r .owner)" "worker"
 rw reclaim "$plain" >/dev/null 2>&1
-eq "reclaim without --force: exit 64" "$?" "64"
-rw reclaim --force "$plain" >/dev/null 2>&1
-eq "reclaim --force: exit 0" "$?" "0"
+eq "reclaim probes first: unreachable worker, exit 0" "$?" "0"
 eq "reclaim: owner focus, stale worker, pending reconcile" \
   "$(record Developer/idol-app | jq -c '[.owner, .stale_worker, .pending.action]')" '["focus",true,"reconcile"]'
 rw_owned_root_for_path "$plain" >/dev/null
 eq "reclaimed root is local again for lookups" "$?" "1"
 rm -f "$FAKE_SSH_DOWN"
+cat >"$SANDBOX/config2.json" <<'CFG'
+{"workers": [{"alias": "fakeworker", "platform": "darwin", "notes": "t"}, {"alias": "otherworker", "platform": "darwin", "notes": "t"}],
+ "ssh": {"connect_timeout_seconds": 3, "preflight_timeout_seconds": 3, "status_timeout_seconds": 2}}
+CFG
+TMUX_REMOTE_WORKSPACES_CONFIG="$SANDBOX/config2.json" rw handoff --worker otherworker --root "$plain" >/dev/null 2>"$SANDBOX/other.err"
+eq "item 9: handoff to another worker after a reclaim: exit 7" "$?" "7"
+check "item 9: the message warns forget deletes the abandoned work" grep -q "DELETES that copy" "$SANDBOX/other.err"
 rw handoff --worker fakeworker --root "$plain" >/dev/null 2>&1
 eq "next contact reconciles, then the handoff proceeds: exit 0" "$?" "0"
+rw reclaim "$plain" >/dev/null 2>"$SANDBOX/reclaim.err"
+eq "item 9: reclaim of a root whose worker is reachable: exit 1" "$?" "1"
+check "item 9: points at handback" grep -q "rw handback" "$SANDBOX/reclaim.err"
+eq "item 9: still worker-owned" "$(record Developer/idol-app | jq -r .owner)" "worker"
 eq "after reconcile + handoff: clean worker-owned record" "$(record Developer/idol-app | jq -c '[.owner, has("pending"), has("stale_worker")]')" '["worker",false,false]'
 
 # --- worktree root -------------------------------------------------------------
@@ -127,7 +148,10 @@ eq "status --json: one array of records" "$(rw status --json | jq -r 'map(.root_
 
 # --- forget ------------------------------------------------------------------------
 rw forget "$plain" >/dev/null 2>&1
-eq "forget: exit 0" "$?" "0"
+eq "item 7: forget of a remote root without --force: exit 7" "$?" "7"
+check "item 7: nothing deleted without --force" test -d "$wplain"
+rw forget "$plain" --force >/dev/null 2>&1
+eq "forget --force: exit 0" "$?" "0"
 check "forget: worker copy deleted" test ! -e "$wplain"
 check "forget: worker mirror deleted" test ! -e "$TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR/owned/$(rw_root_id Developer/idol-app)"
 check "forget: focus record deleted" test ! -e "$(rw_owned_record_dir "$(rw_root_id Developer/idol-app)")"
@@ -139,8 +163,23 @@ rw forget "$HOME/Developer/not-ours" --worker fakeworker >/dev/null 2>&1
 eq "forget of a root never handed off: exit 0" "$?" "0"
 check "forget never deletes a remote directory without its mirror record" test -f "$FAKE_WORKER_HOME/Developer/not-ours/file"
 
+# Item 7: a worker directory that existed before the first handoff is never
+# deleted by forget (only rw's mirror goes).
+pre="$HOME/Developer/preexisting"
+make_plain "$pre"
+mkdir -p "$FAKE_WORKER_HOME/Developer/preexisting"
+cp -Rp "$pre/." "$FAKE_WORKER_HOME/Developer/preexisting/"
+rw handoff --worker fakeworker --root "$pre" >/dev/null 2>&1
+eq "handoff onto an identical pre-existing remote directory: exit 0" "$?" "0"
+eq "record: worker_root_created false" "$(record Developer/preexisting | jq -r .worker_root_created)" "false"
+rw handback --root "$pre" >/dev/null 2>&1
+out="$(rw forget "$pre" 2>/dev/null)"
+check "item 7: forget keeps a directory rw did not create" test -f "$FAKE_WORKER_HOME/Developer/preexisting/README"
+check "item 7: and says so" bash -c "grep -q 'existed before' <<<'$out'"
+check "item 7: its mirror is gone" test ! -e "$TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR/owned/$(rw_root_id Developer/preexisting)"
+
 touch "$FAKE_SSH_DOWN"
-rw forget "$wt" >/dev/null 2>&1
+rw forget "$wt" --force >/dev/null 2>&1
 eq "forget with the worker unreachable: exit 6" "$?" "6"
 eq "pending forget recorded" "$(record Developer/ce/wt | jq -r .pending.action)" "forget"
 check "worker copy still there while unreachable" test -d "$FAKE_WORKER_HOME/Developer/ce/wt"
@@ -151,6 +190,19 @@ rw handoff --worker fakeworker --root "$HOME/Developer/other" >/dev/null 2>&1
 eq "next contact (an unrelated handoff): exit 0" "$?" "0"
 check "pending forget ran on next contact: worker copy deleted" test ! -e "$FAKE_WORKER_HOME/Developer/ce/wt"
 check "pending forget ran on next contact: record deleted" test ! -e "$(rw_owned_record_dir "$(rw_root_id Developer/ce/wt)")"
+
+# Item 13: a shell in ~/Developer must not ship everything below it.
+mkdir -p "$HOME/Projects/sub"
+(cd "$HOME/Projects" && rw handoff --worker fakeworker >/dev/null 2>"$SANDBOX/top.err")
+eq "item 13: top-level folder of ~ without --root: exit 7" "$?" "7"
+check "item 13: says why" grep -q "top-level folder" "$SANDBOX/top.err"
+mkdir -p "$HOME/Developer/group/a"
+git init -q "$HOME/Developer/group/a"
+(cd "$HOME/Developer/group" && rw handoff --worker fakeworker >/dev/null 2>"$SANDBOX/group.err")
+eq "item 13: plain folder holding a git repository without --root: exit 7" "$?" "7"
+check "item 13: names the repository" grep -q "contains the git repository" "$SANDBOX/group.err"
+rw handoff --worker fakeworker --root "$HOME/Developer/group" >/dev/null 2>&1
+eq "item 13: the same folder with an explicit --root: exit 0" "$?" "0"
 
 check "every ssh call went to the fake worker" bash -c "! cut -f1 '$FAKE_SSH_LOG' | grep -vqx fakeworker"
 finish

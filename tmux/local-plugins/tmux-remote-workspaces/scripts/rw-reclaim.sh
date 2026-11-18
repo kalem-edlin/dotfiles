@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# `rw reclaim --force <root>` -- take a remote root back WITHOUT the worker
-# (contract C2): the focus machine becomes the owner again from its frozen
-# local copy. Use it only when the worker is unreachable and will stay so;
+# `rw reclaim [--force] <root>` -- take a remote root back WITHOUT the
+# worker (contract C2): the focus machine becomes the owner again from its
+# frozen local copy. For a worker that is unreachable and will stay so;
 # anything done on the worker since the handoff is not brought back.
+#
+# Without --force the worker is probed first, and a reachable worker is
+# refused (use `rw handback`, which brings that work back). --force skips
+# the probe (a worker that answers ssh but is otherwise unusable).
 #
 # Every local pane bound to the root gets its local shell back (in the same
 # pane). The record keeps `stale_worker: true` and a pending reconcile;
-# the next contact with that worker closes its endpoints (their sessions
-# and agents) and marks its copy stale, but leaves the copy in place for
-# manual inspection.
+# the next contact with that worker closes its endpoints (sessions running a
+# handed-off agent are left running and reported) and marks its copy stale,
+# but leaves the copy in place for manual inspection.
 #
-# Usage: rw-reclaim.sh --force <root>
+# Usage: rw-reclaim.sh [--force] <root>
 
 set -uo pipefail
 
@@ -34,9 +38,7 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
-[ -n "$root_arg" ] || rw_die "usage: rw reclaim --force <root>" 64
-[ "$force" = "true" ] ||
-  rw_die "rw reclaim: this takes '$root_arg' back from its frozen local copy and abandons any work done remotely since the handoff. Re-run with --force to confirm, or use 'rw handback' while the remote is reachable." 64
+[ -n "$root_arg" ] || rw_die "usage: rw reclaim [--force] <root>" 64
 
 root_rel="$(rw_root_rel "$root_arg")" || rw_die "rw reclaim: '$root_arg' is not inside your home directory." 7
 root_id="$(rw_root_id "$root_rel")"
@@ -44,8 +46,19 @@ record="$(rw_owned_record_read "$root_id" 2>/dev/null || true)"
 [ -n "$record" ] && [ "$(printf '%s' "$record" | jq -r '.owner')" = "worker" ] ||
   rw_die "rw reclaim: '$root_rel' is not remote; nothing to reclaim." 7
 
+rw_root_lock_or_die "$root_id" "rw reclaim"
+trap 'rw_root_unlock_all' EXIT
+
 worker="$(printf '%s' "$record" | jq -r '.worker')"
 root_local="$(printf '%s' "$record" | jq -r '.root_local')"
+
+if [ "$force" != "true" ]; then
+  pstatus=0
+  pjson="$("$SCRIPT_DIR/preflight.sh" --worker "$worker" 2>/dev/null)" || pstatus=$?
+  if [ "$pstatus" -eq 0 ] || [ "$(rw_preflight_exit "$pjson")" != "6" ]; then
+    rw_die "rw reclaim: '$worker' is reachable, so reclaiming would abandon the work done there. Use 'rw handback --root $root_local' instead (or 'rw reclaim --force' if '$worker' is reachable but unusable)." 1
+  fi
+fi
 # shellcheck disable=SC2207 # endpoint ids are fixed-format hex
 endpoints=($(printf '%s' "$record" | jq -r '.endpoints[]?'))
 

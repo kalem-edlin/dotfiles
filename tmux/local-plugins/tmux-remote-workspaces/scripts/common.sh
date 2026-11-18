@@ -900,3 +900,55 @@ rw_preflight_exit() {
     printf '6\n'
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Per-root lock: handoff, handback, open, forget and reclaim of one root are
+# mutually exclusive (two hand-backs of the same root, or a forget during a
+# handoff, would otherwise interleave). A lock dir holds the owner's pid; a
+# dead owner's lock is reclaimed. Locks this process already holds are
+# re-entrant. Released by rw_root_unlock_all (callers trap EXIT, and call it
+# explicitly before `exec`, which skips EXIT traps).
+# ---------------------------------------------------------------------------
+
+RW_ROOT_LOCKS_HELD=" "
+
+rw_root_lock_dir() { printf '%s/locks/root-%s\n' "$(rw_state_dir)" "${1:?root id required}"; }
+
+# rw_root_lock <root_id> -- 0 when held (now or already), 1 when another
+# live process holds it.
+rw_root_lock() {
+  local id="$1" dir pid
+  case "$RW_ROOT_LOCKS_HELD" in *" $id "*) return 0 ;; esac
+  dir="$(rw_root_lock_dir "$id")"
+  rw_ensure_private_dir "$(dirname "$dir")"
+  if ! mkdir "$dir" 2>/dev/null; then
+    pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if [ -z "$pid" ]; then
+      sleep 0.3
+      pid="$(cat "$dir/pid" 2>/dev/null || true)"
+    fi
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    [ -n "$pid" ] || return 1 # being created right now; never steal it
+    rm -rf "$dir"
+    mkdir "$dir" 2>/dev/null || return 1
+  fi
+  printf '%s\n' "$$" >"$dir/pid"
+  RW_ROOT_LOCKS_HELD="$RW_ROOT_LOCKS_HELD$id "
+  return 0
+}
+
+# rw_root_lock_or_die <root_id> <command-name>
+rw_root_lock_or_die() {
+  rw_root_lock "$1" ||
+    rw_die "$2: another rw operation on this root is running (pid $(cat "$(rw_root_lock_dir "$1")/pid" 2>/dev/null)); retry when it finishes." 1
+}
+
+rw_root_unlock_all() {
+  local id
+  for id in $RW_ROOT_LOCKS_HELD; do
+    rm -rf "$(rw_root_lock_dir "$id")"
+  done
+  RW_ROOT_LOCKS_HELD=" "
+}

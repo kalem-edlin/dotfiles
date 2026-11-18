@@ -92,8 +92,10 @@ renamed[], overwritten, duration_ms}`.
 
 ## Manifests and the manifest gate
 
-A manifest has one `<relpath>\t<size>\t<mtime-epoch>` row per file the
-rsync channel carries, byte-sorted (symlinks record mtime 0: rsync does not
+A manifest has one `<relpath>\t<size>\t<mtime-epoch>` row per file whose
+content a sync can overwrite outside git's own diff -- for git roots the
+gitignored files (rsync channel) AND the untracked files (git channel's
+tar; a nested repository's `.git` excluded), for plain roots every file -- byte-sorted (symlinks record mtime 0: rsync does not
 carry symlink times), and for git roots a final `#git\t<fingerprint>` row.
 `.DS_Store` files and keep-both copies are never listed. The caller stores
 the two manifests `--manifest-out` writes, one per side, at every ownership
@@ -101,7 +103,9 @@ change.
 
 With `--dest-manifest`, before anything is touched the destination's current
 manifest is diffed against the stored one: every row that changed, appeared
-or vanished is a conflict. When the stored manifest does not exist (first
+or vanished is a conflict -- unless nothing would be lost: a destination
+file that already equals the incoming source file (a retried or partly
+finished sync), or a deleted file the source lacks too. When the stored manifest does not exist (first
 handoff onto an existing directory), the baseline is the incoming source's
 manifest instead and only files that would be replaced or deleted conflict.
 Conflicts exit 5 unless `--resolve` says otherwise:
@@ -116,6 +120,16 @@ Conflicts exit 5 unless `--resolve` says otherwise:
 
 The stored manifest's `#git` row is also the baseline of the git divergence
 gate (below); without one, the endpoint/state-file generation record is used.
+
+A plain owner copy with no files at all would empty the other copy; that
+exits 1 unless `--resolve overwrite`. Before the rsync channel writes into a
+plain root, every destination file it will replace or delete is tarred into
+`<backup-root>/<token>/<generation>-<ts>/files.tar` on the destination host
+(the result's `backup_dir`).
+
+Roots with git submodules (any `160000` gitlink, on either side) are refused
+with exit 1 before anything is touched: neither channel carries a
+submodule's checkout.
 
 ## rsync channel
 
@@ -212,12 +226,18 @@ destination and verifies the result:
    hash of staged/unstaged/untracked state, see below) and compare it to
    the baseline -- the `#git` row of `--dest-manifest`, else the
    fingerprint recorded after the last sync through this
-   endpoint/state-file. Skipped when there is no baseline, and when the
-   destination fingerprints `EMPTY` (absent or not a repository: nothing
-   there can be lost). A mismatch means the destination was modified
-   independently since -- **exit 2**, both sides left exactly as they were,
-   no backup taken, no last-writer-wins. `--force-diverged` explicitly
-   overrides (a backup is still taken).
+   endpoint/state-file. Not diverged: a destination that fingerprints
+   `EMPTY` (absent or not a repository: nothing there can be lost), or that
+   already equals the source. With NO baseline, any other existing
+   destination repository is diverged (it was never synchronized by rw, so
+   resetting it could drop its commits or edits). A run interrupted after
+   it started modifying the destination leaves an in-flight marker
+   (`<staging-root>/<token>/inflight`, holding the baseline); a retry from
+   the same baseline continues instead of reporting divergence. A mismatch
+   means the destination was modified independently since -- **exit 2**,
+   both sides left exactly as they were, no backup taken, no
+   last-writer-wins. `--force-diverged` explicitly overrides (a backup is
+   still taken).
 5. **Backup**: only when the destination is already a git worktree. Runs
    entirely on the destination host (bundle + staged/unstaged patches +
    untracked tar of the destination's *own current* state, same format as
@@ -235,8 +255,11 @@ destination and verifies the result:
    overwrite is meant to discard (the backup above is what makes that
    safe); apply `staged.patch` with `--index` (not `--cached` -- see
    Correctness notes) then `unstaged.patch` plain; extract `untracked.tar`;
-   delete destination untracked (non-ignored) files absent from the
-   source's list, except keep-both copies.
+   delete destination untracked (non-ignored) files and nested repositories
+   absent from the source's list (and any directory that empties), except
+   keep-both copies. The bundle is fetched into a per-root ref
+   (`refs/rw-incoming/<token>`, since linked worktrees share refs) and the
+   captured sha is checked out directly, never a ref.
 7. **Verify**: recompute the destination's fingerprint and compare to the
    fingerprint captured from the source before anything was touched. A
    mismatch is reported as **exit 4** (destination was modified but is not

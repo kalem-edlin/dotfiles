@@ -14,7 +14,10 @@
 # Never deletes a workspace/checkout. Remote checkout removal is outside the
 # endpoint lifecycle, so the checkout remains available for later reuse.
 #
-# Usage: rw-close.sh [--pane <pane-id>] [--no-kill-pane] [--reason <text>]
+# Usage: rw-close.sh [--pane <pane-id> | --endpoint <id>] [--no-kill-pane] [--reason <text>]
+#
+# --endpoint closes a registered endpoint that no local pane carries (e.g.
+# a remote agent left running on a reclaimed root's stale copy).
 
 set -uo pipefail
 
@@ -26,17 +29,30 @@ source "$SCRIPT_DIR/common.sh"
 rw_need_jq
 
 pane_id="${TMUX_PANE:-}"
+by_endpoint=""
 kill_pane="true"
 reason="prefix+q"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --pane) pane_id="${2:?}"; shift 2 ;;
+    --endpoint) by_endpoint="${2:?}"; shift 2 ;;
     --no-kill-pane) kill_pane="false"; shift ;;
     --reason) reason="${2:?}"; shift 2 ;;
     *) rw_die "rw close: unknown argument: $1" 64 ;;
   esac
 done
+
+if [ -n "$by_endpoint" ]; then
+  rw_endpoint_exists "$by_endpoint" || rw_die "rw close: endpoint '$by_endpoint' is not registered" 7
+  root_id="$(rw_read_endpoint "$by_endpoint" | jq -r '.root_id // empty')"
+  rw_close_endpoint_core "$by_endpoint" "$reason"
+  if [ -n "$root_id" ] && rw_owned_record_read "$root_id" >/dev/null 2>&1; then
+    rw_owned_record_write "$root_id" "$(rw_owned_record_read "$root_id" | jq -c --arg e "$by_endpoint" '.endpoints = ((.endpoints // []) - [$e])')"
+  fi
+  printf 'rw: closed endpoint %s.\n' "$by_endpoint"
+  exit 0
+fi
 
 [ -n "$pane_id" ] || rw_die "rw close: no pane specified and TMUX_PANE is unset"
 

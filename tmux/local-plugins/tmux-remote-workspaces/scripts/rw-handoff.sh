@@ -8,37 +8,38 @@
 # While the root is remote the worker copy is the single source of truth;
 # the local copy stays on disk, frozen.
 #
-# Order (nothing is replaced until everything that can refuse has run):
-#   1. Resolve the root (exit 7 when outside ~, inside a git worktree, or
-#      already remote). Preflight the worker (exit 6 unreachable).
-#   2. Per pane: detect a supported agent; refuse a busy pane no adapter
-#      recognizes; check the provider version policy. One exit-3 version
-#      block aborts the whole handoff before any pane is touched.
-#   3. ONE sync of the root (libexec/sync/handoff): git channel + rsync
-#      channel, divergence gate (exit 2), manifest gate (exit 5 unless
-#      --resolve). Record owner = worker, write the worker mirror.
-#   4. Per pane: a hidden worker session rw-<focus>-<endpoint> in the
-#      pane's mapped directory; agent export/install/resume there; stop the
-#      local agent only after the remote one verifiably started; endpoint
-#      record (contract C3); the pane is replaced by the attach loop.
-#
-# A pane whose agent resume cannot be verified keeps its local agent
-# running (never two writers, never zero) and is reported; the root still
-# moved.
+# All or nothing. Order:
+#   1. Resolve the root (exit 7 when outside ~, inside a git worktree,
+#      already remote, a top-level folder of ~, or a plain folder holding git
+#      repositories -- the last two only without an explicit --root). Take
+#      the per-root lock. Preflight the worker (exit 6 unreachable).
+#   2. Per pane: detect a supported agent; refuse a working agent and a busy
+#      pane no adapter recognizes; check the provider version policy (one
+#      exit-3 block aborts everything).
+#   3. Stop the local agents, so the snapshot holds their last write.
+#   4. ONE sync of the root (git channel + rsync channel; divergence gate
+#      exit 2, manifest gate exit 5). On failure the local agents resume.
+#   5. Per pane: a hidden worker session in the pane's mapped directory; the
+#      agent's (now final) transcript exported, installed and resumed there,
+#      and verified. If ANY pane fails, everything rolls back: worker
+#      sessions killed, local agents resumed, the root stays local (exit 1).
+#   6. Commit: ownership record (owner = worker) and mirror, endpoint
+#      records (contract C3), panes replaced by their attach loops.
 #
 # Usage: rw-handoff.sh --worker <alias> [--root <path>] [--pane <pane-id>]
 #                      [--check-lfs] [--force-diverged]
 #                      [--resolve overwrite|keep-both|abort]
 #
-# Exit: 0 ok, 1 failure, 2 git divergence, 3 agent CLI version gate,
-#       5 manifest conflict (stdout: conflict<TAB>path<TAB>kind),
+# Exit: 0 ok, 1 failure (rolled back), 2 git divergence, 3 agent CLI version
+#       gate, 5 manifest conflict (stdout: conflict<TAB>path<TAB>kind),
 #       6 worker unreachable, 7 root invalid or already remote, 64 usage.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYNC_DIR="$SCRIPT_DIR/../libexec/sync"
-ADAPTERS_DIR="$SCRIPT_DIR/../libexec/adapters"
+# RW_ADAPTERS_DIR: test seam (tests/test_agent_flow.sh fakes the adapters).
+ADAPTERS_DIR="${RW_ADAPTERS_DIR:-$SCRIPT_DIR/../libexec/adapters}"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=roots.sh
 source "$SCRIPT_DIR/roots.sh"
@@ -98,6 +99,20 @@ kind="$(rw_root_kind "$root_local")"
   rw_die "rw handoff: '$root_local' is inside the git worktree '$(git -C "$root_local" rev-parse --show-toplevel)'; hand off the worktree root instead." 7
 root_id="$(rw_root_id "$root_rel")"
 
+# A shell sitting in ~/Developer must not ship everything below it. Without
+# an explicit --root, a plain root may be neither a top-level folder of ~ nor
+# a folder that holds git repositories (hand those off one by one).
+if [ -z "$root_arg" ] && [ "$kind" = "plain" ]; then
+  case "$root_rel" in
+    */*) : ;;
+    *) rw_die "rw handoff: '~/$root_rel' is a top-level folder of your home directory; hand off the project inside it, or pass --root '$root_local' if you really mean all of it." 7 ;;
+  esac
+  nested_repo="$(find "$root_local" -mindepth 2 -maxdepth 5 -name .git -print -quit 2>/dev/null)"
+  if [ -n "$nested_repo" ]; then
+    rw_die "rw handoff: '~/$root_rel' contains the git repository '$(dirname "$nested_repo")'; hand off that worktree instead, or pass --root '$root_local' to move the whole folder." 7
+  fi
+fi
+
 if record="$(rw_owned_record_read "$root_id")"; then
   rec_owner="$(printf '%s' "$record" | jq -r '.owner')"
   rec_worker="$(printf '%s' "$record" | jq -r '.worker')"
@@ -105,12 +120,19 @@ if record="$(rw_owned_record_read "$root_id")"; then
     rw_die "rw handoff: '$root_rel' is already remote on '$rec_worker'." 7
   fi
   if [ "$rec_worker" != "$worker" ]; then
-    rw_die "rw handoff: '$root_rel' still has a pending $(printf '%s' "$record" | jq -r '.pending.action // "cleanup"') on '$rec_worker' (it was unreachable). Run 'rw forget $root_local --worker $rec_worker' once it is reachable, then retry." 7
+    if [ "$(printf '%s' "$record" | jq -r '.pending.action // empty')" = "forget" ]; then
+      rw_die "rw handoff: '$root_rel' still has a pending delete of its copy on '$rec_worker' (it was unreachable). Retry once '$rec_worker' is reachable again (any rw command that reaches it finishes the delete)." 7
+    fi
+    rw_die "rw handoff: '$root_rel' was reclaimed while '$rec_worker' was unreachable; its copy there may hold work done after the original handoff. Reach '$rec_worker' first (e.g. 'rw handoff --worker $rec_worker', which cleans up and keeps that copy), inspect it, and only then hand the root to '$worker'. 'rw forget $root_local --worker $rec_worker' DELETES that copy, including that work." 7
   fi
 fi
 if overlap="$(rw_owned_overlap "$root_local")"; then
   rw_die "rw handoff: '$root_local' overlaps the remote root '$overlap'; roots never nest across an ownership boundary." 7
 fi
+
+rw_root_lock_or_die "$root_id" "rw handoff"
+work="$(mktemp -d "${TMPDIR:-/tmp}/rw-handoff.XXXXXX")"
+trap 'rm -rf "$work"; rw_root_unlock_all' EXIT
 
 # ---------------------------------------------------------------------------
 # 1b. Preflight
@@ -120,8 +142,6 @@ preflight_args=(--worker "$worker")
 repo_remote=""
 if [ "$kind" = "git" ]; then
   repo_remote="$(git -C "$root_local" remote get-url origin 2>/dev/null || true)"
-  # LFS preflight when asked, or when the worktree actually tracks LFS
-  # content (fail loud here, not at destination checkout).
   if [ "$check_lfs" != "true" ] &&
     [ -n "$(git -C "$root_local" lfs ls-files --name-only 2>/dev/null | head -1)" ]; then
     check_lfs="true"
@@ -165,6 +185,7 @@ p_provider=()
 p_session=()
 p_project=()
 p_mode=()
+p_local_resume=()
 version_checked=" "
 
 for i in "${!pane_lines[@]}"; do
@@ -186,6 +207,9 @@ for i in "${!pane_lines[@]}"; do
     provider="" session="" project="" mode=""
   done
 
+  if [ -n "$provider" ] && [ "$pid" = "${TMUX_PANE:-}" ]; then
+    rw_die "rw handoff: this command runs inside the $provider agent's own pane ($pid); stopping that agent would stop this command. Run it from another pane or the picker." 1
+  fi
   # A busy pane no adapter recognizes must not be replaced: detection may
   # have raced the agent's own session recording, and respawning would kill
   # the only copy. Shells and editors are deliberate workspace-only panes;
@@ -194,38 +218,47 @@ for i in "${!pane_lines[@]}"; do
     fail_event "agent_detection_unconfirmed:pane=$pid cmd=${pcmd:-unknown}"
     rw_die "rw handoff: pane $pid runs '${pcmd:-unknown}', which is neither a shell, an editor, nor a recognized agent session; nothing was moved. Stop it or wait for the agent to finish starting, then retry." 1
   fi
+  # An agent in the middle of a turn would lose it: wait until it is idle.
+  if [ -n "$provider" ] && [ "$(rw_pane_get "$pid" @agent_state)" = "working" ]; then
+    fail_event "agent_working:pane=$pid"
+    rw_die "rw handoff: the $provider agent in pane $pid is working; nothing was moved. Retry when it is idle (or interrupt it first)." 1
+  fi
 
+  local_resume=""
   if [ -n "$provider" ]; then
     case "$version_checked" in
       *" $provider "*) : ;;
       *)
-        versions_err="$(mktemp "${TMPDIR:-/tmp}/rw-handoff-versions.XXXXXX")"
+        versions_err="$work/versions-$provider.err"
         versions_status=0
-        versions_json="$("$ADAPTERS_DIR/$provider" versions --worker "$worker" 2>"$versions_err")" || versions_status=$?
+        versions_json="$("$ADAPTERS_DIR/$provider" versions --worker "$worker" 2>"$versions_err" </dev/null)" || versions_status=$?
         if [ "$versions_status" -eq 3 ]; then
           rw_warn "rw handoff: the remote $provider CLI is older than the local one, so its session cannot be resumed there. Nothing was moved:"
           rw_warn "$(cat "$versions_err")"
-          rm -f "$versions_err"
           fail_event "agent_version_blocked:$provider"
           exit 3
         elif [ "$versions_status" -ne 0 ]; then
           rw_warn "rw handoff: $provider version check failed (exit $versions_status): $(cat "$versions_err")"
-          rm -f "$versions_err"
           fail_event "agent_version_check_failed:$provider"
           exit 1
         fi
         if [ "$(printf '%s' "$versions_json" | jq -r '.policy // empty' 2>/dev/null)" = "newer_worker" ]; then
           rw_warn "rw handoff: notice -- the remote $provider CLI is newer than the local one; proceeding."
         fi
-        rm -f "$versions_err"
         version_checked="$version_checked$provider "
         ;;
     esac
+    # How to bring this agent back here if anything below fails.
+    lr_args=(resume-cmd --dest-path "$(rw_physical_path "${project:-$(printf '%s' "$line" | cut -f2)}")" --session-id "$session")
+    [ -n "$mode" ] && lr_args+=(--mode-flags "$mode")
+    local_resume="$("$ADAPTERS_DIR/$provider" "${lr_args[@]}" 2>"$work/local-resume.err")" ||
+      rw_die "rw handoff: cannot build the local resume command for the $provider agent in pane $pid, so it would not be safe to stop it: $(cat "$work/local-resume.err")" 1
   fi
   p_provider[i]="$provider"
   p_session[i]="$session"
   p_project[i]="$project"
   p_mode[i]="$mode"
+  p_local_resume[i]="$local_resume"
 done
 
 # Duplicate managed-writer guard: never launch a second managed writer for
@@ -240,19 +273,58 @@ for i in "${!pane_lines[@]}"; do
   fi
 done
 
+pane_field() { printf '%s' "${pane_lines[$1]}" | cut -f"$2"; }
+
 # ---------------------------------------------------------------------------
-# 3. One sync of the root
+# 3. Stop the local agents: the snapshot must hold their last write.
 # ---------------------------------------------------------------------------
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/rw-handoff.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+stopped=()
+resume_local_agents() {
+  local i pid
+  for i in ${stopped[@]+"${stopped[@]}"}; do
+    pid="$(pane_field "$i" 1)"
+    if ! tmux send-keys -t "$pid" "${p_local_resume[$i]}" Enter 2>/dev/null ||
+      ! rw_wait_local_provider_started "$pid" "${p_provider[$i]}"; then
+      rw_warn "rw handoff: could not confirm the ${p_provider[$i]} agent restarted in pane $pid; resume it there with: ${p_local_resume[$i]}"
+    fi
+  done
+}
+
+for i in "${!pane_lines[@]}"; do
+  [ -n "${p_provider[$i]}" ] || continue
+  pid="$(pane_field "$i" 1)"
+  stopped+=("$i")
+  if ! rw_stop_local_agent "$pid" "${p_provider[$i]}"; then
+    rw_warn "rw handoff: the ${p_provider[$i]} agent in pane $pid did not stop; nothing was moved."
+    resume_local_agents
+    fail_event "agent_stop_failed:pane=$pid"
+    exit 1
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# 4. One sync of the root
+# ---------------------------------------------------------------------------
 
 fetch_status=0
 rw_worker_mirror_fetch "$worker" "$worker_home" "$root_id" manifest.worker.tsv "$work/stored.worker.tsv" || fetch_status=$?
+rw_worker_mirror_fetch "$worker" "$worker_home" "$root_id" record.json "$work/mirror.json" || fetch_status=$?
 if [ "$fetch_status" -ne 0 ]; then
+  resume_local_agents
   fail_event "mirror_fetch_unreachable"
   rw_die "rw handoff: lost contact with '$worker' while reading its copy's manifest; nothing was moved." 6
 fi
+# Whether rw created the worker directory: only then may `rw forget` delete
+# it. A mirror remembers the first handoff's answer.
+if [ -s "$work/mirror.json" ]; then
+  root_created="$(jq -r '.worker_root_created // false' "$work/mirror.json" 2>/dev/null)"
+elif rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "[ -e $(rw_shquote "$worker_root") ]" </dev/null >/dev/null 2>&1; then
+  root_created="false"
+else
+  root_created="true"
+fi
+[ "$root_created" = "true" ] || root_created="false"
 
 worker_state="$(rw_state_dir_at "$worker_home")"
 sync_args=(sync --direction handoff --kind "$kind"
@@ -267,26 +339,26 @@ sync_args=(sync --direction handoff --kind "$kind"
 
 sync_status=0
 sync_out="$("$SYNC_DIR/handoff" "${sync_args[@]}" 2>"$work/sync.err" </dev/null)" || sync_status=$?
-case "$sync_status" in
-  0) : ;;
-  5)
-    cat "$work/sync.err" >&2
-    printf '%s\n' "$sync_out"
-    fail_event "manifest_conflict"
-    exit 5
-    ;;
-  2)
-    cat "$work/sync.err" >&2
-    fail_event "diverged"
-    exit 2
-    ;;
-  *)
-    rw_warn "rw handoff: transfer of '$root_rel' failed (exit $sync_status); no pane was moved:"
-    cat "$work/sync.err" >&2
-    fail_event "sync_failed:$sync_status"
-    exit 1
-    ;;
-esac
+if [ "$sync_status" -ne 0 ]; then
+  cat "$work/sync.err" >&2
+  resume_local_agents
+  case "$sync_status" in
+    5)
+      printf '%s\n' "$sync_out"
+      fail_event "manifest_conflict"
+      exit 5
+      ;;
+    2)
+      fail_event "diverged"
+      exit 2
+      ;;
+    *)
+      rw_warn "rw handoff: transfer of '$root_rel' failed (exit $sync_status); no pane was moved."
+      fail_event "sync_failed:$sync_status"
+      exit 1
+      ;;
+  esac
+fi
 
 # Courtesy: give a git destination an `origin` so push/pull work there.
 if [ -n "$repo_remote" ]; then
@@ -295,92 +367,112 @@ if [ -n "$repo_remote" ]; then
     </dev/null >/dev/null 2>&1 || true
 fi
 
-record="$(rw_record_new "$root_id" "$root_rel" "$root_local" "$kind" "$worker" "$worker_root" | jq -c '.owner = "worker"')"
-rw_owned_record_write "$root_id" "$record"
-record_dir="$(rw_owned_record_dir "$root_id")"
-cp "$work/manifests/source.tsv" "$record_dir/manifest.focus.tsv"
-cp "$work/manifests/dest.tsv" "$record_dir/manifest.worker.tsv"
+mkdir -p "$work/mdir"
+cp "$work/manifests/source.tsv" "$work/mdir/manifest.focus.tsv"
+cp "$work/manifests/dest.tsv" "$work/mdir/manifest.worker.tsv"
+base_record="$(rw_record_new "$root_id" "$root_rel" "$root_local" "$kind" "$worker" "$worker_root" |
+  jq -c --argjson created "$root_created" '.worker_root_created = $created')"
 rw_held_mark "$worker" "$root_id" "$root_rel" "$worker_root"
-rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
-  rw_warn "rw handoff: could not write the ownership mirror on '$worker' (it will be rewritten on the next ownership change)."
 
 # ---------------------------------------------------------------------------
-# 4. Panes
+# 5. Remote sessions and agents, all verified before any pane moves.
 # ---------------------------------------------------------------------------
 
-moved=0
-failed=0
-self_index=""
+p_endpoint=()
+p_remote_path=()
+p_resume=()
+p_transcript=()
+p_agent_dest=()
+created_sessions=()
+failure=""
 
-# handoff_pane <index> -- sets $last_endpoint; returns 0 when the pane may be
-# replaced by its attach loop.
-handoff_pane() {
-  local i="$1" line pid pcwd psession pwindex ppindex
-  line="${pane_lines[$i]}"
-  IFS="$RW_TAB" read -r pid pcwd psession pwindex ppindex _ _ _ <<<"$line"
-  local provider="${p_provider[$i]}" session="${p_session[$i]}" project="${p_project[$i]}" mode="${p_mode[$i]}"
-  local endpoint_id session_name remote_path
+for i in "${!pane_lines[@]}"; do
+  pid="$(pane_field "$i" 1)"
+  pcwd="$(pane_field "$i" 2)"
   endpoint_id="$(rw_new_short_id)"
   session_name="$(rw_session_name "$endpoint_id")"
   remote_path="$(rw_path_under_root "$pcwd" "$root_local" "$worker_root")"
-  last_endpoint="$endpoint_id"
-
+  p_endpoint[i]="$endpoint_id"
+  p_remote_path[i]="$remote_path"
+  p_resume[i]=""
+  p_transcript[i]=""
+  p_agent_dest[i]=""
   if ! rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)" </dev/null >/dev/null 2>&1; then
-    rw_warn "rw handoff: could not create the remote session for pane $pid; it stays local."
-    return 1
+    failure="could not create the remote session for pane $pid"
+    break
   fi
+  created_sessions+=("$session_name")
 
-  local agent_outcome="not_attempted" agent_resume_cmd="" agent_state="" agent_dest=""
-  if [ -n "$provider" ]; then
-    local adapter="$ADAPTERS_DIR/$provider" export_dir err
-    export_dir="$(mktemp -d "$work/agent.XXXXXX")"
-    err="$work/agent-$i.err"
-    # The worker's PHYSICAL path: Claude slugs its project dir from it.
-    agent_dest="$(rw_path_under_root "$(rw_physical_path "${project:-$pcwd}")" "$root_local" "$worker_root")"
-    if ! "$adapter" export --session-id "$session" --project-path "${project:-$pcwd}" --out "$export_dir" </dev/null >/dev/null 2>"$err"; then
-      agent_outcome="export_failed"
-    elif ! "$adapter" install --snapshot "$export_dir" --dest-path "$agent_dest" --worker "$worker" </dev/null >/dev/null 2>"$err"; then
-      agent_outcome="install_failed"
-    else
-      local rc_args=(resume-cmd --dest-path "$agent_dest" --session-id "$session")
-      [ -n "$mode" ] && rc_args+=(--mode-flags "$mode")
-      if ! agent_resume_cmd="$("$adapter" "${rc_args[@]}" 2>"$err")"; then
-        agent_outcome="resume_gated"
-        agent_resume_cmd=""
-      elif ! rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
-        "tmux send-keys -t $(rw_shquote "$session_name") $(rw_shquote "$agent_resume_cmd") Enter" </dev/null >/dev/null 2>"$err"; then
-        agent_outcome="resume_dispatch_failed"
-      elif ! rw_wait_remote_provider_started "$worker" "$session_name" "$provider" </dev/null; then
-        agent_outcome="resume_unverified"
-      else
-        agent_outcome="resumed"
-        agent_state="handed-off"
-      fi
-    fi
-    if [ "$agent_outcome" != "resumed" ]; then
-      rw_warn "rw handoff: pane $pid: $provider $agent_outcome -- its local agent keeps running and the pane stays local; the remote session '$session_name' is left for inspection. $(cat "$err" 2>/dev/null)"
-    else
-      # Stop the detected provider's own processes under the pane (never a
-      # blind child walk: claude keeps helper children).
-      local pane_pid agent_pids agent_pid
-      pane_pid="$(tmux display-message -pt "$pid" -F '#{pane_pid}' 2>/dev/null || true)"
-      if [ -n "$pane_pid" ]; then
-        agent_pids="$(ps axo pid=,ppid=,command= 2>/dev/null |
-          rw_ps_tree_match_pids "$(rw_provider_pattern "$provider")" "$pane_pid")"
-        if [ -n "$agent_pids" ]; then
-          # shellcheck disable=SC2086 # pid list is intentionally word-split
-          kill -TERM $agent_pids 2>/dev/null || true
-          sleep 0.5
-          for agent_pid in $agent_pids; do
-            kill -0 "$agent_pid" 2>/dev/null && kill -KILL "$agent_pid" 2>/dev/null
-          done
-        fi
-      fi
-    fi
+  provider="${p_provider[$i]}"
+  [ -n "$provider" ] || continue
+  adapter="$ADAPTERS_DIR/$provider"
+  export_dir="$(mktemp -d "$work/agent.XXXXXX")"
+  err="$work/agent-$i.err"
+  project="${p_project[$i]:-$pcwd}"
+  # The worker's PHYSICAL path: Claude slugs its project dir from it.
+  agent_dest="$(rw_path_under_root "$(rw_physical_path "$project")" "$root_local" "$worker_root")"
+  p_agent_dest[i]="$agent_dest"
+  if ! "$adapter" export --session-id "${p_session[$i]}" --project-path "$project" --out "$export_dir" </dev/null >/dev/null 2>"$err"; then
+    failure="$provider export failed for pane $pid: $(cat "$err")"
+    break
   fi
+  # The transcript's own id (pi: its header id) names exactly this session
+  # on the other side.
+  transcript_id="$(jq -r '.session_id // empty' "$export_dir/manifest.json" 2>/dev/null)"
+  p_transcript[i]="${transcript_id:-${p_session[$i]}}"
+  if ! "$adapter" install --snapshot "$export_dir" --dest-path "$agent_dest" --worker "$worker" </dev/null >/dev/null 2>"$err"; then
+    failure="$provider install on the remote failed for pane $pid: $(cat "$err")"
+    break
+  fi
+  rc_args=(resume-cmd --dest-path "$agent_dest" --session-id "${p_transcript[$i]}")
+  [ -n "${p_mode[$i]}" ] && rc_args+=(--mode-flags "${p_mode[$i]}")
+  if ! resume_cmd="$("$adapter" "${rc_args[@]}" 2>"$err")"; then
+    failure="$provider resume-cmd failed for pane $pid: $(cat "$err")"
+    break
+  fi
+  p_resume[i]="$resume_cmd"
+  if ! rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+    "tmux send-keys -t $(rw_shquote "$session_name") $(rw_shquote "$resume_cmd") Enter" </dev/null >/dev/null 2>"$err"; then
+    failure="could not start the $provider resume for pane $pid on the remote"
+    break
+  fi
+  if ! rw_wait_remote_provider_started "$worker" "$session_name" "$provider" </dev/null; then
+    failure="could not confirm the $provider agent of pane $pid started on the remote"
+    break
+  fi
+done
 
-  local now session_uuid
-  now="$(rw_now_iso)"
+if [ -n "$failure" ]; then
+  # Roll back: no pane has moved yet. Kill what was started remotely, bring
+  # the local agents back, and leave the root local. The worker copy is
+  # already synced; its mirror records that (owner focus) so the next
+  # handoff checks it.
+  for s in ${created_sessions[@]+"${created_sessions[@]}"}; do
+    rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "tmux kill-session -t $(rw_shquote "=$s")" </dev/null >/dev/null 2>&1 || true
+  done
+  resume_local_agents
+  rw_mirror_push_json "$worker" "$worker_home" "$root_id" "$base_record" "$work/mdir" </dev/null || true
+  fail_event "rolled_back: $failure"
+  rw_die "rw handoff: $failure. Rolled back: '$root_rel' stays local and its agents were resumed here." 1
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Commit
+# ---------------------------------------------------------------------------
+
+record="$(printf '%s' "$base_record" | jq -c '.owner = "worker"')"
+rw_owned_record_write "$root_id" "$record"
+record_dir="$(rw_owned_record_dir "$root_id")"
+cp "$work/mdir/manifest.focus.tsv" "$work/mdir/manifest.worker.tsv" "$record_dir/"
+
+now="$(rw_now_iso)"
+self_endpoint=""
+moved=0
+failed=0
+for i in "${!pane_lines[@]}"; do
+  IFS="$RW_TAB" read -r pid pcwd psession pwindex ppindex _ <<<"${pane_lines[$i]}"
+  endpoint_id="${p_endpoint[$i]}"
+  provider="${p_provider[$i]}"
   session_uuid="$(tmux show-option -t "$pid" -qv @session-uuid 2>/dev/null || true)"
   [ -n "$session_uuid" ] || session_uuid="$(rw_pane_get "$pid" @rw-session-uuid)"
 
@@ -398,17 +490,16 @@ handoff_pane() {
     --arg focus_pane_id "$pid" \
     --arg kind "$kind" \
     --arg focus_path "$pcwd" \
-    --arg remote_path "$remote_path" \
+    --arg remote_path "${p_remote_path[$i]}" \
     --arg root_local "$root_local" \
     --arg worker_root "$worker_root" \
     --arg provider "$provider" \
-    --arg session "$session" \
-    --arg project_focus "${project:-$pcwd}" \
-    --arg project_worker "$agent_dest" \
-    --arg mode "$mode" \
-    --arg resume "$agent_resume_cmd" \
-    --arg outcome "$agent_outcome" \
-    --arg state "$agent_state" \
+    --arg session "${p_session[$i]}" \
+    --arg transcript "${p_transcript[$i]}" \
+    --arg project_focus "${p_project[$i]:-$pcwd}" \
+    --arg project_worker "${p_agent_dest[$i]}" \
+    --arg mode "${p_mode[$i]}" \
+    --arg resume "${p_resume[$i]}" \
     --arg now "$now" \
     '{endpoint_id: $endpoint_id, worker: $worker, worker_identity: $worker_identity,
       focus_machine_id: $focus_machine_id, root_id: $root_id, root_rel: $root_rel,
@@ -419,85 +510,50 @@ handoff_pane() {
         root_local: $root_local, worker_root: $worker_root},
       launch_intent: {worker: $worker, workspace_arg: "handoff"},
       agent: (if $provider == "" then {provider: null, session_id: null, resume_intent: null, state: null}
-        else {provider: $provider, session_id: $session, resume_intent: $resume,
+        else {provider: $provider, session_id: $session, transcript_id: $transcript, resume_intent: $resume,
           project_path_focus: $project_focus, project_path_worker: $project_worker,
-          mode_flags: (if $mode == "" then null else $mode end), outcome: $outcome,
-          divergence_risk: false, state: (if $state == "" then null else $state end)} end),
+          mode_flags: (if $mode == "" then null else $mode end), outcome: "resumed",
+          divergence_risk: false, state: "handed-off"} end),
       created_at: $now, updated_at: $now, generation: 1}')"
   rw_record_add_endpoint "$root_id" "$endpoint_id"
 
-  if [ -n "$provider" ] && [ "$agent_outcome" != "resumed" ]; then
-    return 1
-  fi
-
   rw_pane_set "$pid" @rw-endpoint "$endpoint_id"
   rw_pane_set "$pid" @rw-worker "$worker"
-  rw_pane_set "$pid" @rw-workspace "$remote_path"
+  rw_pane_set "$pid" @rw-workspace "${p_remote_path[$i]}"
   rw_pane_set "$pid" @rw-root-id "$root_id"
   [ -n "$session_uuid" ] && rw_pane_set "$pid" @rw-session-uuid "$session_uuid"
   # The laptop pane no longer runs what it last ran; a stale command here
   # would be replayed by a restore and poison the verified save (C3).
   rw_pane_unset "$pid" @workspace-last-command
-  return 0
-}
 
-# replace_pane <index> -- respawn a pane (not the caller's) into its loop.
-replace_pane() {
-  local i="$1" pid pcwd cmd attempt=0 loop_cmd
-  IFS="$RW_TAB" read -r pid pcwd _ <<<"${pane_lines[$i]}"
-  # A stopped agent takes a moment to unwind back to its shell.
-  while [ "$attempt" -lt 15 ]; do
-    cmd="$(tmux display-message -pt "$pid" -F '#{pane_current_command}' 2>/dev/null || true)"
-    rw_is_idle_command "$cmd" && break
-    attempt=$((attempt + 1))
-    sleep 0.2
-  done
-  if ! rw_is_idle_command "$cmd"; then
-    rw_warn "rw handoff: pane $pid still runs '${cmd:-unknown}'; endpoint $last_endpoint is registered but the pane was not replaced. Run 'rw open --pane $pid' once it is idle."
-    return 1
-  fi
-  printf -v loop_cmd '%q %q --fresh' "$SCRIPT_DIR/attach-loop.sh" "$last_endpoint"
-  if ! tmux respawn-pane -k -t "$pid" -c "$pcwd" "$loop_cmd" 2>/dev/null; then
-    rw_warn "rw handoff: could not start the attach loop in pane $pid (endpoint $last_endpoint stays registered)."
-    return 1
-  fi
-  return 0
-}
-
-for i in "${!pane_lines[@]}"; do
-  pid="$(printf '%s' "${pane_lines[$i]}" | cut -f1)"
   if [ "$pid" = "${TMUX_PANE:-}" ]; then
-    self_index="$i"
+    self_endpoint="$endpoint_id"
+    moved=$((moved + 1))
     continue
   fi
-  last_endpoint=""
-  if handoff_pane "$i" && replace_pane "$i"; then
+  # Local agents are already stopped, so the pane runs its shell (or an
+  # editor, whose unsaved buffers the picker warned about).
+  printf -v loop_cmd '%q %q --fresh' "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id"
+  if tmux respawn-pane -k -t "$pid" -c "$pcwd" "$loop_cmd" 2>/dev/null; then
     moved=$((moved + 1))
   else
     failed=$((failed + 1))
+    rw_warn "rw handoff: could not start the attach loop in pane $pid (endpoint $endpoint_id is registered; 'rw open --pane $pid' attaches it)."
   fi
 done
 
-self_endpoint=""
-if [ -n "$self_index" ]; then
-  last_endpoint=""
-  if handoff_pane "$self_index"; then
-    self_endpoint="$last_endpoint"
-    moved=$((moved + 1))
-  else
-    failed=$((failed + 1))
-  fi
-fi
-
-rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null || true
+rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
+  rw_warn "rw handoff: could not write the ownership mirror on '$worker' (it is rewritten on the next ownership change)."
 
 rw_log_event "handoff" "$self_endpoint" "$worker" "$(rw_elapsed_ms "$start_ts")" \
   "$([ "$failed" -eq 0 ] && echo success || echo partial)" \
   "root=$root_rel kind=$kind panes=$moved failed=$failed $(printf '%s' "$sync_out" | jq -r '"renamed=\(.renamed | length) overwritten=\(.overwritten)"' 2>/dev/null)"
-printf 'rw: %s is now remote on %s (%d pane(s) moved%s).\n' "$root_rel" "$worker" "$moved" \
-  "$([ "$failed" -gt 0 ] && printf ', %d left local -- see above' "$failed")"
+printf 'rw: %s is now remote on %s (%d pane(s) moved).\n' "$root_rel" "$worker" "$moved"
 
 if [ -n "$self_endpoint" ]; then
+  rm -rf "$work"
+  rw_root_unlock_all
+  trap - EXIT
   exec "$SCRIPT_DIR/attach-loop.sh" "$self_endpoint" --fresh
 fi
 [ "$failed" -eq 0 ] || exit 1

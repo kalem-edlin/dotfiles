@@ -126,7 +126,7 @@ smoke_pi() {
     bad "pi resume-cmd ($(cat "$sandbox/resume.err"))"
   else
     case "$resume_cmd" in
-      "cd $dest_project && pif --session "*"$session_id"*) ok "pi: resume-cmd runs pif from the destination and points at the session ($resume_cmd)" ;;
+      *"cd $dest_project && pif --session "*"$session_id"*) ok "pi: resume-cmd runs pif from the destination and points at the session ($resume_cmd)" ;;
       *) bad "pi: resume-cmd did not reference the session id: $resume_cmd" ;;
     esac
   fi

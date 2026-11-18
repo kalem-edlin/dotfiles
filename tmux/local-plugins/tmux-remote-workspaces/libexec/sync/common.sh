@@ -218,6 +218,9 @@ rw_sync_gen_write_statefile() {
 # (`<file>.local-YYYYMMDD-HHMMSS`) are never listed.
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC2034 # used by ./handoff, which sources this file
+RW_SYNC_KEEP_BOTH_ERE='\.local-[0-9]{8}-[0-9]{6}$'
+
 # rw_sync_kind_probe <path> -- a shell command printing "git" when <path>
 # is a worktree toplevel, else "plain".
 rw_sync_kind_probe() {
@@ -255,14 +258,18 @@ rw_sync_write_ignored_script() {
 # $__RW_M_KIND. Portable across BSD (macOS) and GNU stat; bash 3.2-safe.
 rw_sync_manifest_script_body() {
   printf '__rw_m_ignored() { %s; }\n' "$RW_SYNC_IGNORED_LIST_CMD"
+  printf '__rw_m_untracked() { git ls-files --others --exclude-standard -z 2>/dev/null | tr "\\0" "\\n"; }\n' 
   cat <<'EOS'
 cd "$__RW_M_PATH" 2>/dev/null || exit 0
 __rw_m_list() {
   if [ "$__RW_M_KIND" = "git" ]; then
-    __rw_m_ignored | while IFS= read -r __rw_e; do
+    # Ignored entries (the rsync channel) and untracked files (the git
+    # channel's tar): every file whose CONTENT a sync can overwrite outside
+    # git's own diff. A nested repository's .git is never listed.
+    { __rw_m_ignored; __rw_m_untracked; } | while IFS= read -r __rw_e; do
         case "$__rw_e" in
           '') : ;;
-          */) find "./${__rw_e%/}" \( -type f -o -type l \) -print0 2>/dev/null ;;
+          */) find "./${__rw_e%/}" -name .git -prune -o \( -type f -o -type l \) -print0 2>/dev/null ;;
           *) if [ -e "$__rw_e" ] || [ -L "$__rw_e" ]; then printf './%s\0' "$__rw_e"; fi ;;
         esac
       done
@@ -355,6 +362,22 @@ rw_sync_manifest_diff() {
   ' "$stored" "$current" | LC_ALL=C sort -t "$(printf '\t')" -k2,2
 }
 
+# rw_sync_conflicts_at_risk <dest-now> <source-now> ; stdin: conflict rows
+# Drops conflicts where nothing would be lost: the destination file already
+# equals the incoming source file (a retried or partly finished sync), or a
+# file deleted on the destination is absent from the source too.
+rw_sync_conflicts_at_risk() {
+  awk -F '\t' '
+    FILENAME == ARGV[1] { if ($1 !~ /^#/) d[$1] = $2 "\t" $3; next }
+    FILENAME == ARGV[2] { if ($1 !~ /^#/) s[$1] = $2 "\t" $3; next }
+    {
+      p = $2
+      if ($3 == "deleted") { if (p in s) print; next }
+      if ((p in s) && (p in d) && s[p] == d[p]) next
+      print
+    }' "$1" "$2" -
+}
+
 # rw_sync_manifests_equal <a> <b> -- file rows identical (ignores # rows).
 rw_sync_manifests_equal() {
   [ -z "$(rw_sync_manifest_diff "$1" "$2")" ]
@@ -362,7 +385,9 @@ rw_sync_manifests_equal() {
 
 # rw_sync_rsync_escape -- escape rsync wildcard characters in a path read
 # from stdin, so every rule below matches literally.
-rw_sync_rsync_escape() { sed 's/[][*?\\]/\\&/g'; }
+# rsync only treats a backslash as an escape when the pattern also holds a
+# wildcard, so lines without one are left exactly as they are.
+rw_sync_rsync_escape() { sed '/[][*?]/ s/[][*?\\]/\\&/g'; }
 
 # rw_sync_write_rsync_rules <kind> <entries-file> <protect-file> <out>
 # Filter rules for the rsync channel, first match wins:

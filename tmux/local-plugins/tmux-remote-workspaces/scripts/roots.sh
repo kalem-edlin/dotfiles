@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Root-level operations shared by rw handoff / handback / open / forget /
-# reclaim / status and libexec/reconcile-pending. Sourced only; never
-# executed directly. Builds on common.sh (ownership records, ssh transport,
-# endpoint registry) -- see the ownership section there for the record
-# layout, and docs/tasks/mini-remote-sessions.md for the contracts.
+# reclaim. Sourced only; never executed directly. Builds on common.sh
+# (ownership records, ssh transport, endpoint registry, per-root locks) --
+# see the ownership section there for the record layout, and
+# docs/tasks/mini-remote-sessions.md for the contracts.
 
 RW_ROOTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
@@ -16,10 +16,11 @@ RW_TAB="$(printf '\t')"
 # Every pane on this tmux server (any session) whose cwd is the root or
 # inside it, one line each:
 #   pane_id<TAB>cwd<TAB>session<TAB>window_index<TAB>pane_index<TAB>@rw-endpoint<TAB>@rw-root-id<TAB>command
+# The root travels through ENVIRON, not `awk -v`, which would interpret
+# backslashes in the path.
 rw_root_panes() {
-  local root="$1"
   tmux list-panes -a -F "#{pane_id}${RW_TAB}#{pane_current_path}${RW_TAB}#{session_name}${RW_TAB}#{window_index}${RW_TAB}#{pane_index}${RW_TAB}#{@rw-endpoint}${RW_TAB}#{@rw-root-id}${RW_TAB}#{pane_current_command}" 2>/dev/null |
-    awk -F '\t' -v root="$root" '$2 == root || index($2, root "/") == 1'
+    RW_AWK_ROOT="$1" awk -F '\t' '{ r = ENVIRON["RW_AWK_ROOT"] } $2 == r || index($2, r "/") == 1'
 }
 
 # rw_root_bound_panes <root_id> <endpoint-ids...>
@@ -60,22 +61,13 @@ rw_is_idle_command() {
 # Pushes the focus record (rewritten for the worker: root_local = the
 # worker's own path) and both manifests to the worker's mirror dir.
 rw_mirror_push_from_record() {
-  local worker="$1" worker_home="$2" root_id="$3" dir tmp json
-  dir="$(rw_owned_record_dir "$root_id")"
+  local worker="$1" worker_home="$2" root_id="$3" json
   json="$(rw_owned_record_read "$root_id")" || return 1
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rw-mirror.XXXXXX")"
-  printf '%s' "$json" | jq -c '.root_local = .worker_root' >"$tmp/record.json"
-  [ -f "$dir/manifest.focus.tsv" ] && cp "$dir/manifest.focus.tsv" "$tmp/"
-  [ -f "$dir/manifest.worker.tsv" ] && cp "$dir/manifest.worker.tsv" "$tmp/"
-  rw_worker_mirror_push "$worker" "$worker_home" "$root_id" "$tmp"
-  local status=$?
-  rm -rf "$tmp"
-  return "$status"
+  rw_mirror_push_json "$worker" "$worker_home" "$root_id" "$json" "$(rw_owned_record_dir "$root_id")"
 }
 
 # rw_mirror_push_json <worker> <worker_home> <root_id> <record-json> [manifest-dir]
-# Pushes an explicit mirror record (and manifests named manifest.*.tsv in
-# [manifest-dir]) -- used after hand-back, when the focus record is gone.
+# Pushes an explicit mirror record (and manifest.*.tsv from [manifest-dir]).
 rw_mirror_push_json() {
   local worker="$1" worker_home="$2" root_id="$3" json="$4" mdir="${5:-}" tmp
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/rw-mirror.XXXXXX")"
@@ -111,6 +103,22 @@ rw_release_pane() {
   return 0
 }
 
+# rw_reattach_pane <pane_id> <endpoint_id> <root_id> <dir>
+# The inverse of rw_release_pane: the pane runs the endpoint's attach loop
+# again (used to roll a failed hand-back back).
+rw_reattach_pane() {
+  local pane_id="$1" endpoint_id="$2" root_id="$3" dir="$4" ej cmd
+  ej="$(rw_read_endpoint "$endpoint_id")" || return 1
+  [ -d "$dir" ] || dir="$HOME"
+  printf -v cmd '%q %q' "$RW_ROOTS_DIR/attach-loop.sh" "$endpoint_id"
+  tmux respawn-pane -k -t "$pane_id" -c "$dir" "$cmd" 2>/dev/null || return 1
+  rw_pane_set "$pane_id" @rw-endpoint "$endpoint_id"
+  rw_pane_set "$pane_id" @rw-worker "$(printf '%s' "$ej" | jq -r '.worker')"
+  rw_pane_set "$pane_id" @rw-workspace "$(printf '%s' "$ej" | jq -r '.workspace.remote_path // empty')"
+  rw_pane_set "$pane_id" @rw-root-id "$root_id"
+  return 0
+}
+
 # rw_wait_local_shell <pane_id> -- up to ~10s for the pane to show a shell.
 rw_wait_local_shell() {
   local pane_id="$1" i=0 cmd
@@ -125,20 +133,61 @@ rw_wait_local_shell() {
   return 1
 }
 
+# rw_stop_local_agent <pane_id> <provider>
+# Stops the provider's own processes under the pane (never a blind child
+# walk: claude keeps helper children), then waits for the pane's shell.
+rw_stop_local_agent() {
+  local pane_id="$1" provider="$2" pane_pid pids p
+  pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
+  [ -n "$pane_pid" ] || return 1
+  pids="$(ps axo pid=,ppid=,command= 2>/dev/null | rw_ps_tree_match_pids "$(rw_provider_pattern "$provider")" "$pane_pid")"
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086 # pid list is intentionally word-split
+    kill -TERM $pids 2>/dev/null || true
+    sleep 0.5
+    for p in $pids; do
+      kill -0 "$p" 2>/dev/null && kill -KILL "$p" 2>/dev/null
+    done
+  fi
+  rw_wait_local_shell "$pane_id"
+}
+
+# rw_stop_remote_agent <worker> <session_name> <provider>
+# Same, for the agent inside a worker endpoint session: its process tree is
+# read over ssh and matched here with the same per-provider pattern.
+rw_stop_remote_agent() {
+  local worker="$1" session_name="$2" provider="$3" listing pane_pids pids
+  listing="$(rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+    "tmux list-panes -t $(rw_shquote "=$session_name") -F '#{pane_pid}' 2>/dev/null; echo ---; ps axo pid=,ppid=,command=" \
+    </dev/null 2>/dev/null)" || return 1
+  pane_pids="$(printf '%s\n' "$listing" | sed '/^---$/,$d' | tr '\n' ' ')"
+  [ -n "${pane_pids// /}" ] || return 0
+  # shellcheck disable=SC2086 # pane pid list intentionally expands into roots
+  pids="$(printf '%s\n' "$listing" | sed '1,/^---$/d' | rw_ps_tree_match_pids "$(rw_provider_pattern "$provider")" $pane_pids | tr '\n' ' ')"
+  [ -n "${pids// /}" ] || return 0
+  rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+    "kill -TERM $pids 2>/dev/null; sleep 0.5; kill -KILL $pids 2>/dev/null; true" </dev/null >/dev/null 2>&1
+}
+
 # rw_forget_worker_copy <worker> <worker_home> <root_id> <root_rel>
-# Deletes the worker copy and its mirror record, but only when the mirror
-# record exists and names the same root_rel (never deletes a directory this
-# focus machine did not hand off). Prints one of: deleted | no-mirror.
-# Returns 6 when the worker cannot be reached.
+# Deletes the worker copy and its mirror record. The copy itself is deleted
+# only when the mirror names the same root_rel AND records that rw created
+# that directory (`"worker_root_created":true`); a directory that existed
+# before the first handoff is left in place and only the mirror goes.
+# Prints one of: deleted | kept | no-mirror. Returns 6 when unreachable.
 rw_forget_worker_copy() {
   local worker="$1" worker_home="$2" root_id="$3" root_rel="$4" mirror root out status=0
-  case "$root_rel" in '' | /* | '~'* | ..* | */..* ) return 7 ;; esac
+  case "$root_rel" in '' | /* | '~'* | ..* | */..*) return 7 ;; esac
   mirror="$(rw_worker_mirror_dir "$worker_home" "$root_id")"
   root="${worker_home%/}/$root_rel"
   out="$(rw_ssh_batch "$worker" "$(rw_ssh_connect_timeout)" "
     m=$(rw_shquote "$mirror"); r=$(rw_shquote "$root")
-    if [ -f \"\$m/record.json\" ] && grep -Fq $(rw_shquote "\"root_rel\":\"$root_rel\"") \"\$m/record.json\"; then
-      rm -rf -- \"\$r\" && rm -rf -- \"\$m\" && echo deleted
+    if [ -f \"\$m/record.json\" ] && sed 's/\"[[:space:]]*:[[:space:]]*/\":/g' \"\$m/record.json\" | grep -Fq $(rw_shquote "\"root_rel\":\"$root_rel\""); then
+      if sed 's/\"[[:space:]]*:[[:space:]]*/\":/g' \"\$m/record.json\" | grep -Fq '\"worker_root_created\":true'; then
+        rm -rf -- \"\$r\" && rm -rf -- \"\$m\" && echo deleted
+      else
+        rm -rf -- \"\$m\" && echo kept
+      fi
     else
       echo no-mirror
     fi" </dev/null 2>/dev/null)" || status=$?
@@ -159,43 +208,57 @@ rw_close_root_endpoints() {
   done
 }
 
+# rw_endpoint_has_agent <endpoint_id> -- a handed-off agent runs in it.
+rw_endpoint_has_agent() {
+  [ "$(rw_read_endpoint "$1" 2>/dev/null | jq -r '.agent.state // empty' 2>/dev/null)" = "handed-off" ]
+}
+
 # rw_reconcile_pending <worker> <worker_home>
 # Runs every pending action recorded for <worker>, now that it answered:
-#   pending.action = forget    -> close endpoints, delete the worker copy
-#                                 and mirror, drop the focus record
-#   pending.action = reconcile -> close the root's endpoints (their worker
-#                                 sessions), mark the mirror stale and
-#                                 focus-owned, keep the worker copy; drop
-#                                 the focus record unless it is worker-owned
-# Best effort: a failure leaves the record pending for the next contact.
+#   pending.action = forget    -> delete the worker copy (when rw created
+#                                 it) and mirror, close the endpoints, drop
+#                                 the focus record
+#   pending.action = reconcile -> (after `rw reclaim`) close the root's
+#                                 endpoints EXCEPT those running a handed-off
+#                                 agent, which are never closed automatically
+#                                 (`rw close --endpoint <id>` once its work is
+#                                 rescued); mark the mirror stale and
+#                                 focus-owned; keep the worker copy; drop the
+#                                 focus record
+# Roots another rw process holds locked are skipped (next contact). Best
+# effort: a failure leaves the record pending.
 rw_reconcile_pending() {
-  local worker="$1" worker_home="$2" rec root_id root_rel action owner eps out
+  local worker="$1" worker_home="$2" rec root_id root_rel action eps closable kept e out
   while IFS= read -r rec; do
     [ -n "$rec" ] || continue
     root_id="$(printf '%s' "$rec" | jq -r '.root_id')"
     root_rel="$(printf '%s' "$rec" | jq -r '.root_rel')"
     action="$(printf '%s' "$rec" | jq -r '.pending.action // empty')"
-    owner="$(printf '%s' "$rec" | jq -r '.owner')"
+    rw_root_lock "$root_id" || continue
     # shellcheck disable=SC2207 # endpoint ids are fixed-format hex
     eps=($(printf '%s' "$rec" | jq -r '.endpoints[]?'))
     case "$action" in
       forget)
-        rw_close_root_endpoints "$root_id" "forget" ${eps[@]+"${eps[@]}"}
         out="$(rw_forget_worker_copy "$worker" "$worker_home" "$root_id" "$root_rel")" || continue
+        rw_close_root_endpoints "$root_id" "forget" ${eps[@]+"${eps[@]}"}
         rw_owned_record_remove "$root_id"
         rw_held_unmark "$worker" "$root_id"
         rw_log_event "forget" "" "$worker" "" "success" "root=$root_rel pending=1 worker_copy=$out"
         ;;
       reconcile)
-        rw_close_root_endpoints "$root_id" "reconcile:${owner}" ${eps[@]+"${eps[@]}"}
+        closable=()
+        kept=()
+        for e in ${eps[@]+"${eps[@]}"}; do
+          if rw_endpoint_has_agent "$e"; then kept+=("$e"); else closable+=("$e"); fi
+        done
+        rw_close_root_endpoints "$root_id" "reconcile" ${closable[@]+"${closable[@]}"}
         rw_mirror_push_json "$worker" "$worker_home" "$root_id" \
           "$(printf '%s' "$rec" | jq -c '.owner = "focus" | .endpoints = [] | .stale_worker = true | del(.pending)')" || continue
-        if [ "$owner" = "worker" ]; then
-          rw_owned_record_write "$root_id" "$(rw_owned_record_read "$root_id" | jq -c 'del(.pending) | del(.stale_worker)')"
-        else
-          rw_owned_record_remove "$root_id"
+        rw_owned_record_remove "$root_id"
+        if [ "${#kept[@]}" -gt 0 ]; then
+          rw_warn "rw: the remote agent(s) on endpoint(s) ${kept[*]} kept running on $worker's stale copy of $root_rel; close each with 'rw close --endpoint <id>' once its work is rescued."
         fi
-        rw_log_event "reconcile" "" "$worker" "" "success" "root=$root_rel pending=1 closed=${#eps[@]}"
+        rw_log_event "reconcile" "" "$worker" "" "success" "root=$root_rel pending=1 closed=${#closable[@]} kept_agents=${#kept[@]}"
         ;;
     esac
   done < <(rw_owned_records_json | jq -c --arg w "$worker" '.[] | select(.worker == $w and .pending != null)')
@@ -208,6 +271,7 @@ rw_reconcile_pending() {
     [ "$(jq -r '.pending.action // empty' "$f" 2>/dev/null)" = "forget" ] || continue
     root_id="$(jq -r '.root_id' "$f")"
     root_rel="$(jq -r '.root_rel' "$f")"
+    rw_root_lock "$root_id" || continue
     out="$(rw_forget_worker_copy "$worker" "$worker_home" "$root_id" "$root_rel")" || continue
     rm -f "$f"
     rw_log_event "forget" "" "$worker" "" "success" "root=$root_rel pending=1 worker_copy=$out"

@@ -28,8 +28,8 @@ eq "missing path: empty manifest" "$(rw_sync_manifest_local "$SANDBOX/nope" plai
 
 make_worktree "$HOME/Developer/ce"
 g="$(rw_sync_manifest_local "$HOME/Developer/ce/wt" git)"
-eq "git manifest: exactly the gitignored files (collapsed dirs expanded)" \
-  "$(cut -f1 <<<"$g" | paste -sd, -)" ".env.local,build/out.bin,node_modules/pkg/index.js,pkgs/app/node_modules/x/y.js"
+eq "git manifest: gitignored files (collapsed dirs expanded) plus untracked files" \
+  "$(cut -f1 <<<"$g" | paste -sd, -)" ".env.local,build/out.bin,node_modules/pkg/index.js,notes.txt,pkgs/app/node_modules/x/y.js"
 
 # --- diff ---------------------------------------------------------------
 printf 'a\t1\t10\nb\t2\t20\nc\t3\t30\n#git\tX\n' >"$SANDBOX/stored.tsv"

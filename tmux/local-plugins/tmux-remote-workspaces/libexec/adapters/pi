@@ -50,6 +50,23 @@ pi_slug() {
 
 pi_sessions_root_local() { printf '%s/.pi/agent/sessions\n' "$HOME"; }
 
+# pi_transcript_id <id-or-path> -- the session id a transcript reference
+# names: an id as given, or for a path pi's own `<timestamp>_<id>.jsonl`
+# file name minus timestamp and extension. Empty when it cannot be safely
+# embedded in a command (only [A-Za-z0-9._-]).
+pi_transcript_id() {
+  local id="$1"
+  case "$id" in
+    */*)
+      id="$(basename "$id")"
+      id="${id%.jsonl}"
+      id="${id##*_}"
+      ;;
+  esac
+  printf '%s' "$id" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || return 0
+  printf '%s\n' "$id"
+}
+
 # ---------------------------------------------------------------------------
 # detect --pane <pane-id>
 # ---------------------------------------------------------------------------
@@ -197,26 +214,21 @@ cmd_export() {
   mkdir -p "$out"
   local dest_file="$out/session.jsonl"
 
+  # Exactly the named transcript, never "the newest one in the project":
+  # two pi agents in one root must each resume their own session. A path
+  # that exists is used as is; otherwise the session id is matched against
+  # pi's `<timestamp>_<id>.jsonl` names (what install writes).
+  local want_id
+  want_id="$(pi_transcript_id "$session_id")"
   if [ -n "$worker" ]; then
-    # session_id may already be an absolute worker-side path (from a prior
-    # detect on that worker); otherwise search the worker's session root by
-    # (partial) id, mirroring pi's own lookup.
-    local remote_find
-    if [[ "$session_id" == /* ]]; then
-      # A path-shaped id may be the OTHER host's transcript path (a return
-      # after handoff): install() relocated the transcript to THIS host's
-      # slug dir for the project, so fall back there when the literal path
-      # does not exist (smoke lane w5r, symmetric to the resume-cmd fix).
-      if ca_ssh_run "$worker" "[ -f '$session_id' ]" 2>/dev/null; then
-        remote_find="$session_id"
-      else
-        remote_find="$(ca_ssh_run "$worker" "command ls -t \"\$HOME/.pi/agent/sessions/$(pi_slug "$project_path")\"/*.jsonl 2>/dev/null | head -n1")"
-      fi
-    else
-      remote_find="$(ca_ssh_run "$worker" "find \"\$HOME/.pi/agent/sessions\" -type f -iname '*${session_id}*.jsonl' 2>/dev/null | head -n1")"
+    local remote_find=""
+    if [[ "$session_id" == /* ]] && ca_ssh_run "$worker" "[ -f '$session_id' ]" 2>/dev/null; then
+      remote_find="$session_id"
+    elif [ -n "$want_id" ]; then
+      remote_find="$(ca_ssh_run "$worker" "find \"\$HOME/.pi/agent/sessions\" -type f \\( -name '*_${want_id}.jsonl' -o -name '${want_id}.jsonl' \\) 2>/dev/null | head -n1")"
     fi
     [ -n "$remote_find" ] || {
-      ca_warn "no pi transcript matching '$session_id' found on worker '$worker'; nothing to export."
+      ca_warn "no pi transcript for session '$session_id' found on worker '$worker'; nothing to export."
       exit 4
     }
     if ! ca_ssh_run "$worker" "cat -- '$remote_find'" >"$dest_file" 2>/dev/null; then
@@ -224,9 +236,11 @@ cmd_export() {
       exit 4
     fi
   else
-    local local_find="$session_id"
-    if [[ "$session_id" != /* ]]; then
-      local_find="$(find "$(pi_sessions_root_local)" -type f -iname "*${session_id}*.jsonl" 2>/dev/null | head -n1)"
+    local local_find=""
+    if [[ "$session_id" == /* ]] && [ -f "$session_id" ]; then
+      local_find="$session_id"
+    elif [ -n "$want_id" ]; then
+      local_find="$(find "$(pi_sessions_root_local)" -type f \( -name "*_${want_id}.jsonl" -o -name "${want_id}.jsonl" \) 2>/dev/null | head -n1)"
     fi
     [ -n "$local_find" ] && [ -f "$local_find" ] || {
       ca_warn "no local pi transcript found for '$session_id'; nothing to export."
@@ -236,8 +250,7 @@ cmd_export() {
   fi
 
   local resolved_id
-  resolved_id="$(jq -r '.id // empty' "$dest_file" 2>/dev/null | head -n1)"
-  [ -n "$resolved_id" ] || resolved_id="$(head -n1 "$dest_file" | jq -r '.id // empty' 2>/dev/null)"
+  resolved_id="$(head -n1 "$dest_file" | jq -r '.id // empty' 2>/dev/null)"
 
   ca_write_manifest "$out" "$(jq -nc \
     --arg provider "$PROVIDER" \
@@ -287,11 +300,10 @@ cmd_install() {
   local sid ts
   sid="$(head -n1 "$transcript" | jq -r '.id // empty' 2>/dev/null)"
   ts="$(head -n1 "$transcript" | jq -r '.timestamp // empty' 2>/dev/null | tr ':.' '--')"
-  if [ -n "$sid" ] && [ -n "$ts" ]; then
-    basename_out="${ts}_${sid}.jsonl"
-  else
-    basename_out="$(basename "$transcript")"
-  fi
+  # `<timestamp>_<id>.jsonl`, pi's own naming: resume-cmd and export find
+  # the transcript again by its id, so the name must carry it.
+  [ -n "$(pi_transcript_id "$sid")" ] || ca_die "pi transcript header has no usable session id; cannot install it resumably." 1
+  basename_out="${ts:-session}_${sid}.jsonl"
 
   # Rewrite the session header's cwd (line 1, `{"type":"session",...,"cwd"}`)
   # to the destination path; every other line is copied byte for byte.
@@ -358,21 +370,22 @@ cmd_resume_cmd() {
   # w5: destination answered UNKNOWN to the pre-handoff sentinel while the
   # registry recorded "resumed"). Emit a command that resolves the
   # installed transcript on the DESTINATION at runtime instead.
-  local session_ref
+  # The exact transcript, never "the newest in the project" (two pi agents
+  # in one root must each get their own). Resolved on the DESTINATION at
+  # run time: an absolute path that exists there is used as is; otherwise
+  # the session id is matched against the `<timestamp>_<id>.jsonl` name
+  # install wrote into the destination project's sessions dir, falling back
+  # to pi's own lookup by id. `command ls`: ls is commonly aliased (eza) in
+  # the interactive shell this is typed into.
+  local id slug pre="" session_ref
+  id="$(pi_transcript_id "$session_id")"
+  [ -n "$id" ] || ca_die "resume-cmd: session id '$session_id' is not a safe pi session reference" 1
+  slug="$(pi_slug "$dest_path")"
   case "$session_id" in
-    */*)
-      local slug
-      slug="$(pi_slug "$dest_path")"
-      # `command ls`: the destination shell is interactive (the command is
-      # typed into a pane), where ls is commonly aliased to eza -- whose -t
-      # takes a FIELD argument and would swallow the glob (live failure in
-      # smoke lane w5r).
-      session_ref="\"\$(command ls -t \"\$HOME/.pi/agent/sessions/${slug}\"/*.jsonl 2>/dev/null | head -n1)\""
-      ;;
-    *)
-      session_ref="$(printf '%q' "$session_id")"
-      ;;
+    /*) pre="$(printf '[ -f %q ] && __rw_pi=%q || ' "$session_id" "$session_id")" ;;
   esac
+  pre="${pre}__rw_pi=\"\$(command ls \"\$HOME/.pi/agent/sessions/${slug}\"/*_${id}.jsonl 2>/dev/null | head -n1)\"; "
+  session_ref="\"\${__rw_pi:-${id}}\""
   # pif, never bare pi (decision D13): the focus launcher carries the
   # profile, extensions (agent-state publisher, resurrect session record)
   # and PI_CODING_AGENT_SESSION_DIR. Typed into the endpoint pane's
@@ -380,9 +393,9 @@ cmd_resume_cmd() {
   # script on PATH) and fnm's node is active. Run from dest-path so pi's
   # own cwd matches the rewritten session header.
   if [ "$fork" -eq 1 ]; then
-    printf 'cd %q && pif --fork %s\n' "$dest_path" "$session_ref"
+    printf '%scd %q && pif --fork %s\n' "$pre" "$dest_path" "$session_ref"
   else
-    printf 'cd %q && pif --session %s\n' "$dest_path" "$session_ref"
+    printf '%scd %q && pif --session %s\n' "$pre" "$dest_path" "$session_ref"
   fi
 }
 
