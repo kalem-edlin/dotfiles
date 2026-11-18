@@ -140,35 +140,62 @@ laptop never does.
 - **Wrapper** `setup/templates/tmux-resurrect-restore.sh`, also run by the
   laptop attach loop when it finds no tmux server on the worker:
   1. Takes the boot lock `~/.local/state/tmux-workspace-resurrect/boot-restore.lock`
-     (bounded wait, dead owner reclaimed). Concurrent callers (the agent and
-     several laptop panes) queue here; the first restores, the rest find a
-     live server and do nothing.
-  2. Live server with sessions: no-op, unless a guarded restore is running
-     on it right now, in which case it waits for that and then runs step 4.
+     (owner pid and boot time; bounded wait). A lock whose owner is dead, or
+     that was taken before the current boot (the directory survives a
+     reboot and its pid may be recycled), is stale and reclaimed. Concurrent
+     callers (the agent and several laptop panes) queue here; the first
+     restores, the rest find a live server and do nothing. The verified save
+     (`tmux/scripts/resurrect_save.sh`) refuses to run while the lock has a
+     live owner.
+  2. Live server: waits for a guarded restore that is running on it. If the
+     only session left is the bootstrap one (a restore died before restoring
+     anything), it restores again. If other sessions exist and the last
+     restore did not complete, it exits 1 rather than restore over a
+     partial landscape. Otherwise a no-op.
   3. No server and no snapshot: exit 0. Otherwise it starts the server with
      `~/.config/tmux/tmux.conf` and a bootstrap session, publishes the
      incomplete-restore marker for the new server pid (so no save can
      capture the bootstrap landscape), and lets Continuum's restore-on-start
      run the guarded restore (`tmux/scripts/resurrect_restore.sh`, which holds
-     the lifecycle lock `${TMPDIR:-/tmp}/tmux-resurrect-<pid>-verified-save.lock`
-     shared with the verified save). If Continuum does not start one within
-     10 seconds, the wrapper runs the guarded restore itself. Success is the
-     guarded restore clearing the marker.
-  4. Removes the bootstrap session and runs
-     `tmux-remote-workspaces/scripts/rw-worker-post-restore.sh`: re-applies
-     the hidden endpoint options (`prefix None`, `prefix2 None`, `status off`,
-     `mouse off`, `detach-on-destroy on`) to every `rw-*` session, and stamps
-     each mirror record under `~/.local/state/tmux-remote-workspaces/owned/<root_id>/record.json`
-     with `restored_at` and `restored_endpoints` without touching ownership.
+     the lifecycle lock `<TMPDIR>/tmux-resurrect-<pid>-verified-save.lock`
+     shared with the verified save; both name it from the server's own
+     TMPDIR). If Continuum does not start one within 10 seconds, the
+     wrapper runs the guarded restore itself, and retries once when an
+     attempt restored nothing. Success is the guarded restore clearing the
+     marker.
+  4. Runs `tmux-remote-workspaces/scripts/rw-worker-post-restore.sh`: drops
+     the bootstrap session, re-applies the hidden endpoint options
+     (`prefix None`, `prefix2 None`, `status off`, `mouse off`,
+     `detach-on-destroy on`) to every `rw-*` session, and writes
+     `restored.json` (`restored_at`, `restored_endpoints`) beside each
+     mirror record under `~/.local/state/tmux-remote-workspaces/owned/<root_id>/`.
+     `record.json` itself is never written (the laptop owns it). The same
+     script is chained into tmux-resurrect's post-restore-all hook
+     (`--hook`, acts only where `rw-*` sessions exist), so it also runs
+     inside every guarded restore, including a Continuum restore fired when
+     `rw open` starts the worker server, and drops the bootstrap session
+     before the marker clears.
+- **Laptop side:** while the worker is restoring (bootstrap session present,
+  boot lock live, guarded restore running, or incomplete-restore marker
+  set), the attach loop's probe reports `restoring` and the pane waits
+  instead of closing or rebuilding its endpoint. Whether an absent session
+  was closed on the worker is decided from the worker server instance
+  (start time and pid) the session was last seen on, persisted per endpoint
+  in `~/.local/state/tmux-remote-workspaces/attach-seen/`; with no record the
+  loop recreates the session, never closes it.
 - **Log:** `~/.local/state/tmux-workspace-resurrect/boot-restore.log` (next to
-  the save timer's `launchd-save.log`). Exit status is nonzero only on a real
-  failure: a restore that did not complete (saves stay blocked for that
-  server until a guarded restore succeeds), a live server whose last restore
-  failed, or a lock timeout.
-- **Checks:** `make headless-doctor` reports `timer:restore-loaded`.
+  the save timer's `launchd-save.log`). Exit status: 0 on restore, no-op or
+  nothing to restore; 75 when another caller held the boot lock past the
+  timeout (the attach loop retries, never builds an empty session); 1 on a
+  restore that did not complete (saves stay blocked for that server until a
+  guarded restore succeeds) or a live server whose last restore failed.
+- **Checks:** `make headless-doctor` reports `timer:restore-loaded` and
+  `tmux:restore-complete` (fails while the live server has an
+  incomplete-restore marker, i.e. saves are blocked).
   `setup/templates/tmux-resurrect-restore.sh --check` validates the tmux
   binary, the upstream and guarded restore scripts and the worker
-  post-restore without side effects.
+  post-restore without side effects; `--restoring` exits 0 while a restore
+  is in progress or incomplete.
 
 ## Manual steps (these stay manual)
 

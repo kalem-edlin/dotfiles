@@ -159,8 +159,46 @@ fi
 
 server_pid="$("$TMUX_BIN" display-message -p '#{pid}' 2>/dev/null || true)"
 is_uint "$server_pid" || fail "cannot resolve the tmux server pid"
-lock_dir="${TMPDIR:-/tmp}/tmux-resurrect-${server_pid}-verified-save.lock"
-restore_incomplete="${TMPDIR:-/tmp}/tmux-resurrect-${server_pid}-restore-incomplete"
+# Name the lifecycle lock and the incomplete-restore marker from the SERVER's
+# TMPDIR, not this caller's: Continuum's restore and the client-detached save
+# run inside the server, while the launchd/systemd timer and ssh callers
+# bring their own environment. `show-environment -g` prints TMPDIR=<dir>, or
+# reports an unknown variable / prints -TMPDIR when the server has none
+# (/tmp); any other answer keeps the caller's TMPDIR. Mirrors
+# setup/templates/tmux-resurrect-restore.sh (lifecycle_paths).
+lifecycle_tmpdir_out="$("$TMUX_BIN" show-environment -g TMPDIR 2>&1 || true)"
+case "$lifecycle_tmpdir_out" in
+  TMPDIR=*) lifecycle_tmpdir="${lifecycle_tmpdir_out#TMPDIR=}" ;;
+  -TMPDIR | *"unknown variable"*) lifecycle_tmpdir="" ;;
+  *) lifecycle_tmpdir="${TMPDIR:-}" ;;
+esac
+lock_dir="${lifecycle_tmpdir:-/tmp}/tmux-resurrect-${server_pid}-verified-save.lock"
+restore_incomplete="${lifecycle_tmpdir:-/tmp}/tmux-resurrect-${server_pid}-restore-incomplete"
+
+# A worker boot restore (setup/templates/tmux-resurrect-restore.sh) holds this
+# lock from before it starts the server until its bootstrap session is gone.
+# Refuse while it has a live owner from this boot: a save now could publish a
+# landscape that is only the bootstrap session. A lock from an earlier boot
+# or with a dead owner is stale and ignored.
+boot_lock="${TMUX_WORKSPACE_RESURRECT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-workspace-resurrect}/boot-restore.lock"
+if [ -d "$boot_lock" ]; then
+  boot_owner=""
+  boot_taken=""
+  IFS= read -r boot_owner <"$boot_lock/pid" 2>/dev/null || true
+  IFS= read -r boot_taken <"$boot_lock/boot" 2>/dev/null || true
+  if [ -n "${TMUX_RESURRECT_BOOT_TIME:-}" ]; then
+    boot_now="$TMUX_RESURRECT_BOOT_TIME"
+  elif [ -r /proc/stat ]; then
+    boot_now="$(awk '$1 == "btime" { print $2; exit }' /proc/stat 2>/dev/null)"
+  else
+    boot_now="$({ sysctl -n kern.boottime 2>/dev/null || /usr/sbin/sysctl -n kern.boottime 2>/dev/null; } |
+      sed -n 's/.*sec = \([0-9][0-9]*\).*/\1/p')"
+  fi
+  if is_uint "$boot_owner" && kill -0 "$boot_owner" 2>/dev/null &&
+    { ! is_uint "$boot_taken" || ! is_uint "$boot_now" || [ "$boot_taken" = "$boot_now" ]; }; then
+    fail "boot restore in progress (pid $boot_owner); refusing to save"
+  fi
+fi
 [ ! -e "$restore_incomplete" ] ||
   fail "restore is incomplete; run the guarded restore successfully before saving"
 request_started="$(date +%s)"

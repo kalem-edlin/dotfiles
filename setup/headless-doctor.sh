@@ -834,6 +834,28 @@ elif [ "$PROFILE" = "headless-linux" ]; then
   fi
 fi
 
+# A restore that did not complete leaves an incomplete-restore marker for the
+# live server's pid, and the verified save refuses to run until a guarded
+# restore succeeds -- silently, from the timer's point of view. The marker
+# path uses the server's own TMPDIR, as tmux/scripts/resurrect_save.sh does.
+if has_cmd tmux && tmux list-sessions >/dev/null 2>&1; then
+  restore_srv_pid="$(tmux display-message -p '#{pid}' 2>/dev/null || true)"
+  restore_tmpdir_out="$(tmux show-environment -g TMPDIR 2>&1 || true)"
+  case "$restore_tmpdir_out" in
+    TMPDIR=*) restore_tmpdir="${restore_tmpdir_out#TMPDIR=}" ;;
+    -TMPDIR | *"unknown variable"*) restore_tmpdir="" ;;
+    *) restore_tmpdir="${TMPDIR:-}" ;;
+  esac
+  restore_marker="${restore_tmpdir:-/tmp}/tmux-resurrect-${restore_srv_pid}-restore-incomplete"
+  if [ -e "$restore_marker" ]; then
+    c_fail "tmux:restore-complete" "$restore_marker exists: the last restore on server $restore_srv_pid did not complete and saves are blocked" "inspect the sessions, then run the guarded restore (prefix C-M-r) or restart the tmux server; worker log: ~/.local/state/tmux-workspace-resurrect/boot-restore.log"
+  else
+    c_pass "tmux:restore-complete" "no incomplete-restore marker for server $restore_srv_pid"
+  fi
+else
+  c_optpass "tmux:restore-complete" "no tmux server running; nothing to check"
+fi
+
 # ===========================================================================
 # 8. REA and its tools (setup/rea.sh), and worker power policy (macOS)
 # ===========================================================================
