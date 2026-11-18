@@ -38,9 +38,15 @@ What changed:
   + `focus_pane_index`; the restored sidecar's `rw_endpoint` mapping wins
   when it places the endpoint elsewhere (the record's indices date from the
   handoff, the sidecar from the save that was restored) and is the fallback
-  when the record has no position. Only a bare restored shell is taken; a
-  busy pane, a pane of another endpoint, or an absent position is logged as
-  `restore-reattach-missing` and the endpoint stays registered. The pane is
+  when the record has no position. A record position that a newer sidecar
+  saved as a local pane is refused. A pane that already carries the
+  endpoint's `@rw-endpoint` (restore over a live server) is left alone.
+  Otherwise only a bare shell is taken: a shell command whose process has no
+  children (on macOS `pane_current_command` names the process-group leader,
+  so a live attach loop or a foreground `bash script.sh` reads as `bash`) and
+  that was not started as an attach loop. A busy pane, a pane of another
+  endpoint, or an absent position is logged as `restore-reattach-missing`
+  and the endpoint stays registered. The pane is
   respawned into `attach-loop.sh <id>` and gets its `@rw-*`, `@remote-host`
   and `@workspace-resurrect-skip` options back (`restore-reattach` event).
   No worker session is ever killed by a restore.

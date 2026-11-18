@@ -43,7 +43,9 @@ side() { # side <logical_id> <endpoint>... -> sidecar JSON
   jq -nc --argjson p "$panes" '{version: 1, panes: $p}'
 }
 
-dump=$'%1 $1 1 0 - harness:zsh\n%2 $1 1 1 - harness:zsh\n%3 $2 2 0 - sched r1:zsh\n%4 $2 2 1 - sched r1:nvim\n%5 $2 3 0 - sched r1:-zsh'
+# Dump lines: pane_id session_id window pane endpoint loop kids session:cmd
+# (loop L = started as an attach loop; kids K = the shell has children).
+dump=$'%1 $1 1 0 - - - harness:zsh\n%2 $1 1 1 - - - harness:zsh\n%3 $2 2 0 - - - sched r1:zsh\n%4 $2 2 1 - - - sched r1:nvim\n%5 $2 3 0 - - - sched r1:-zsh'
 
 # 1. Record position, session names with spaces.
 eq "record position matches a fresh shell" \
@@ -67,6 +69,22 @@ eq "record position owned by another endpoint in the sidecar" \
   "$(match "[$(ep aaaa harness 1 0)]" "$dump" "$(side 'harness:1.0' zzzz)")" \
   "aaaa missing position harness:1.0 belongs to endpoint zzzz"
 
+# 4b. Review probe C: the sidecar records the record position as a LOCAL
+#     pane. Saved after the endpoint existed -> the record is stale: missing
+#     (taking the pane would also suppress its own replay). Saved before the
+#     endpoint existed (handoff after the last save) -> the pane at that
+#     position is the pre-handoff pane: reattach. Unknown times -> missing.
+local_side='{"version":1,"saved_at":"2026-11-18T10:00:00Z","panes":[{"logical_id":"harness:1.0","rw_endpoint":""},{"logical_id":"harness:1.1","rw_endpoint":"","selected_command":"claudef --resume X"}]}'
+eq "record position the sidecar saved as local, after the handoff" \
+  "$(match "[$(ep aaaa harness 1 1 | jq -c '.created_at = "2026-11-18T09:00:00Z"')]" "$dump" "$local_side")" \
+  "aaaa missing sidecar records harness:1.1 as a local pane"
+eq "record position the sidecar saved as local, before the handoff" \
+  "$(match "[$(ep aaaa harness 1 1 | jq -c '.created_at = "2026-11-18T11:00:00Z"')]" "$dump" "$local_side")" \
+  "aaaa reattach %2 record"
+eq "record position saved as local, no endpoint creation time" \
+  "$(match "[$(ep aaaa harness 1 1)]" "$dump" "$local_side")" \
+  "aaaa missing sidecar records harness:1.1 as a local pane"
+
 # 5. Older records: no focus_session_name -> sessions.jsonl via uuid (latest
 #    line wins); no position at all -> sidecar; neither -> no-position.
 sessions=$'{"uuid":"u1","session_name":"old-name"}\n{"uuid":"u1","session_name":"harness"}'
@@ -84,30 +102,56 @@ eq "a pane is claimed once" \
   "aaaa reattach %1 record
 bbbb missing pane %1 at harness:1.0 already claimed"
 
-# 7. Restore over a live server: a pane already running this endpoint's
-#    loop is reported attached (no respawn); a pane stamped for another
+# 7. Restore over a live server (review probes A, B): a pane that already
+#    carries this endpoint is attached and left alone whatever it runs -- on
+#    macOS a live loop's pane_current_command is "bash" -- and wins over a
+#    sidecar that places the endpoint elsewhere. A pane stamped for another
 #    endpoint is never taken.
-live=$'%1 $1 1 0 aaaa harness:bash\n%2 $1 1 1 cccc harness:zsh'
-eq "already attached loop is left alone" \
-  "$(match "[$(ep aaaa harness 1 0)]" "$live")" \
-  "aaaa reattach %1 record"
-live=$'%1 $1 1 0 aaaa harness:ssh\n%2 $1 1 1 cccc harness:zsh'
-eq "live attach loop reports attached" \
+live=$'%1 $1 1 0 aaaa L - harness:bash\n%2 $1 1 1 cccc L - harness:zsh'
+eq "probe A: live loop showing bash is attached, not respawned" \
   "$(match "[$(ep aaaa harness 1 0),$(ep bbbb harness 1 1)]" "$live")" \
   "aaaa attached %1 live
 bbbb missing pane %2 at harness:1.1 carries endpoint cccc"
+live=$'%1 $1 1 0 - - - s:zsh\n%2 $1 1 1 aaaa L - s:bash'
+eq "probe B: live loop wins over an older sidecar position" \
+  "$(match "[$(ep aaaa s 1 1)]" "$live" "$(side 's:1.0' aaaa)")" \
+  "aaaa attached %2 live"
+live=$'%1 $1 1 0 aaaa - K harness:ssh'
+eq "live loop in an rw open pane (no loop start command) is attached" \
+  "$(match "[$(ep aaaa harness 1 0)]" "$live")" \
+  "aaaa attached %1 live"
 
-# 8. Malformed inputs: empty dump, junk sidecar, junk lines.
+# 7b. Review probe D: a shell with children (foreground `bash deploy.sh`,
+#     suspended or background jobs) is busy; so is any pane started as an
+#     attach loop that carries no endpoint.
+busy=$'%1 $1 1 0 - - K s:bash\n%2 $1 1 1 - - K s:zsh\n%3 $1 1 2 - L - s:bash'
+eq "probe D: shells with children and orphan loops are busy" \
+  "$(match "[$(ep aaaa s 1 0),$(ep bbbb s 1 1),$(ep cccc s 1 2)]" "$busy")" \
+  "aaaa missing pane %1 at s:1.0 is busy (bash, has child processes)
+bbbb missing pane %2 at s:1.1 is busy (zsh, has child processes)
+cccc missing pane %3 at s:1.2 runs another attach loop"
+eq "a shell with children is flagged for a settle re-check" \
+  "$(printf '%s' "[$(ep aaaa s 1 1)]" >"$W/e.json"; printf '%s\n' "$busy" >"$W/d"
+     rw_restore_match "$W/e.json" "$W/d" | jq -r '.retry')" "true"
+
+# 8. Malformed inputs: empty dump, junk sidecar, junk lines, old format.
 eq "empty dump reports every endpoint missing" \
   "$(match "[$(ep aaaa harness 1 0)]" "")" \
   "aaaa missing no pane at harness:1.0"
 eq "junk sidecar and junk dump lines are ignored" \
-  "$(match "[$(ep aaaa harness 1 0)]" $'garbage line\n%1 $1 1 0 - harness:zsh' 'not json')" \
+  "$(match "[$(ep aaaa harness 1 0)]" $'garbage line\n%1 $1 1 0 - harness:zsh\n%1 $1 1 0 - - - harness:zsh' 'not json')" \
   "aaaa reattach %1 record"
 
-# 9. The real dump format parses (format string kept in one place).
-check "dump format has the session name between the fifth space and a colon" \
-  grep -q ' #{session_name}:#{pane_current_command}$' <<<"$RW_RESTORE_PANES_FORMAT"
+# 9. The dump builder: pane pid -> K/- from the parent-pid set, session names
+#    with spaces and commands kept intact; the format keeps the session name
+#    between the seventh space and a colon.
+eq "rw_restore_mark_children" \
+  "$(printf '%s\n' '%1 $1 0 0 - - 4242 my  sess:zsh' '%2 $1 0 1 ab12 L 77 x:-zsh' |
+     rw_restore_mark_children '1 4242 99')" \
+  '%1 $1 0 0 - - K my  sess:zsh
+%2 $1 0 1 ab12 L - x:-zsh'
+check "dump format ends with pane pid, session name, colon, command" \
+  grep -q ' #{pane_pid} #{session_name}:#{pane_current_command}$' <<<"$RW_RESTORE_PANES_FORMAT"
 
 # 10. rw_post_restore_main end to end against a scripted tmux: respawns the
 #     matched pane into the attach loop, stamps the pane options, logs
@@ -118,11 +162,14 @@ TMUX_CALLS="$W/tmux-calls"
 tmux() {
   printf '%s\n' "$*" >>"$TMUX_CALLS"
   case "$1" in
-    list-panes) printf '%s\n' '%7 $3 1 0 - wt-feature:zsh' '%8 $3 1 1 - wt-feature:zsh' ;;
+    list-panes) printf '%s\n' '%7 $3 1 0 - - 4242 wt-feature:zsh' '%8 $3 1 1 - - 4343 wt-feature:zsh' ;;
     show-option) [ "${*: -1}" = "@session-uuid" ] && echo fresh-uuid ;;
   esac
   return 0
 }
+# Pane %7's shell (pid 4242) has a child: a job the user left running.
+ps() { printf '%s\n' 1 4242; }
+export RW_POST_RESTORE_SETTLE_TRIES=2
 mkdir -p "$(rw_endpoints_dir)" "$(rw_tombstones_dir)"
 mkdir -p "$HOME/Developer/proj/feature"
 jq -nc '{endpoint_id: "e1e1e1e1", worker: "fakeworker", root_id: "123", root_rel: "Developer/proj/feature",
@@ -134,6 +181,8 @@ jq -nc '{endpoint_id: "e2e2e2e2", worker: "fakeworker", focus_session_name: "clo
 jq -nc '{endpoint_id: "e3e3e3e3", worker: "fakeworker", focus_session_name: "wt-feature",
   focus_window_index: 1, focus_pane_index: 0}' >"$(rw_endpoint_file e3e3e3e3)"
 printf '{}' >"$(rw_tombstone_file e3e3e3e3)"
+jq -nc '{endpoint_id: "e4e4e4e4", worker: "fakeworker", focus_session_name: "wt-feature",
+  focus_window_index: 1, focus_pane_index: 0}' >"$(rw_endpoint_file e4e4e4e4)"
 (rw_post_restore_main)
 check "matched pane is respawned into the attach loop at the focus path" \
   grep -q "^respawn-pane -k -t %8 -c $HOME/Developer/proj/feature .*attach-loop\.sh e1e1e1e1\$" "$TMUX_CALLS"
@@ -141,12 +190,14 @@ check "pane options are stamped" \
   bash -c 'for o in "@rw-endpoint e1e1e1e1" "@rw-worker fakeworker" "@rw-workspace /Users/worker/Developer/proj/feature" "@rw-root-id 123" "@rw-session-uuid stable-uuid" "@remote-host fakeworker" "@workspace-resurrect-skip 1"; do grep -qx "set-option -pqt %8 $o" "$1" || exit 1; done' _ "$TMUX_CALLS"
 check "the session gets its stable uuid back" grep -qx 'set-option -t $3 -q @session-uuid stable-uuid' "$TMUX_CALLS"
 check "tombstoned endpoint is not reattached" bash -c '! grep -q e3e3e3e3 "$1"' _ "$TMUX_CALLS"
+eq "a busy pane is re-listed once before giving up" "$(grep -c '^list-panes' "$TMUX_CALLS")" 2
 check "nothing is killed" bash -c '! grep -Eq "^kill-|^respawn-pane .*%7" "$1"' _ "$TMUX_CALLS"
 eq "events: one reattach, one missing" \
   "$(jq -r '"\(.event) \(.endpoint) \(.outcome)"' "$(rw_events_file)" | sort | tr '\n' ';')" \
-  "restore-reattach e1e1e1e1 success;restore-reattach-missing e2e2e2e2 skipped;"
+  "restore-reattach e1e1e1e1 success;restore-reattach-missing e2e2e2e2 skipped;restore-reattach-missing e4e4e4e4 skipped;"
 check "every endpoint stays registered" \
   bash -c 'for e in e1e1e1e1 e2e2e2e2 e3e3e3e3; do [ -f "$1/$e.json" ] || exit 1; done' _ "$(rw_endpoints_dir)"
-unset -f tmux
+unset -f tmux ps
+unset RW_POST_RESTORE_SETTLE_TRIES
 
 finish

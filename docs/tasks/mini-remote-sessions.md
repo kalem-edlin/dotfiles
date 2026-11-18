@@ -243,11 +243,11 @@ Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
 
 ### Changes recorded by W4 (2026-11-18)
 
-- C6 matching: the endpoint record's `focus_session_name` + indices is the primary key. The restored sidecar's `rw_endpoint` mapping overrides it when the two disagree (the sidecar describes the exact layout tmux-resurrect recreated; the record's indices date from the handoff) and is the fallback when the record has no position; a record without `focus_session_name` resolves its session from `sessions.jsonl` via `focus_session_uuid`. Only a bare shell pane with no other `@rw-endpoint` is taken.
+- C6 matching: the endpoint record's `focus_session_name` + indices is the primary key. The restored sidecar's `rw_endpoint` mapping overrides it when the two disagree (the sidecar describes the exact layout tmux-resurrect recreated; the record's indices date from the handoff) and is the fallback when the record has no position; a record without `focus_session_name` resolves its session from `sessions.jsonl` via `focus_session_uuid`. A pane that already carries the endpoint's `@rw-endpoint` is left attached whatever it runs. Otherwise only a bare shell is taken: shell command, no child processes (macOS `pane_current_command` is the process-group leader, so a foreground script or a live loop reads as `bash`), not started as an attach loop, no other `@rw-endpoint`; a shell busy only with children is re-checked for ~3s. Fix wave 2026-11-18: a record position the sidecar saved as a local pane after the endpoint's `created_at` is refused (`restore-reattach-missing`), so a stale record never takes a local pane and suppresses its replay.
 - C6 sidecar: `rw_endpoint` is additive; the sidecar stays `version: 1` (the existing convention for additive fields). Endpoint panes are recorded with `selected_source: "remote-endpoint"`.
 - C6 hook order: `rw-post-restore.sh` first, everything else (the sidecar replay) in its existing order, `libexec/reconcile` last, re-placed on every plugin load.
 - New events: `restore-reattach` (success) and `restore-reattach-missing` (outcome `skipped` or `fail`, detail = reason).
-- `session-renamed` updates `sessions.jsonl` and, in every endpoint of the session, `focus_session_name` plus the bound pane's `focus_window_index`/`focus_pane_index`.
+- `session-renamed` updates `sessions.jsonl` and, in every endpoint of the session, `focus_session_name` plus the bound pane's `focus_window_index`/`focus_pane_index`. The hook passes only `#{q:session_id}`; the script reads the current name back from tmux (out-of-order double renames), and rewrites endpoint files atomically, under `rw_root_lock` when common.sh has it, only if unchanged since read.
 
 ## Follow-ups (not in this plan)
 

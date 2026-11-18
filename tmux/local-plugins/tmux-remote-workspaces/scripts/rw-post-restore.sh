@@ -21,11 +21,21 @@
 #      handoff. When the record has no position (older records), the sidecar
 #      position is used; for records without focus_session_name the session
 #      name is recovered from sessions.jsonl via focus_session_uuid. A
-#      position the sidecar attributes to a different endpoint is never used.
-#   2. The pane is taken only if it is unclaimed, carries no other
-#      endpoint, and sits at a bare shell (a freshly restored pane). A pane
-#      that already runs this endpoint's attach loop (a restore over a live
-#      server) is left as is. A busy pane is never killed.
+#      position the sidecar attributes to a different endpoint is never used,
+#      nor one the sidecar records as a LOCAL pane when that sidecar was saved
+#      after the endpoint was created (the record is stale; taking the pane
+#      would also suppress its own replay).
+#   2. A pane that already carries this endpoint's @rw-endpoint (a restore
+#      over a live server) is "attached" and left exactly as it is, whatever
+#      it runs. Otherwise the pane is taken only if it is unclaimed, carries
+#      no other endpoint, was not started as an attach loop, and is a bare
+#      shell: its current command is a shell AND its shell process has no
+#      children. pane_current_command is the process-group leader's name, so
+#      a foreground `bash script.sh`, an attach loop, or a shell with
+#      suspended or background jobs would otherwise pass as idle. A freshly
+#      restored zsh may still be running its rc files; a pane that is busy
+#      only for that reason is re-checked for up to ~3s. A busy pane is never
+#      killed.
 #   3. respawn-pane the pane into attach-loop.sh <id> (no --fresh: nothing
 #      here confirmed the worker session just now), then stamp @rw-endpoint,
 #      @rw-worker, @rw-workspace, @rw-root-id, @rw-session-uuid,
@@ -49,13 +59,31 @@ RW_POST_RESTORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$RW_POST_RESTORE_DIR/common.sh"
 
 # One list-panes call. Fields are space separated and the session name sits
-# between the fifth space and the first colon (tmux replaces ':' in session
+# between the seventh space and the first colon (tmux replaces ':' in session
 # names), so neither spaces in names nor commands break the split, and no
-# TAB passes through tmux's control-character sanitization.
-RW_RESTORE_PANES_FORMAT='#{pane_id} #{session_id} #{window_index} #{pane_index} #{?@rw-endpoint,#{@rw-endpoint},-} #{session_name}:#{pane_current_command}'
+# TAB passes through tmux's control-character sanitization. The sixth field
+# is L when the pane was started as an attach loop; the seventh is the pane
+# pid, which rw_restore_panes_dump turns into K (the shell has children) or -.
+RW_RESTORE_PANES_FORMAT='#{pane_id} #{session_id} #{window_index} #{pane_index} #{?@rw-endpoint,#{@rw-endpoint},-} #{?#{m:*attach-loop.sh*,#{pane_start_command}},L,-} #{pane_pid} #{session_name}:#{pane_current_command}'
+
+# rw_restore_mark_children <parent-pids> -- stdin: raw list-panes lines;
+# stdout: the dump rw_restore_match reads (pane pid replaced by K or -).
+# <parent-pids> is every pid that has a child, space separated.
+rw_restore_mark_children() {
+  local parents=" $1 " pane_id session_id window pane endpoint loop pid rest kids
+  while read -r pane_id session_id window pane endpoint loop pid rest; do
+    [ -n "$pane_id" ] || continue
+    case "$parents" in *" $pid "*) kids=K ;; *) kids=- ;; esac
+    printf '%s %s %s %s %s %s %s %s\n' "$pane_id" "$session_id" "$window" "$pane" \
+      "$endpoint" "$loop" "$kids" "$rest"
+  done
+}
 
 rw_restore_panes_dump() {
-  tmux list-panes -a -F "$RW_RESTORE_PANES_FORMAT" 2>/dev/null
+  local parents
+  parents="$(ps -axo ppid= 2>/dev/null | tr -s ' \n' ' ')"
+  tmux list-panes -a -F "$RW_RESTORE_PANES_FORMAT" 2>/dev/null |
+    rw_restore_mark_children "$parents"
 }
 
 # rw_restore_match <endpoints.json> <panes.dump> [sidecar.json] [sessions.jsonl]
@@ -87,18 +115,21 @@ rw_restore_match() {
     def pos_key: "\(.session):\(.window).\(.pane)";
 
     ($dump | split("\n") | map(
-      capture("^(?<pane_id>%[0-9]+) (?<session_id>\\$[0-9]+) (?<window>[0-9]+) (?<pane>[0-9]+) (?<endpoint>[^ ]+) (?<session>[^:]*):(?<command>.*)$")
+      capture("^(?<pane_id>%[0-9]+) (?<session_id>\\$[0-9]+) (?<window>[0-9]+) (?<pane>[0-9]+) (?<endpoint>[^ ]+) (?<loop>[L-]) (?<kids>[K-]) (?<session>[^:]*):(?<command>.*)$")
       | .endpoint = (if .endpoint == "-" then "" else .endpoint end)
-      | .idle = (.command as $c | shells | index([$c]) != null)
+      | .shell = (.command as $c | shells | index([$c]) != null)
+      | .idle = (.shell and .kids == "-" and .loop == "-")
     )) as $panes
 
+    # Every sidecar row: endpoint "" for a pane that was local at the save.
     | ([($sidecar.panes // [])[]
         | objects
-        | select((.rw_endpoint // "") != "")
         | (.logical_id // "" | capture("^(?<session>.*):(?<window>[0-9]+)\\.(?<pane>[0-9]+)$")) as $p
-        | {session: $p.session, window: $p.window, pane: $p.pane, endpoint: .rw_endpoint}]) as $side
-
-    | ($side | map({key: pos_key, value: .endpoint}) | from_entries) as $side_owner
+        | {session: $p.session, window: $p.window, pane: $p.pane,
+           endpoint: ((.rw_endpoint // "") | tostring)}]) as $rows
+    | ([$rows[] | select(.endpoint != "")]) as $side
+    | ($rows | map({key: pos_key, value: .endpoint}) | from_entries) as $side_owner
+    | ($sidecar.saved_at // "" | tostring) as $saved_at
 
     | def name_for_uuid($u):
         if ($u // "") == "" then ""
@@ -130,7 +161,7 @@ rw_restore_match() {
       ({claimed: [], out: []};
        . as $state
        | $e.endpoint_id as $id
-       | ([$panes[] | select(.endpoint == $id and (.idle | not))
+       | ([$panes[] | select(.endpoint == $id)
            | select(.pane_id as $pid | $state.claimed | index([$pid]) | not)] | first) as $live
        | if $live != null then
            .claimed += [$live.pane_id] | .out += [found($e; "attached"; $live; "live")]
@@ -140,12 +171,22 @@ rw_restore_match() {
            | (if $sp != null and $sp == $rec then {pos: $rec, via: "record"}
               elif $sp != null then {pos: $sp, via: "sidecar"}
               elif $rec == null then null
-              elif ($side_owner[$rec | pos_key] // $id) != $id then {pos: $rec, via: "record", owned: $side_owner[$rec | pos_key]}
-              else {pos: $rec, via: "record"} end) as $choice
+              else ($side_owner[$rec | pos_key]) as $owner
+                | ($e.created_at // "" | tostring) as $created
+                | if $owner == null or $owner == $id then {pos: $rec, via: "record"}
+                  elif $owner != "" then {pos: $rec, via: "record", owned: $owner}
+                  # Local at the save. A save older than the endpoint shows the
+                  # pre-handoff pane: expected. A newer one means the record
+                  # points at a pane that stayed local.
+                  elif $saved_at != "" and $created != "" and $saved_at < $created then {pos: $rec, via: "record"}
+                  else {pos: $rec, via: "record", local: true} end
+              end) as $choice
            | if $choice == null then
                .out += [missing($e; "no-position"; "")]
              elif $choice.owned != null then
                .out += [missing($e; "position \($choice.pos | pos_key) belongs to endpoint \($choice.owned)"; "record")]
+             elif $choice.local == true then
+               .out += [missing($e; "sidecar records \($choice.pos | pos_key) as a local pane"; "record")]
              else
                ([$panes[] | select(.session == $choice.pos.session and .window == $choice.pos.window
                   and .pane == $choice.pos.pane)] | first) as $p
@@ -155,8 +196,11 @@ rw_restore_match() {
                    .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) already claimed"; $choice.via)]
                  elif $p.endpoint != "" and $p.endpoint != $id then
                    .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) carries endpoint \($p.endpoint)"; $choice.via)]
+                 elif $p.loop == "L" then
+                   .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) runs another attach loop"; $choice.via)]
                  elif ($p.idle | not) then
-                   .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) is busy (\($p.command))"; $choice.via)]
+                   .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) is busy (\($p.command)\(if $p.kids == "K" then ", has child processes" else "" end))"; $choice.via)
+                     + {retry: ($p.shell and $p.kids == "K")}]
                  else
                    .claimed += [$p.pane_id] | .out += [found($e; "reattach"; $p; $choice.via)]
                  end
@@ -197,8 +241,6 @@ rw_post_restore_main() {
   done
   jq -s . "$work/endpoints.jsonl" >"$work/endpoints.json"
 
-  rw_restore_panes_dump >"$work/panes.dump"
-
   # Read-only use of the sibling plugin's path helper, as libexec/reconcile
   # does: the sidecar of the snapshot that was just restored.
   local sidecar="" workspace_common="$RW_PLUGIN_DIR/../tmux-workspace-resurrect/scripts/common.sh"
@@ -207,11 +249,21 @@ rw_post_restore_main() {
     sidecar="$(source "$workspace_common" && workspace_sidecar_file 2>/dev/null || true)"
   fi
 
-  rw_restore_match "$work/endpoints.json" "$work/panes.dump" "$sidecar" "$(rw_sessions_file)" \
-    >"$work/matches.jsonl" || {
-    rw_log "post-restore: endpoint matching failed; nothing reattached"
-    return 0
-  }
+  # Restored shells may still be running their rc files (children), so a
+  # pane that is busy only for that reason is re-checked for up to ~3s.
+  local attempt=0
+  while :; do
+    rw_restore_panes_dump >"$work/panes.dump"
+    rw_restore_match "$work/endpoints.json" "$work/panes.dump" "$sidecar" "$(rw_sessions_file)" \
+      >"$work/matches.jsonl" || {
+      rw_log "post-restore: endpoint matching failed; nothing reattached"
+      return 0
+    }
+    jq -e 'select(.retry == true)' "$work/matches.jsonl" >/dev/null 2>&1 || break
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt "${RW_POST_RESTORE_SETTLE_TRIES:-6}" ] || break
+    sleep 0.5
+  done
 
   local reattached=0 attached=0 missing=0 line outcome pane_id session_id session_name
   local window pane via reason endpoint_json worker remote_path root_id old_uuid dir cmd

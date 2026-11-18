@@ -104,7 +104,15 @@ esac
 #   2. ...everything else, in its existing order; in practice
 #      tmux-workspace-resurrect/scripts/restore.sh, the sidecar replay,
 #      which skips every pane with an endpoint
-#   3. libexec/reconcile           orphan disposal, last
+#   3. scripts/rw-worker-post-restore.sh --hook
+#                                  worker only (acts only where rw-* sessions
+#                                  exist): drops the boot restore's bootstrap
+#                                  session, re-applies the hidden endpoint
+#                                  options, records the restore (C6). Covers a
+#                                  Continuum restore-on-start fired by any
+#                                  worker server start, not only the boot
+#                                  restore wrapper.
+#   4. libexec/reconcile           orphan disposal, last
 #
 # rw-post-restore.sh must precede the replay: the replay would otherwise
 # paste a former remote pane's stale local command (the pre-handoff agent)
@@ -131,14 +139,18 @@ place_resurrect_hook() {
 }
 
 place_resurrect_hook "post-restore-all" first "bash '$PLUGIN_DIR/scripts/rw-post-restore.sh'"
+place_resurrect_hook "post-restore-all" last "bash '$PLUGIN_DIR/scripts/rw-worker-post-restore.sh' --hook"
 place_resurrect_hook "post-restore-all" last "bash '$PLUGIN_DIR/libexec/reconcile'"
 
 # --- Session renames -------------------------------------------------------
 # Renamed worktree sessions must still reattach after a restore: keep
 # sessions.jsonl and the endpoints' focus_session_name (and pane indices)
-# current. Nothing else in the config sets this hook.
+# current. Nothing else in the config sets this hook. Only the session id is
+# passed (#{q:} escapes its '$' for the shell); the script reads the current
+# name back from tmux, so a quote in a name cannot break the command and two
+# quick renames cannot record the older name last.
 tmux set-hook -g session-renamed \
-  "run-shell -b \"bash '$PLUGIN_DIR/scripts/rw-session-renamed.sh' '#{session_id}' '#{session_name}'\""
+  "run-shell -b \"bash '$PLUGIN_DIR/scripts/rw-session-renamed.sh' #{q:session_id}\""
 
 # --- doctor -----------------------------------------------------------------
 # `rw doctor` remains CLI-only; lifecycle bindings are wired from
