@@ -51,6 +51,19 @@ finish() {
   [ "$T_FAIL" -eq 0 ]
 }
 
+# wait_for <seconds> <command...> -- polls (0.1 s) until the command
+# succeeds; fails after <seconds>. For effects that happen detached, such as
+# the worker save request.
+wait_for() {
+  local limit="$1" i=0
+  shift
+  while ! "$@"; do
+    i=$((i + 1))
+    [ "$i" -lt $((limit * 10)) ] || return 1
+    sleep 0.1
+  done
+}
+
 # trees_equal <a> <b> -- same files and contents, ignoring .git.
 trees_equal() {
   diff -r -x .git "$1" "$2" >/dev/null 2>&1
@@ -58,8 +71,10 @@ trees_equal() {
 
 rw_test_sandbox() {
   SANDBOX="$(cd -P "$(mktemp -d "${TMPDIR:-/tmp}/rw-tests.XXXXXX")" && pwd -P)"
+  # A worker save request runs detached (rw_worker_request_save) and may
+  # still be writing into the sandbox: retry once it has finished.
   # shellcheck disable=SC2064 # expand now: the path is fixed for this run
-  trap "rm -rf '$SANDBOX'" EXIT
+  trap "rm -rf '$SANDBOX' 2>/dev/null || { sleep 1; rm -rf '$SANDBOX'; }" EXIT
 
   export HOME="$SANDBOX/focus-home"
   export FAKE_WORKER_HOME="$SANDBOX/worker-home"
@@ -231,6 +246,10 @@ EOF
   # Closing worker sessions asks the worker for a verified save; here that
   # only leaves a trace (never launchctl/systemctl against this machine).
   export RW_WORKER_SAVE_TRIGGER="echo save-requested >>'$SANDBOX/worker-saves.log'"
+  # The boot restore wrapper's stale-marker sweep looks only here, never in
+  # this machine's real temp dirs.
+  mkdir -p "$SANDBOX/marker-dir"
+  export TMUX_RESURRECT_MARKER_DIRS="$SANDBOX/marker-dir"
   export PATH="$SANDBOX/bin:$PATH"
   export RW_SSH_BIN="$SANDBOX/bin/ssh"
 

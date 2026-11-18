@@ -1,6 +1,5 @@
 {
   "env": {
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50",
     "ENABLE_LSP_TOOL": "1",
     "ENABLE_TOOL_SEARCH": "true"
   },
@@ -32,8 +31,7 @@
           {
             "type": "command",
             "command": "bash \"$HOME/.config/tmux/local-plugins/tmux-agent-sessions/scripts/agent-state\" claude SessionStart",
-            "timeout": 3,
-            "async": true
+            "timeout": 3
           }
         ]
       }
@@ -178,5 +176,23 @@
   "editorMode": "vim",
   "verbose": false,
   "remoteControlAtStartup": false,
-  "agentPushNotifEnabled": true
+  "agentPushNotifEnabled": true,
+  "syncClaudeAiSkills": false,
+  "syncClaudeAiPlugins": false,
+  "disableClaudeAiConnectors": true,
+  "skillOverrides": {
+    "code-review": "user-invocable-only",
+    "fewer-permission-prompts": "user-invocable-only",
+    "init": "user-invocable-only",
+    "keybindings-help": "user-invocable-only",
+    "loop": "user-invocable-only",
+    "plugin-authoring": "user-invocable-only",
+    "schedule": "user-invocable-only",
+    "security-review": "user-invocable-only",
+    "simplify": "user-invocable-only",
+    "artifact-capabilities": "name-only",
+    "artifact-diagramming": "name-only",
+    "update-config": "name-only",
+    "workflow-authoring": "name-only"
+  }
 }

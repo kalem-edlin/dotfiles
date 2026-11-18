@@ -122,8 +122,13 @@ remote_path="$(rw_path_under_root "$focus_path" "$root_local" "$worker_root")"
 endpoint_id="$(rw_new_short_id)"
 session_name="$(rw_session_name "$endpoint_id")"
 
-rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)" </dev/null >/dev/null 2>&1 ||
-  rw_die "rw open: could not create the remote session for this pane." 1
+# A worker with no tmux server gets one through its boot restore wrapper
+# (never a bare new-session); a server whose last restore did not complete is
+# refused, since nothing created there would ever be saved.
+if ! rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)" </dev/null >/dev/null 2>&1; then
+  rw_log_event "create" "" "$worker" "$(rw_elapsed_ms "$start_ts")" "fail" "remote_session: $RW_WORKER_SERVER_ERROR"
+  rw_die "rw open: could not create the remote session for this pane: $RW_WORKER_SERVER_ERROR." 1
+fi
 
 session_uuid="$(tmux show-option -t "$pane_id" -qv @session-uuid 2>/dev/null || true)"
 [ -n "$session_uuid" ] || session_uuid="$(rw_pane_get "$pane_id" @rw-session-uuid)"
@@ -170,5 +175,6 @@ rw_pane_set "$pane_id" @rw-root-id "$root_id"
 [ -n "$session_uuid" ] && rw_pane_set "$pane_id" @rw-session-uuid "$session_uuid"
 
 rw_log_event "create" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$start_ts")" "success" "open root=$root_rel"
-rw_worker_request_save "$worker" # new session on the worker: refresh its snapshot
+# New session on the worker: refresh its snapshot (fire and forget).
+rw_worker_request_save "$worker"
 start_loop "$endpoint_id" --fresh

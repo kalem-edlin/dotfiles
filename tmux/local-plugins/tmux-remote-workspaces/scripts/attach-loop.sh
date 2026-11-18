@@ -70,10 +70,8 @@ attempt=0
 role=""
 state_channel_pid=""
 
-# The worker boot restore's bootstrap session
-# (setup/templates/tmux-resurrect-restore.sh). While it exists, the worker's
-# server is mid-restore and an absent endpoint session means nothing yet.
-RW_BOOT_SESSION="_tmux_restore_boot"
+# RW_BOOT_SESSION (the worker boot restore's bootstrap session) and
+# remote_wrapper_sh come from common.sh, shared with rw_create_remote_session.
 
 status() {
   # The attach loop owns this pane while disconnected, so operational
@@ -212,20 +210,6 @@ absent_verdict() {
   else
     printf 'recreate\n'
   fi
-}
-
-# remote_wrapper_sh -- worker-side shell that sets $w to the worker's boot
-# restore wrapper (setup/templates/tmux-resurrect-restore.sh), or to '' when
-# it is absent. The wrapper lives in the worker's dotfiles checkout, which
-# ~/.config/tmux links into, so it is found without knowing the worker's
-# home or checkout path.
-remote_wrapper_sh() {
-  # shellcheck disable=SC2016 # expanded by the worker's shell
-  printf '%s' '
-    cfg=$(cd -P "$HOME/.config/tmux" 2>/dev/null && cd .. && pwd)
-    w="$cfg/setup/templates/tmux-resurrect-restore.sh"
-    { [ -n "$cfg" ] && [ -x "$w" ]; } || w=""
-    tmux_bin=$(command -v tmux || echo tmux)'
 }
 
 # remote_probe_cmd <session_name> -- the worker-side probe behind

@@ -378,19 +378,217 @@ rw_apply_hidden_session_options() {
   bash -c "$(rw_hidden_session_options_cmd "${1:?session name required}")"
 }
 
+# ---------------------------------------------------------------------------
+# Worker tmux server start (B3). A server on the worker is only ever started
+# through its boot restore wrapper (setup/templates/tmux-resurrect-restore.sh):
+# a bare `tmux new-session` there starts a server from the worker's tmux.conf,
+# whose Continuum restore-on-start then runs the guarded restore INTO the
+# session rw just made; that restore fails and leaves the incomplete-restore
+# marker, after which every verified save on the worker is refused.
+# ---------------------------------------------------------------------------
+
+# The wrapper's bootstrap session. While it exists the worker's server is
+# mid-restore and an absent endpoint session means nothing yet.
+# shellcheck disable=SC2034 # read by attach-loop.sh
+RW_BOOT_SESSION="_tmux_restore_boot"
+
+# remote_wrapper_sh -- worker-side shell that sets $w to the worker's boot
+# restore wrapper, or to '' when it is absent, and $tmux_bin to its tmux. The
+# wrapper lives in the worker's dotfiles checkout, which ~/.config/tmux links
+# into, so it is found without knowing the worker's home or checkout path.
+# POSIX sh and zsh alike.
+remote_wrapper_sh() {
+  # shellcheck disable=SC2016 # expanded by the worker's shell
+  printf '%s' '
+    cfg=$(cd -P "$HOME/.config/tmux" 2>/dev/null && cd .. && pwd)
+    w="$cfg/setup/templates/tmux-resurrect-restore.sh"
+    { [ -n "$cfg" ] && [ -x "$w" ]; } || w=""
+    tmux_bin=$(command -v tmux || echo tmux)'
+}
+
+# Seconds rw waits for a worker restore in progress (or the wrapper's boot
+# lock) before it gives up on creating a session.
+rw_worker_start_timeout() {
+  case "${RW_WORKER_START_TIMEOUT:-}" in
+    '' | *[!0-9]*) printf '120\n' ;;
+    *) printf '%s\n' "$RW_WORKER_START_TIMEOUT" ;;
+  esac
+}
+
+# rw_worker_server_sh -- the worker-side program behind
+# rw_worker_ensure_server and rw_create_remote_session, run as
+# `sh -c <this> rw-worker-server <session> <dir> <timeout> <options-cmd>`
+# (an empty <session> only makes sure the server may be used). Prints one
+# line: `created` (the session exists with its hidden options), `ready`
+# (nothing to create), `restoring` (a restore was still running at the
+# timeout), `incomplete <marker>` (a live server whose last restore did not
+# complete), `failed` (the wrapper left no server), `no-wrapper` / `outdated`
+# (no server, and no wrapper that can start one), `create-failed`.
+#
+# State comes from the wrapper's `--state` (none | restoring | ready |
+# incomplete <marker>); a wrapper from before it falls back to its
+# `--restoring`. No server: run the wrapper with `--start <session> <dir>`,
+# which restores the last snapshot and creates the session before dropping
+# its bootstrap session (or starts an empty server when there is no
+# snapshot). Exit 75 (boot lock wait timed out) and a restore in progress
+# are waited on, bounded by <timeout>.
+rw_worker_server_sh() {
+  remote_wrapper_sh
+  # shellcheck disable=SC2016 # expanded by the worker's shell
+  printf '%s' '
+    unset TMUX TMUX_PANE
+    sess=$1 dir=$2 limit=$3 opts=$4
+    case "$limit" in "" | *[!0-9]*) limit=120 ;; esac
+    rw_wrap() {
+      TMUX_RESURRECT_RESTORE_TMUX_BIN="$tmux_bin" TMUX_RESURRECT_RESTORE_LOCK_TIMEOUT="$limit" \
+        "$w" "$@" </dev/null >/dev/null 2>&1
+    }
+    rw_state() {
+      if [ -n "$w" ]; then
+        s=$(TMUX_RESURRECT_RESTORE_TMUX_BIN="$tmux_bin" "$w" --state </dev/null 2>/dev/null) || s=""
+        case "$s" in none | restoring | ready | "incomplete "*) printf "%s\n" "$s"; return 0 ;; esac
+      fi
+      if ! tmux list-sessions >/dev/null 2>&1; then
+        echo none
+      elif [ -n "$w" ] && { tmux has-session -t "=_tmux_restore_boot" 2>/dev/null || rw_wrap --restoring; }; then
+        echo restoring
+      else
+        echo ready
+      fi
+    }
+    t0=$(date +%s) ran=0 made=0 rc=0
+    while :; do
+      quick=0
+      st=$(rw_state)
+      case "$st" in
+        ready | "incomplete "*) break ;;
+        none)
+          if [ -z "$w" ]; then st=no-wrapper; break; fi
+          if [ "$ran" = 1 ]; then
+            # The wrapper ran and left no server: nothing to restore (fine
+            # when nothing is to be created), or a restore that gave up.
+            if [ -z "$sess" ] && [ "$rc" = 0 ]; then st=ready; else st=failed; fi
+            break
+          fi
+          rc=0
+          if [ -n "$sess" ]; then rw_wrap --start "$sess" "$dir" || rc=$?; else rw_wrap || rc=$?; fi
+          if [ "$rc" = 2 ]; then
+            # A wrapper from before --start: restore only.
+            rc=0
+            rw_wrap || rc=$?
+            if [ "$rc" = 0 ] && [ -n "$sess" ] && ! tmux list-sessions >/dev/null 2>&1; then st=outdated; break; fi
+          fi
+          [ "$rc" = 75 ] || ran=1
+          if [ -n "$sess" ] && tmux has-session -t "=$sess" 2>/dev/null; then made=1; fi
+          quick=1
+          ;;
+      esac
+      [ $(($(date +%s) - t0)) -lt "$limit" ] || { st=restoring; break; }
+      [ "$quick" = 1 ] || sleep 1
+    done
+    if [ "$st" = ready ] && [ -n "$sess" ]; then
+      if [ "$made" = 1 ] || tmux new-session -d -s "$sess" -c "$dir"; then
+        if eval "$opts"; then st=created; else st=create-failed; fi
+      else
+        st=create-failed
+      fi
+    fi
+    printf "%s\n" "$st"'
+}
+
+# rw_worker_restore_report_sh -- worker-side program (`sh -c`) for rw doctor:
+# `state <word>` from the wrapper's --state (`no-wrapper`, or `old-wrapper`
+# when it predates --state), then `stale <marker>` for each incomplete-restore
+# marker whose tmux server is gone. Read only.
+rw_worker_restore_report_sh() {
+  remote_wrapper_sh
+  # shellcheck disable=SC2016 # expanded by the worker's shell
+  printf '%s' '
+    unset TMUX TMUX_PANE
+    if [ -z "$w" ]; then
+      echo "state no-wrapper"
+    else
+      s=$(TMUX_RESURRECT_RESTORE_TMUX_BIN="$tmux_bin" "$w" --state </dev/null 2>/dev/null) || s=""
+      echo "state ${s:-old-wrapper}"
+    fi
+    live=$(tmux display-message -p "#{pid}" 2>/dev/null) || live=""
+    for d in "${TMPDIR:-/tmp}" /tmp $(getconf DARWIN_USER_TEMP_DIR 2>/dev/null); do
+      find "$d" -maxdepth 1 -name "tmux-resurrect-*-restore-incomplete" 2>/dev/null
+    done | sed "s,//*,/,g" | sort -u | while IFS= read -r f; do
+      p=${f##*/tmux-resurrect-}
+      p=${p%-restore-incomplete}
+      case "$p" in "" | *[!0-9]*) continue ;; esac
+      [ "$p" = "$live" ] && continue
+      if kill -0 "$p" 2>/dev/null && ps -p "$p" -o comm= 2>/dev/null | grep -q tmux; then continue; fi
+      echo "stale $f"
+    done'
+}
+
+# rw_worker_server_explain <worker> <result line> -- one line for the user.
+rw_worker_server_explain() {
+  local worker="$1" line="$2"
+  case "$line" in
+    "incomplete "*)
+      printf "the tmux server on '%s' did not complete its last restore (%s), so its saves are refused; there, run the guarded restore (prefix C-M-r) or restart the tmux server, then retry\n" "$worker" "${line#incomplete }"
+      ;;
+    failed) printf "the boot restore on '%s' did not bring its tmux server up (see ~/.local/state/tmux-workspace-resurrect/boot-restore.log there)\n" "$worker" ;;
+    restoring) printf "'%s' is still restoring its tmux sessions after %ss; retry when it finishes\n" "$worker" "$(rw_worker_start_timeout)" ;;
+    no-wrapper | outdated)
+      printf "'%s' has no tmux server and no boot restore wrapper that can start one (setup/templates/tmux-resurrect-restore.sh); update its dotfiles checkout, then retry\n" "$worker"
+      ;;
+    create-failed) printf "tmux on '%s' could not create the session\n" "$worker" ;;
+    '') printf "'%s' did not answer\n" "$worker" ;;
+    *) printf "unexpected answer from '%s': %s\n" "$worker" "$line" ;;
+  esac
+}
+
+# rw_worker_server_run <worker> <connect-timeout> <session> <dir> -- runs
+# rw_worker_server_sh over one ssh (with keepalives: a restore can take
+# minutes). Returns 0 on `created` (or `ready` with no session); otherwise 1
+# (6 when ssh itself failed) with RW_WORKER_SERVER_ERROR set to one line.
+# shellcheck disable=SC2034 # read by the callers
+RW_WORKER_SERVER_ERROR=""
+rw_worker_server_run() {
+  local worker="$1" timeout="$2" session="$3" dir="$4" opts="" out line rc=0
+  RW_WORKER_SERVER_ERROR=""
+  [ -z "$session" ] || opts="$(rw_hidden_session_options_cmd "$session")"
+  out="$("$(rw_ssh_bin)" -o BatchMode=yes -o ConnectTimeout="$timeout" \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "$worker" \
+    "sh -c $(rw_shquote "$(rw_worker_server_sh)") rw-worker-server $(rw_shquote "$session") $(rw_shquote "$dir") $(rw_worker_start_timeout) $(rw_shquote "$opts")" \
+    </dev/null 2>/dev/null)" || rc=$?
+  line="$(printf '%s\n' "$out" | sed '/^$/d' | tail -n 1)"
+  case "$line" in
+    created) return 0 ;;
+    ready) [ -n "$session" ] || return 0 ;;
+  esac
+  if [ "$rc" -ne 0 ] && [ -z "$line" ]; then
+    RW_WORKER_SERVER_ERROR="'$worker' is unreachable"
+    return 6
+  fi
+  # shellcheck disable=SC2034 # read by the callers
+  RW_WORKER_SERVER_ERROR="$(rw_worker_server_explain "$worker" "$line")"
+  return 1
+}
+
+# rw_worker_ensure_server <worker> -- before anything is moved: 0 when the
+# worker's tmux server may take new sessions (a live server with a complete
+# restore, or none, started through the wrapper when it is needed). Refuses
+# (RW_WORKER_SERVER_ERROR) a live server whose last restore did not
+# complete and a restore that is still running after the timeout.
+rw_worker_ensure_server() {
+  rw_worker_server_run "${1:?worker required}" "$(rw_ssh_connect_timeout)" "" ""
+}
+
 # rw_create_remote_session <worker> <session_name> <remote_path> <timeout>
 # Create the durable endpoint session on <worker> with the hidden endpoint
 # session options (docs/tmux-remote-workspaces.md, "Persistence and
-# reconciliation").
-# Shared by rw-open.sh, rw-handoff.sh, and attach-loop.sh (case d:
-# rebuilding a session lost to worker infrastructure loss, "as if being
-# established again"). Exit status is the ssh command's own exit status.
+# reconciliation"), starting the worker's server through its boot restore
+# when none runs (rw_worker_server_sh). Shared by rw-open.sh, rw-handoff.sh,
+# and attach-loop.sh (rebuilding a session lost to worker infrastructure
+# loss, "as if being established again"). Non-zero with
+# RW_WORKER_SERVER_ERROR set on failure.
 rw_create_remote_session() {
-  local worker="$1" session_name="$2" remote_path="$3" timeout="$4"
-  rw_ssh_batch "$worker" "$timeout" "
-    tmux new-session -d -s $(rw_shquote "$session_name") -c $(rw_shquote "$remote_path") &&
-    $(rw_hidden_session_options_cmd "$session_name")
-  "
+  rw_worker_server_run "$1" "$4" "$2" "$3"
 }
 
 # ---------------------------------------------------------------------------
@@ -972,18 +1170,26 @@ rw_root_unlock_all() {
 }
 
 # rw_worker_request_save <worker>
-# After rw killed sessions on a worker: when sessions remain there, ask the
-# worker for a verified tmux save (its own save agent: launchd on macOS,
-# systemd on Linux), so the snapshot a later restore reads no longer lists
-# the closed sessions. When none remain the server has exited; the worker's
+# After rw created or killed sessions on a worker: when sessions remain
+# there, ask the worker for a verified tmux save (its own save agent: launchd
+# on macOS, systemd on Linux), so the snapshot a later restore reads matches
+# the live sessions. When none remain the server has exited; the worker's
 # post-restore drops any closed session a later restore would revive.
-# Asynchronous and best effort. RW_WORKER_SAVE_TRIGGER replaces the remote
-# command (tests point it at a log file, never at this machine's agents).
+# Fire and forget at both ends, never waited on: `launchctl kickstart` of a
+# job spawned less than its ThrottleInterval ago (10 s by default) blocks
+# until that window has passed, which put 5-9 s into every split made right
+# after a close. The worker runs the trigger under nohup in the background
+# and its shell returns at once; this machine runs the ssh in a detached
+# subshell, so neither the caller nor its pane holds it.
+# RW_WORKER_SAVE_TRIGGER replaces the remote command (tests point it at a log
+# file, never at this machine's agents).
 rw_worker_request_save() {
-  local worker="${1:?worker required}" trigger
+  local worker="${1:?worker required}" trigger remote timeout
   trigger="${RW_WORKER_SAVE_TRIGGER:-launchctl kickstart gui/\$(id -u)/com.kalem.tmux-resurrect-save >/dev/null 2>&1 || systemctl --user start --no-block tmux-resurrect-save.service >/dev/null 2>&1}"
-  rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
-    "if tmux list-sessions >/dev/null 2>&1; then $trigger; fi; true" </dev/null >/dev/null 2>&1 || true
+  remote="nohup sh -c $(rw_shquote "if tmux list-sessions >/dev/null 2>&1; then $trigger; fi") </dev/null >/dev/null 2>&1 & true"
+  timeout="$(rw_ssh_status_timeout)"
+  (rw_ssh_batch "$worker" "$timeout" "$remote" </dev/null >/dev/null 2>&1 &)
+  return 0
 }
 
 # rw_worker_copy_root_for_path <abs-path>

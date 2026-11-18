@@ -61,7 +61,7 @@ chmod +x "$shim_dir/tmux" "$shim_dir/date" "$shim_dir/ps"
 
 PATH="$shim_dir:$PATH"
 export PATH
-unset TMUX TMUX_PANE
+unset TMUX TMUX_PANE AGENT_STATE_OFF AGENT_STATE_PANE
 export TMUX_TMPDIR="$scratch/tmux-tmpdir"
 if [ "$(command -v tmux)" != "$shim_dir/tmux" ]; then
   printf 'ABORT: tmux does not resolve to the shim\n' >&2
@@ -179,6 +179,13 @@ assert_calls "stale TMUX (dead server pid) is a no-op"
 
 hook PreToolUse "$FIXTURES/pre-tool-use.json" TMUX_PANE=bogus
 assert_calls "malformed TMUX_PANE is a no-op"
+
+# A nested agent (claudef found the pane already claimed) publishes nothing, so
+# its start cannot overwrite the outer agent's state and its end cannot unset it.
+for event in SessionStart:session-start UserPromptSubmit:user-prompt Stop:stop-plain SessionEnd:session-end; do
+  hook "${event%%:*}" "$FIXTURES/${event#*:}.json" AGENT_STATE_OFF=1
+  assert_calls "AGENT_STATE_OFF=1 makes ${event%%:*} a no-op"
+done
 
 # PATH with the script's tools but no tmux at all (never fall back to /usr/bin,
 # where a real tmux may live).

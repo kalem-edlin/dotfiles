@@ -339,7 +339,19 @@ function M.setup()
       "WinNew", "WinClosed", "TabNew", "TabClosed" },
     {
       group = group,
-      callback = function() schedule_save(750) end,
+      callback = function(event)
+        if event.event == "WinNew" or event.event == "WinClosed" then
+          local win = event.event == "WinClosed"
+            and tonumber(event.match)
+            or vim.api.nvim_get_current_win()
+          if win and vim.api.nvim_win_is_valid(win)
+            and vim.api.nvim_win_get_config(win).relative ~= ""
+          then
+            return
+          end
+        end
+        schedule_save(750)
+      end,
     }
   )
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP", "InsertLeave" }, {

@@ -1,6 +1,20 @@
 #!/bin/sh
 set -eu
 
+# Nested agents and the tmux picker. An agent run from inside another agent's
+# pane (a test from its Bash tool) inherits $TMUX_PANE, so it would publish
+# its own state over the outer agent's and unset it all on exit. The first
+# agent in a pane claims it; a later one that finds the claim publishes
+# nothing (docs/tmux-agent-sessions.md, "Rules for the publishers").
+if [ -n "${TMUX_PANE:-}" ]; then
+  if [ "${AGENT_STATE_PANE:-}" = "$TMUX_PANE" ]; then
+    export AGENT_STATE_OFF=1
+  else
+    export AGENT_STATE_PANE="$TMUX_PANE"
+    unset AGENT_STATE_OFF
+  fi
+fi
+
 profile=${CLAUDEF_PROFILE:-"$HOME/.config/claudef"}
 plugin_dir="$profile"
 # Load the plugin at its source so new shared skills need no restow.
@@ -40,13 +54,67 @@ if [ -r "$source" ] && { [ -L "$target" ] || [ ! -e "$target" ]; }; then
   ln -sfn "$source" "$target"
 fi
 
+# Only a session someone is looking at needs the startup art and mascotless
+# build. Scripts, -p runs, and subcommands keep the stock binary.
+interactive=1
+[ -t 0 ] && [ -t 1 ] || interactive=0
+case "${1:-}" in
+  agents | attach | auth | auto-mode | doctor | gateway | import | install | logs | \
+    mcp | plugin | plugins | purge | respawn | rm | setup-token | stop | kill | \
+    ultrareview | update | upgrade) interactive=0 ;;
+esac
+for arg in "$@"; do
+  case "$arg" in
+    -p | --print | -v | --version | -h | --help) interactive=0 ;;
+  esac
+done
+
+claude_bin=claude
+if [ "$interactive" = 1 ]; then
+  stock=$(realpath "$(command -v claude)")
+  patched="${XDG_CACHE_HOME:-$HOME/.cache}/claudef/bin/$(basename "$stock")"
+  patcher="$plugin_dir/patch-startup.py"
+  # Build once per stock binary and patcher version. A failed build leaves a
+  # marker so a release the patch no longer fits costs one warning, then runs
+  # stock.
+  if { [ ! "$patched" -nt "$stock" ] || [ ! "$patched" -nt "$patcher" ]; } &&
+    { [ ! "$patched.failed" -nt "$stock" ] || [ ! "$patched.failed" -nt "$patcher" ]; }; then
+    if ! python3 "$patcher" "$stock" "$patched"; then
+      mkdir -p "$(dirname "$patched")"
+      : > "$patched.failed"
+    fi
+  fi
+  if [ -x "$patched" ] && [ "$patched" -nt "$stock" ] && [ "$patched" -nt "$patcher" ]; then
+    claude_bin=$patched
+    # The patched build draws this file between its title and startup notices.
+    art="${agents_dir:-}/startup-art.ansi"
+    if [ -r "$art" ]; then
+      export CLAUDEF_ART="$art"
+    fi
+  fi
+  # Claude drops to 256 colors under tmux unless told otherwise, which also
+  # flattens the art. Our tmux passes 24-bit color through.
+  export CLAUDE_CODE_TMUX_TRUECOLOR=1
+  printf '\n'
+fi
+
 # Bypass mode still stops on `rm -r "$(...)"` (target is command-substitution
 # output, so the built-in rm check can't resolve it). This turns off only that
 # prompt. The rest of the built-in rm checks still apply.
 export CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1
 
+# The dotfiles root .env (gitignored, hand-copied per machine) holds the keys
+# the research subagent's deeper tools need. Exported here only, so bare
+# claude never sees them.
+if [ -n "${agents_dir:-}" ] && [ -r "$agents_dir/../.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$agents_dir/../.env"
+  set +a
+fi
+
 if [ -n "$prompt" ] && [ -r "$prompt" ]; then
-  exec env -u CLAUDE_CONFIG_DIR claude \
+  exec env -u CLAUDE_CONFIG_DIR "$claude_bin" \
     --dangerously-skip-permissions \
     --settings "$profile/settings.json" \
     --setting-sources user,project,local \
@@ -56,7 +124,7 @@ if [ -n "$prompt" ] && [ -r "$prompt" ]; then
     "$@"
 fi
 
-exec env -u CLAUDE_CONFIG_DIR claude \
+exec env -u CLAUDE_CONFIG_DIR "$claude_bin" \
   --dangerously-skip-permissions \
   --settings "$profile/settings.json" \
   --setting-sources user,project,local \

@@ -70,7 +70,8 @@ def read_usage() -> dict | None:
 
 
 def reset_countdown(usage: dict | None) -> str | None:
-    resets_at = usage and usage.get("five_hour", {}).get("resets_at")
+    # five_hour is null while no five-hour window is open.
+    resets_at = usage and (usage.get("five_hour") or {}).get("resets_at")
     if not resets_at:
         return None
     try:
@@ -117,7 +118,12 @@ def main() -> int:
                 )
         except (AttributeError, json.JSONDecodeError):
             pass
-        output = add_reset_countdown(output, reset_countdown(read_usage()))
+        # The countdown is optional. A surprise in the usage API must not blank
+        # the status line, because nothing has been printed yet.
+        try:
+            output = add_reset_countdown(output, reset_countdown(read_usage()))
+        except Exception as error:
+            print(f"statusline: {error!r}", file=sys.stderr)
 
     sys.stdout.buffer.write(output)
     sys.stderr.buffer.write(result.stderr)

@@ -64,6 +64,26 @@
 # restore running, or the incomplete-restore marker for the live server),
 # else 1. No output, no side effects. The attach loop's probe uses it to
 # back off instead of judging a session absent.
+#
+# --state: print one word, no side effects: `none` (no server, no boot
+# restore running), `restoring` (live boot lock, bootstrap session, or a
+# guarded restore running), `incomplete <marker>` (a live server whose last
+# restore did not complete: saves are refused), or `ready`. rw reads it
+# before it creates an endpoint session (rw_worker_server_sh in
+# tmux-remote-workspaces/scripts/common.sh).
+#
+# --start [<session> <dir>]: the default run, for a caller that needs a
+# server: once the restore is done, <session> is created (in <dir>) before
+# the bootstrap session goes, so the server never exits in between. With no
+# snapshot at all it still starts the server: Continuum's restore-on-start
+# then finds nothing, and the incomplete-restore marker its failed guarded
+# restore leaves is removed, since no snapshot exists to protect. A server
+# on a worker is only ever started through this script: a bare
+# `tmux new-session` loads tmux.conf, whose Continuum restore lands in the
+# new session's server and leaves the marker behind.
+#
+# Every default or --start run first removes incomplete-restore markers
+# whose server pid is gone (garbage from crashed or killed servers).
 
 set -u
 
@@ -206,6 +226,52 @@ if [ "${1:-}" = "--restoring" ]; then
   restore_running && exit 0
   [ -e "$restore_incomplete" ] && exit 0
   exit 1
+fi
+
+# restore_owner_live: a guarded restore holds the lifecycle lock and its
+# owner is alive.
+restore_owner_live() {
+  local owner=""
+  restore_running || return 1
+  IFS= read -r owner <"$lifecycle_lock/pid" 2>/dev/null || true
+  ! is_uint "$owner" || kill -0 "$owner" 2>/dev/null
+}
+
+if [ "${1:-}" = "--state" ]; then
+  unset TMUX TMUX_PANE
+  if ! "$TMUX_BIN" list-sessions >/dev/null 2>&1; then
+    if boot_lock_live; then echo restoring; else echo none; fi
+    exit 0
+  fi
+  if boot_lock_live || boot_session_exists; then
+    echo restoring
+    exit 0
+  fi
+  pid="$(server_pid)" || {
+    echo none
+    exit 0
+  }
+  lifecycle_paths "$pid"
+  if restore_owner_live; then
+    echo restoring
+  elif [ -e "$restore_incomplete" ]; then
+    printf 'incomplete %s\n' "$restore_incomplete"
+  else
+    echo ready
+  fi
+  exit 0
+fi
+
+start_session=""
+start_dir=""
+if [ "${1:-}" = "--start" ]; then
+  shift
+  if [ "$#" -gt 0 ]; then
+    start_session="$1"
+    start_dir="${2:-$HOME}"
+    shift
+    [ "$#" -eq 0 ] || shift
+  fi
 fi
 
 [ "$#" -eq 0 ] || {
@@ -404,20 +470,86 @@ restore_into_server() {
   done
 }
 
-# finish: drop the bootstrap session and run the worker post-restore.
+# ensure_start_session: with --start <session>, create it (once the restore
+# is done, before the bootstrap session goes) unless it exists.
+ensure_start_session() {
+  [ -n "$start_session" ] || return 0
+  "$TMUX_BIN" has-session -t "=$start_session" 2>/dev/null && return 0
+  if "$TMUX_BIN" new-session -d -s "$start_session" -c "${start_dir:-$HOME}"; then
+    log "created session $start_session for the caller"
+  else
+    log "could not create session $start_session for the caller"
+    return 1
+  fi
+}
+
+# finish: create the caller's session (--start), drop the bootstrap session
+# and run the worker post-restore.
 finish() {
   local restored
   restored="$(other_session_count)"
-  if [ "$restored" -gt 0 ]; then
-    kill_boot_session
-  fi
+  ensure_start_session || true
+  kill_boot_session
   log "restore complete on server $pid: $restored session(s) (guarded restores run here: $attempts)"
   if [ "$restored" -gt 0 ]; then
     run_post_restore || exit 1
-  else
-    kill_boot_session
   fi
   exit 0
+}
+
+# start_without_restore: the server ($pid) was started for --start but there
+# is no snapshot. Continuum's restore-on-start fires about a second after the
+# config loads, finds no snapshot, and its guarded restore fails and leaves
+# the incomplete-restore marker. Wait for that attempt (bounded), remove the
+# marker (there is nothing for it to protect), then hand over the server.
+start_without_restore() {
+  local started=$SECONDS
+  while [ $((SECONDS - started)) -lt "$CONTINUUM_WAIT" ]; do
+    if restore_running; then
+      wait_for_restore_to_finish || fail "guarded restore on server $pid did not finish within ${RESTORE_TIMEOUT}s"
+      break
+    fi
+    [ -e "$restore_incomplete" ] && break
+    sleep 0.2
+  done
+  if [ -e "$restore_incomplete" ]; then
+    rm -f "$restore_incomplete" ||
+      fail "cannot remove the incomplete-restore marker $restore_incomplete"
+    log "removed $restore_incomplete: Continuum's restore found no snapshot, so there is nothing for it to protect"
+  fi
+  ensure_start_session || true
+  kill_boot_session
+  if "$TMUX_BIN" list-sessions >/dev/null 2>&1; then
+    log "started server $pid with no snapshot to restore"
+    exit 0
+  fi
+  fail "server $pid exited before the caller's session was created"
+}
+
+# sweep_stale_markers <live server pid or ''>: remove incomplete-restore
+# markers whose tmux server is gone. A marker is named after its server's
+# pid; once that server has exited, no save or restore will ever read it
+# again. A marker of the live server, or of any live tmux process (another
+# -L server), stays. Looks in $TMPDIR, /tmp and the macOS per-user temp dir,
+# or only in the colon-separated TMUX_RESURRECT_MARKER_DIRS (tests).
+sweep_stale_markers() {
+  local live="$1" dirs dir f p
+  dirs="${TMUX_RESURRECT_MARKER_DIRS:-${TMPDIR:-/tmp}:/tmp:$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || true)}"
+  local IFS=:
+  for dir in $dirs; do
+    [ -n "$dir" ] && [ -d "$dir" ] || continue
+    for f in "${dir%/}"/tmux-resurrect-*-restore-incomplete; do
+      [ -e "$f" ] || continue
+      p="${f##*/tmux-resurrect-}"
+      p="${p%-restore-incomplete}"
+      is_uint "$p" || continue
+      [ "$p" != "$live" ] || continue
+      if kill -0 "$p" 2>/dev/null && ps -p "$p" -o comm= 2>/dev/null | grep -q tmux; then
+        continue
+      fi
+      rm -f "$f" 2>/dev/null && log "removed stale incomplete-restore marker $f (server pid $p is gone)"
+    done
+  done
 }
 
 # give_up <reason>: leave the server if a failed restore brought sessions
@@ -433,6 +565,8 @@ give_up() {
 # ---------------------------------------------------------------------------
 # Live server.
 # ---------------------------------------------------------------------------
+
+sweep_stale_markers "$(server_pid || true)"
 
 if "$TMUX_BIN" list-sessions >/dev/null 2>&1; then
   pid="$(server_pid)" || fail "cannot resolve the tmux server pid"
@@ -464,15 +598,23 @@ fi
 # ---------------------------------------------------------------------------
 
 snapshot_dir="$(resurrect_dir_without_server)"
+start_args=()
+[ -f "$TMUX_CONF" ] && start_args=(-f "$TMUX_CONF")
 if [ ! -e "$snapshot_dir/last" ]; then
-  log "no tmux server and no snapshot at $snapshot_dir/last; nothing to restore"
-  exit 0
+  if [ -z "$start_session" ]; then
+    log "no tmux server and no snapshot at $snapshot_dir/last; nothing to restore"
+    exit 0
+  fi
+  log "no snapshot at $snapshot_dir/last; starting tmux server (config ${TMUX_CONF}) for session $start_session"
+  "$TMUX_BIN" ${start_args[@]+"${start_args[@]}"} new-session -d -s "$BOOT_SESSION" -c "$HOME" ||
+    fail "could not start the tmux server"
+  pid="$(server_pid)" || fail "tmux server started but its pid is unreadable"
+  lifecycle_paths "$pid"
+  start_without_restore
 fi
 [ -x "$UPSTREAM_RESTORE" ] || fail "tmux-resurrect restore script is not executable: $UPSTREAM_RESTORE"
 [ -f "$GUARDED_RESTORE" ] || fail "guarded restore not found: $GUARDED_RESTORE"
 
-start_args=()
-[ -f "$TMUX_CONF" ] && start_args=(-f "$TMUX_CONF")
 log "starting tmux server (config ${TMUX_CONF}) to restore $(readlink "$snapshot_dir/last" 2>/dev/null || echo last)"
 # ${a[@]+...}: an empty array under `set -u` is an error in bash 3.2, which
 # is what /usr/bin/env finds on launchd's PATH.
@@ -491,6 +633,11 @@ fi
 restore_dir_live="$(resurrect_dir_from_server)"
 if [ ! -e "$restore_dir_live/last" ]; then
   # The config points @resurrect-dir somewhere without a snapshot.
+  if [ -n "$start_session" ]; then
+    log "no snapshot at $restore_dir_live/last (from @resurrect-dir); keeping the server for session $start_session"
+    rm -f "$restore_incomplete" 2>/dev/null || true
+    start_without_restore
+  fi
   log "no snapshot at $restore_dir_live/last (from @resurrect-dir); stopping the bootstrap server"
   if [ "$(other_session_count)" -eq 0 ]; then
     kill_boot_session

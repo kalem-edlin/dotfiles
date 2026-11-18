@@ -1,6 +1,10 @@
 # PIF tooling
 
-Status: research recorded, implementation pending
+Status: superseded for the basic lane by [`pif-web-research.md`](pif-web-research.md)
+(2026-11-18): Exa, driver tools `web_search` and `web_fetch`, and a `research`
+subagent run through `delegate`. The research findings below stay as
+reference; the proposed contract and selective-exposure tables no longer
+apply as written (the coordinator now holds the two basic tools).
 
 ## Goal
 
@@ -31,10 +35,10 @@ its full command catalog.
 
 ## Current PIF behavior
 
-[`subagent-widget.ts`](../../pi/.config/pif/extensions/subagent-widget.ts)
-starts each child with Pi's built-in tools and `--no-extensions`. This prevents
-recursive loading of the parent extension directory. Skills and Bash remain
-available to the child.
+[`delegate.ts`](../../pi/.config/pif/extensions/delegate.ts) (which replaced
+`subagent-widget.ts` on 2026-11-18, see `pif-web-research.md` D9) starts each
+child with `--no-extensions`, loading `web.ts` only for members that list the
+web tools. This prevents recursive loading of the parent extension directory.
 
 This makes a thin skill plus CLI the least invasive first trial. A later Pi
 extension can register native research tools, but the child launcher would have
@@ -45,7 +49,7 @@ Installing an extension in the parent profile is not enough.
 
 ### PIF-001: Research tooling for selected agents
 
-Status: research complete, contract and implementation pending
+Status: contract superseded by `pif-web-research.md`; research findings kept
 
 #### Need
 

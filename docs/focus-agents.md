@@ -62,6 +62,11 @@ replace the built-in `/plan` command under its unqualified name. These files
 therefore affect both `claude` and `claudef`. All other managed Claude behavior
 is focus-only.
 
+The plugin directory also ships `agents/`, a link to `agents/subagents/`,
+so the subagents defined there (today `research`) are available to
+`claudef` under the plugin namespace, as `dotfiles-focus:research`. Bare
+`claude` never loads the plugin and does not see them.
+
 Focus settings enable the LSP plugins already installed in Claude's native
 plugin cache. Native user settings leave those plugins disabled, so bare
 Claude does not activate them. The ccline runtime and OAuth lookup also stay
@@ -121,33 +126,106 @@ The profile applies the canonical communication prompt from
 - the `personal` theme
 - status-line and tmux session-recording extensions
 - `pi-vim` and `pi-fzfp`
-- the locally maintained `session-replay` and `subagent-widget` derivatives
+- the locally maintained `session-replay` derivative
+- `web.ts` (`web_search`, `web_fetch` over Exa) and `delegate.ts`
+  (subagent runs with a live progress card), described under Web research
+  below
 
-The two derivatives retain their upstream MIT notices. They do not depend on
-Disler's `themeMap.ts`; rendering uses this repository's active theme.
+The derivative and the progress card in `delegate.ts` retain their upstream
+MIT notices. They do not depend on Disler's `themeMap.ts`; rendering uses
+this repository's active theme.
 
 ### Subagents
 
-`subagent-widget.ts` starts each child as a separate Pi process with its own
-persistent session. Children share the working directory and filesystem, but
-they do not inherit the parent conversation or a dynamically appended system
-prompt.
+`delegate.ts` is the one subagent extension (it replaced the Disler
+`subagent-widget.ts` derivative on 2026-11-18; the `/sub` commands went with
+it). Each child is a separate Pi process started with `--no-extensions`, so
+the parent's extensions never load recursively, and a kept session file
+under `sessions/delegate/<member>-<time>.jsonl`, so a slow or wrong run can
+be read afterwards. Children share the working directory and filesystem but
+not the parent conversation. The child runs in `--mode json`; its tool
+calls and last line of text feed the tool call's partial result and a card
+above the editor (status, elapsed seconds, call count, last call), and the
+running count reaches `agent-state.ts` on `pif:subagents`. Cards clear when
+the parent's turn ends.
 
-Children receive Pi's complete built-in tool set:
+Without an `agent`, the child is a generalist on the parent's model and
+thinking with the built-in tools:
 
 ```text
 read,write,edit,bash,grep,find,ls
 ```
 
-`--no-extensions` prevents recursive extension loading. The extension passes
-the communication prompt and explicit scope rules to each child. Those rules
-allow implementation inside the delegated scope, forbid unrelated reversions,
-and require the child to report its changes and checks.
+It gets the communication prompt and scope rules that allow implementation
+inside the delegated scope, forbid unrelated reversions, and require a
+report of changes and checks. With an `agent`, the child is the named member
+described under Web research.
 
 Completed child reports use Pi's `steer` delivery mode. Pi inserts them before
 the coordinator's next model call, so the coordinator can synthesize the
 reports and its response remains the last visible message. The reports remain
 visible for inspection.
+
+### Web research
+
+`web.ts` registers two driver tools over Exa. `web_search(query,
+num_results?, since?)` runs one search (`type: auto`) and returns, per
+result, the title, URL, published date and the passages Exa matched to the
+query, under a 3,000 character budget with each passage cut at 500
+characters. `web_fetch(url, query?, max_chars?)` reads one URL: with a
+query it returns the matching passages uncut, without one the cleaned
+text; either is capped as a whole at `max_chars` (default 6,000) and says
+when it was truncated. A page Exa cannot read fails the tool call
+with Exa's reason. No model call of our own is involved; the extraction is
+Exa's. Tool parameters are plain JSON Schema, which pi accepts, so the
+extension imports nothing from pi at runtime and `node --test` can load it.
+
+`delegate(task, agent?, model?)` with an `agent` runs a member defined in
+Claude Code's front matter format plus a `pi_model:` key, and blocks until
+it finishes; pi runs sibling tool calls concurrently, so several delegations
+in one assistant message run side by side. Members resolve from
+`<cwd>/.claude/agents/<name>.md` first, then `~/.config/pif/agents/<name>.md`
+(a link to `agents/subagents/`), the precedence Claude Code applies, so a
+repo that ships a member of the same name wins in both runtimes. The driver
+model picks the member itself: the tool's prompt snippet lists every
+member's name and first description sentence, and the guidelines say when
+to delegate; no code chooses. The child is `pi --mode json -p --session
+<file> --no-skills --no-extensions`, with `-e extensions/web.ts` followed
+by the project's `.pi/extensions/*.ts` loaders only when the member lists
+`WebSearch` or `WebFetch` (so a repo tool of the same name wins in the child
+too), `--tools` mapped from the Claude names (`WebSearch` to `web_search`,
+`WebFetch` to `web_fetch`, `Read` to `read`, `Grep` to `grep`, `Glob` to
+`find`, `Bash` to `bash`, `Write` to `write`, `Edit` to `edit`, `Ls` to
+`ls`), `--model` from `pi_model` unless overridden, `--thinking low`, the
+communication prompt and the member body appended to the system prompt, and
+the task on stdin. The child's last assistant message is the tool result,
+capped at 24,000 characters, followed by a bracketed note with the call
+count and session path; a child that runs past ten minutes is stopped.
+
+`agents/subagents/research.md` is the one member shipped: multi-search web
+research returning a brief with a URL and a quoted sentence per claim and a
+list of what was not found. `claudef` runs it with its native `WebSearch`
+and `WebFetch` on `model: sonnet`; `pif` runs it through `delegate` on
+`pi_model`. The driver's guidelines tell it to use `web_search` for one or
+two lookups and to delegate anything that needs more, so the
+search-and-refine loop never lands in the driver's context.
+
+A repo can replace either extension: `web.ts` and `delegate.ts` register
+nothing when the current directory has `.pi/extensions/web.ts` or
+`.pi/extensions/delegate.ts` respectively, so the repo's loader of that
+name supplies the tools. pi exits at startup when two loaded extensions
+register one tool name, so this yield is the only way a repo copy can win;
+the content-engine harness ships `web.ts` this way.
+
+Keys come from the gitignored `.env` at the dotfiles root (`.env.example`
+lists them; today only `EXA_API_KEY`). The three launchers source it with
+`set -a` inside a subshell (`pif`, `codexf`) or just before `exec`
+(`claudef`), so only the launched process sees the values; bare `pi`,
+`claude` and `codex`, and the interactive shell, do not. The file is copied
+by hand to each machine; `setup/headless-doctor.sh` warns when it is
+missing or has no key. Decisions and the deferred fallbacks (Brave,
+Firecrawl, the deeper research CLI) are in
+[`tasks/pif-web-research.md`](tasks/pif-web-research.md).
 
 ### Replay
 
@@ -189,6 +267,9 @@ target. Keep that target present when enabling agent-triggered audits. See
 | Intentional global Claude files | `claude/.claude/keybindings.json`, `claude/.claude/commands/plan.md` |
 | Pi focus profile | `pi/.config/pif/` |
 | Shared system instructions | `agents/communication.md` |
+| Web tools and delegation | `pi/.config/pif/extensions/web.ts`, `pi/.config/pif/extensions/delegate.ts`, tests in `pi/tests/` |
+| Shared subagents | `agents/subagents/`, linked from `pi/.config/pif/agents` and `claude/.config/claudef/agents` |
+| Focus-only keys | `.env` (gitignored), `.env.example` |
 | Profile cleanup and doctor checks | `setup/lib.sh`, `setup/headless-doctor.sh` |
 | Upstream audit | `upstream-sources.json`, `scripts/audit-upstreams.py`, `agents/upstream_audit.md` |
 
@@ -210,6 +291,10 @@ When changing a focus launcher, verify these boundaries:
 8. Profile launches do not write mutable runtime data into tracked paths.
 9. `codexf` forwards explicit arguments with unrestricted execution and the
    shared communication instructions, while bare `codex` remains unchanged.
+10. `EXA_API_KEY` reaches the `pif`, `claudef` and `codexf` children and
+    nothing else; `pif` in a non-repo directory answers a `web_search`
+    prompt and a `delegate research` prompt; `claudef` lists
+    `dotfiles-focus:research`; `node --test pi/tests/*.test.mjs` passes.
 
 The migration and noninteractive isolation checks were completed in September
-2026.
+2026. Check 10 was completed on 2026-11-18.

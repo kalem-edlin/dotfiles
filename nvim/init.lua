@@ -137,6 +137,7 @@ local misc_file_excludes = {
   ".ruff_cache",
   ".venv",
   "venv",
+  ".smart-env",
 }
 
 local function telescope_file_ignore_patterns(include_misc)
@@ -357,6 +358,13 @@ require("lazy").setup({
     "saghen/blink.cmp",
     version = "v1.10.2", -- v1 supports the Neovim 0.10 workers too.
     event = "InsertEnter",
+    -- Load before insert in prose buffers. Loading on InsertEnter alone
+    -- missed an @ typed straight after entering insert mode.
+    ft = { "markdown", "text" },
+    config = function(_, opts)
+      require("blink.cmp").setup(opts)
+      require("file_mentions_menu").setup()
+    end,
     opts = {
       enabled = function()
         return require("file_mentions").is_enabled(0)
@@ -379,7 +387,32 @@ require("lazy").setup({
           border = "rounded",
           max_height = 7,
           direction_priority = { "s", "n" },
-          draw = { columns = { { "label" } } },
+          draw = {
+            columns = { { "label" } },
+            components = {
+              label = {
+                width = { fill = true, max = 60 },
+                text = function(ctx)
+                  return require("file_mentions").display(ctx.item, 60)
+                end,
+                -- Dim the directories, keep the name readable, and mark the
+                -- characters the query matched. Blink's own match positions
+                -- compare the whole line with the full label, so skip them.
+                highlight = function(ctx, text)
+                  local slash = text:gsub("%s+$", ""):sub(1, -2):match(".*()/") or 0
+                  local highlights = {
+                    { 0, slash, group = "BlinkCmpLabelDescription" },
+                    { slash, #text, group = "BlinkCmpLabel" },
+                  }
+                  local _, ranges = require("file_mentions").render(ctx.item, 60)
+                  for _, range in ipairs(ranges) do
+                    highlights[#highlights + 1] = { range[1], range[2], group = "BlinkCmpLabelMatch" }
+                  end
+                  return highlights
+                end,
+              },
+            },
+          },
         },
         documentation = { auto_show = false },
         accept = { auto_brackets = { enabled = false } },
@@ -595,15 +628,6 @@ require("lazy").setup({
     "toppair/peek.nvim",
     build = "deno task --quiet build:fast",
     ft = { "markdown" },
-    keys = {
-      {
-        "<leader>mw",
-        function()
-          require("markdown_render").toggle_web()
-        end,
-        desc = "Toggle Markdown web preview",
-      },
-    },
     opts = {
       app = "webview",
       auto_load = true,
@@ -621,6 +645,10 @@ require("lazy").setup({
     notify = false,
   },
 })
+
+vim.keymap.set("n", "<leader>mw", function()
+  require("web_preview").open()
+end, { desc = "Open web preview (toggle for Markdown)" })
 
 vim.api.nvim_create_autocmd("ColorScheme", {
   callback = apply_editor_chrome,

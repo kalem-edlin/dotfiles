@@ -7,19 +7,25 @@ import { syncBuiltinESMExports } from "node:module";
 import { after, before, test } from "node:test";
 
 const chainKey = Symbol.for("pif.agent-state.chain");
+const ownerKey = Symbol.for("pif.agent-state.paneOwner");
 const marker = "Awaiting your input.";
 const calls = [];
 let inFlight = 0;
 let maxInFlight = 0;
 let extension;
 const originalExecFile = childProcess.execFile;
-const originalEnvironment = { TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE };
+const originalEnvironment = {
+  TMUX: process.env.TMUX,
+  TMUX_PANE: process.env.TMUX_PANE,
+  AGENT_STATE_PANE: process.env.AGENT_STATE_PANE,
+};
 
 before(async () => {
   // Install the shim BEFORE importing the extension. No command ever reaches
   // the real child_process implementation, even when the caller is in tmux.
   delete process.env.TMUX;
   delete process.env.TMUX_PANE;
+  delete process.env.AGENT_STATE_PANE;
   childProcess.execFile = (file, args, options, callback) => {
     assert.equal(file, "tmux");
     assert.equal(options.timeout, 5000);
@@ -45,6 +51,7 @@ after(async () => {
     else process.env[key] = value;
   }
   delete globalThis[chainKey];
+  delete globalThis[ownerKey];
 });
 
 async function drain() {
@@ -331,5 +338,28 @@ test("the extension does not invoke tmux outside a tmux environment", async () =
     assert.equal(calls.length, before);
   } finally {
     process.env.TMUX = tmux;
+  }
+});
+
+test("the first pi in a pane claims it, a nested one publishes nothing", async () => {
+  const saved = globalThis[ownerKey];
+  try {
+    delete globalThis[ownerKey];
+    delete process.env.AGENT_STATE_PANE;
+    await start(harness());
+    assert.equal(process.env.AGENT_STATE_PANE, process.env.TMUX_PANE);
+
+    // A pi started by that agent inherits the claim and leaves the pane alone,
+    // at start and at shutdown.
+    delete globalThis[ownerKey];
+    const before = calls.length;
+    const h = harness([user(), assistant("done")]);
+    await start(h);
+    await h.emit("session_shutdown");
+    await drain();
+    assert.equal(calls.length, before);
+  } finally {
+    globalThis[ownerKey] = saved;
+    delete process.env.AGENT_STATE_PANE;
   }
 });

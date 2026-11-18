@@ -69,6 +69,9 @@ because package names differ across apt, dnf, pacman, zypper, and apk.
 
 ## System documentation
 
+- [`docs/tasks/pif-web-research.md`](docs/tasks/pif-web-research.md) is the
+  decided plan for the focus agents' basic web search lane (Exa tools, the
+  `research` subagent, `delegate`, the root `.env`).
 - [`docs/tasks/file-mentions.md`](docs/tasks/file-mentions.md) covers `@` file
   completion in Neovim Markdown and text buffers, including the tool research.
 - [`docs/focus-agents.md`](docs/focus-agents.md) explains the isolated

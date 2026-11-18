@@ -20,6 +20,8 @@ case "$pane" in
   %[0-9]*) ;;
   *) exit 0 ;;
 esac
+# claudef sets this for an agent started inside another agent's pane.
+[ "${AGENT_STATE_OFF:-}" != 1 ] || exit 0
 command -v tmux >/dev/null || exit 0
 
 # Stale-$TMUX guard (record-agent-session.sh pattern). An orphaned agent can

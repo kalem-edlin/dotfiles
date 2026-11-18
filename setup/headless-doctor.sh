@@ -565,6 +565,19 @@ if [ -z "$ccline_missing" ]; then
 else
   c_warn "runtime:claudef-ccline" "focus ccline links are absent or stale:$ccline_missing" "launch claudef once"
 fi
+# The focus launchers export the dotfiles root .env (gitignored, hand-copied
+# per machine) into their child only. Missing keys only disable the web
+# tools, so this is a WARN, never a FAIL.
+if [ -r "$DOTFILES_DIR/.env" ]; then
+  if grep -q '^EXA_API_KEY=.' "$DOTFILES_DIR/.env" 2>/dev/null; then
+    c_optpass "env:exa-key" "$DOTFILES_DIR/.env sets EXA_API_KEY for the focus web tools"
+  else
+    c_warn "env:exa-key" "$DOTFILES_DIR/.env has no EXA_API_KEY" "add EXA_API_KEY=<key> from dashboard.exa.ai (see .env.example)"
+  fi
+else
+  c_warn "env:exa-key" "$DOTFILES_DIR/.env is missing; web_search, web_fetch and the research subagent will fail in pif" "copy .env from another machine, or cp .env.example .env and fill in EXA_API_KEY"
+fi
+
 # ===========================================================================
 # 5. Executables: rw
 # ===========================================================================

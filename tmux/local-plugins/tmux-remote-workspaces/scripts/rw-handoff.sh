@@ -168,6 +168,17 @@ worker_root="${worker_home%/}/$root_rel"
 # it was unreachable) runs now that it answered.
 rw_reconcile_pending "$worker" "$worker_home"
 
+# The worker's tmux server must be one whose saves land: started through its
+# boot restore wrapper when none runs, refused when its last restore did not
+# complete. Checked before any agent stops; each session creation below
+# checks again.
+ensure_status=0
+rw_worker_ensure_server "$worker" </dev/null >/dev/null 2>&1 || ensure_status=$?
+if [ "$ensure_status" -ne 0 ]; then
+  fail_event "worker_server: $RW_WORKER_SERVER_ERROR"
+  rw_die "rw handoff: $RW_WORKER_SERVER_ERROR; nothing was moved." "$([ "$ensure_status" -eq 6 ] && echo 6 || echo 1)"
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Panes and agents
 # ---------------------------------------------------------------------------
@@ -444,7 +455,7 @@ for i in "${!pane_lines[@]}"; do
   p_agent_dest[i]=""
   p_editor[i]=""
   if ! rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)" </dev/null >/dev/null 2>&1; then
-    failure="could not create the remote session for pane $pid"
+    failure="could not create the remote session for pane $pid: $RW_WORKER_SERVER_ERROR"
     break
   fi
   created_sessions+=("$session_name")
@@ -597,7 +608,7 @@ done
 rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
   rw_warn "rw handoff: could not write the ownership mirror on '$worker' (it is rewritten on the next ownership change)."
 # The worker's pane set just changed: a timer save that raced this refused
-# its inconsistent capture; ask for a fresh one now.
+# its inconsistent capture; ask for a fresh one now (fire and forget).
 rw_worker_request_save "$worker"
 
 rw_log_event "handoff" "$self_endpoint" "$worker" "$(rw_elapsed_ms "$start_ts")" \

@@ -172,11 +172,25 @@ if [[ -z "${CLAUDECODE:-}" ]]; then
     alias cat="batcat --style=plain"
   fi
 fi
+# eza reads file names from stdin when it is not a terminal and blocks on an
+# open pipe (agent Bash calls), so non-terminal stdin falls back to plain ls.
 if command -v eza >/dev/null 2>&1; then
-  alias ls="eza --no-user --icons=auto --group-directories-first --color-scale=age"
+  unalias ls ll 2>/dev/null  # oh-my-zsh lib aliases would shadow the functions
+  function ls {
+    if [[ -t 0 ]]; then
+      eza --no-user --icons=auto --group-directories-first --color-scale=age "$@"
+    else
+      command ls "$@"
+    fi
+  }
+  function ll {
+    if [[ -t 0 ]]; then
+      eza -la --icons --git "$@"
+    else
+      command ls -la "$@"
+    fi
+  }
 fi
-command -v eza >/dev/null 2>&1 && alias ll='eza -la --icons --git'
-command -v eza >/dev/null 2>&1 && alias lt='eza --tree --level=2 --icons'
 alias lsa="ls -a"
 if command -v eza >/dev/null 2>&1; then
   alias lt="ls --tree --level=2 --long --header --git --git-ignore"
@@ -314,6 +328,36 @@ take() {
   \mkdir -p "$1" && cd "$1"
 }
 
+
+# Remote roots (tmux-remote-workspaces, docs/tasks/mini-remote-sessions.md
+# D17): while a worker owns a directory root, the local copy is frozen. On
+# entering one from outside it (and once at startup) print one line. Reads
+# rw's ownership records directly: a glob, then $(<file) per record (no
+# fork in zsh), no git, no jq; with no records it is one failed glob.
+_rw_remote_root_warn() {
+  local dir=${TMUX_REMOTE_WORKSPACES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-remote-workspaces}/owned
+  local -a recs=($dir/*/record.json(N))
+  (( $#recs )) || return 0
+  local f line root worker best= bestw= here=${PWD:A}
+  for f in $recs; do
+    line=$(<$f)
+    [[ $line == *'"owner":"worker"'* || $line == *'"owner": "worker"'* ]] || continue
+    # A pending forget: deleted here, the remote copy goes on next contact.
+    [[ $line == *'"action":"forget"'* || $line == *'"action": "forget"'* ]] && continue
+    root=${${line#*\"root_local\":*\"}%%\"*}
+    worker=${${line#*\"worker\":*\"}%%\"*}
+    [[ -n $root && ( $here == $root || $here == $root/* ) ]] || continue
+    (( ${#root} > ${#best} )) && best=$root bestw=$worker
+  done
+  [[ -n $best ]] || return 0
+  # Moving around inside the root says nothing new.
+  [[ -n ${1-} && ( ${OLDPWD:A} == $best || ${OLDPWD:A} == $best/* ) ]] && return 0
+  print -r -- "rw: ${best/#$HOME/~} is remote on $bestw; new windows open there (rw handback to take it back)"
+}
+_rw_remote_root_chpwd() { _rw_remote_root_warn chpwd; }
+autoload -Uz add-zsh-hook
+add-zsh-hook chpwd _rw_remote_root_chpwd
+_rw_remote_root_warn
 
 # Preferred editor for local and remote sessions
 export EDITOR="nvim"
@@ -522,7 +566,7 @@ envoy() {
 # Incremental builds for xcodemake enabled
 export INCREMENTAL_BUILDS_ENABLED=1
 [[ -f "$HOME/.daytona.completion_script.zsh" ]] && source "$HOME/.daytona.completion_script.zsh"
-export GIT_WORKTREE_PARENT="$HOME/Developer/content-engine-trees"
+export GIT_WORKTREE_PARENT="$HOME/Developer/content-engine"
 
 # qlty completions
 [ -s "/opt/homebrew/share/zsh/site-functions/_qlty" ] && source "/opt/homebrew/share/zsh/site-functions/_qlty"
@@ -594,9 +638,19 @@ pif() {
     prompt_args+=(--skill "$agents_dir/skills")
   fi
 
-  PI_CODING_AGENT_DIR="$profile" \
-    PI_CODING_AGENT_SESSION_DIR="$native/sessions" \
-    command pi "${prompt_args[@]}" "$@"
+  # The dotfiles root .env (gitignored, hand-copied per machine) holds the
+  # keys the focus extensions need, such as EXA_API_KEY. The subshell keeps
+  # them out of this shell; bare pi never sees them.
+  (
+    if [[ -n "$agents_dir" && -r "$agents_dir/../.env" ]]; then
+      set -a
+      . "$agents_dir/../.env"
+      set +a
+    fi
+    PI_CODING_AGENT_DIR="$profile" \
+      PI_CODING_AGENT_SESSION_DIR="$native/sessions" \
+      exec pi "${prompt_args[@]}" "$@"
+  )
 }
 
 # Run Codex with unrestricted execution and the same canonical agent rules
@@ -613,11 +667,21 @@ codexf() {
 
   if [[ -n "$instructions" ]]; then
     instructions_toml="$(printf '%s' "$instructions" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')" || return
-    command codex \
-      --dangerously-bypass-approvals-and-sandbox \
-      -c "developer_instructions=$instructions_toml" \
-      "$@"
-  else
-    command codex --dangerously-bypass-approvals-and-sandbox "$@"
   fi
+
+  # Same root .env as pif and claudef, exported to codex only.
+  (
+    if [[ -n "${DOTFILES:-}" && -r "$DOTFILES/.env" ]]; then
+      set -a
+      . "$DOTFILES/.env"
+      set +a
+    fi
+    if [[ -n "$instructions_toml" ]]; then
+      exec codex \
+        --dangerously-bypass-approvals-and-sandbox \
+        -c "developer_instructions=$instructions_toml" \
+        "$@"
+    fi
+    exec codex --dangerously-bypass-approvals-and-sandbox "$@"
+  )
 }

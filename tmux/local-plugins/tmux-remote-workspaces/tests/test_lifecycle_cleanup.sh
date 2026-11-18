@@ -32,7 +32,7 @@ eq "F: worker checkout has the laptop branch's upstream" \
   "$(git -C "$W" config branch.feat.remote) $(git -C "$W" config branch.feat.merge)" "origin refs/heads/feat"
 eq "F: and the same origin" "$(git -C "$W" remote get-url origin)" "/nonexistent/origin.git"
 
-check "4: the handoff asked the worker for a fresh save (its pane set changed)" test -s "$SANDBOX/worker-saves.log"
+check "4: the handoff asked the worker for a fresh save (its pane set changed)" wait_for 5 test -s "$SANDBOX/worker-saves.log"
 
 # --- hand-back: conflict wording, attach-seen, backups -------------------------------
 rw open --pane %7 --root "$wt" >/dev/null 2>&1
@@ -68,6 +68,6 @@ check "F: worker backups and staging pruned" bash -c "[ ! -e '$TMUX_REMOTE_WORKS
 check "F: laptop backups and staging pruned" bash -c "[ ! -e '$TMUX_REMOTE_WORKSPACES_STATE_DIR/handoff-backups/root-$id' ] && [ ! -e '$TMUX_REMOTE_WORKSPACES_STATE_DIR/handoff-staging/root-$id' ]"
 check "F: the empty worker parent rw created is gone" test ! -e "$FAKE_WORKER_HOME/Developer/grp"
 check "F: the top-level folder of the worker home stays" test -d "$FAKE_WORKER_HOME/Developer"
-check "F: worker sessions were closed, and a save requested" test -s "$SANDBOX/worker-saves.log"
+check "F: worker sessions were closed, and a save requested" wait_for 5 test -s "$SANDBOX/worker-saves.log"
 
 finish

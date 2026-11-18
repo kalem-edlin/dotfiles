@@ -16,7 +16,7 @@
 //
 // @agent_empty marks a chat with no prompt yet (D59), from session start to
 // the first prompt. @agent_subs counts running /sub subagents
-// (subagent-widget.ts, D61); a settle with subagents running stays Working.
+// (delegate.ts, D61); a settle with subagents running stays Working.
 // @agent_cwd is ctx.cwd, fixed per process, so it is published at start only.
 
 import { execFile } from "node:child_process";
@@ -73,12 +73,31 @@ function sanitize(value: string, max: number): string {
   return Array.from(clean).slice(0, max).join("").trim().replace(/[;\s]+$/, "");
 }
 
+// Nested agents. A pi run from inside another agent's pane (a test from its
+// bash tool) inherits $TMUX_PANE and would publish over, then unset, the outer
+// agent's state. The first agent in a pane claims it in AGENT_STATE_PANE,
+// which its children inherit; a later one that finds the claim publishes
+// nothing. Decided once per process, so /new, /resume and reload, which
+// rebuild the extension, keep the claim.
+const OWNER_KEY = Symbol.for("pif.agent-state.paneOwner");
+type OwnerHolder = { [OWNER_KEY]?: "owner" | "nested" };
+
+function nestedAgent(pane: string): boolean {
+  const holder = globalThis as OwnerHolder;
+  if (holder[OWNER_KEY] === undefined) {
+    holder[OWNER_KEY] = process.env.AGENT_STATE_PANE === pane ? "nested" : "owner";
+    if (holder[OWNER_KEY] === "owner") process.env.AGENT_STATE_PANE = pane;
+  }
+  return holder[OWNER_KEY] === "nested";
+}
+
 // Pane ids are reused across tmux servers. An orphaned pi can still carry a
 // dead server's $TMUX; the server pid is its second comma field.
 function paneTarget(): string | undefined {
   const pane = process.env.TMUX_PANE;
   const tmux = process.env.TMUX;
   if (!pane || !tmux) return undefined;
+  if (nestedAgent(pane)) return undefined;
   const serverPid = Number(tmux.split(",")[1]);
   if (Number.isInteger(serverPid) && serverPid > 0) {
     try {
@@ -375,7 +394,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // The last subagent finishing normally starts a parent turn, which settles
-  // as usual. A subagent removed with /subrm or /subclear may not, so a held
+  // as usual. A child that ends without a parent turn (the parent was interrupted) may not, so a held
   // Working settles here when no turn has started.
   pi.events.on("pif:subagents", (data) => {
     const running = (data as { running?: number } | undefined)?.running;

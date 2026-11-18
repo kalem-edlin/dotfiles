@@ -24,11 +24,47 @@ with tempfile.TemporaryDirectory(prefix="nvim-workspace-resurrect-") as director
             time.sleep(.05)
         raise AssertionError("Neovim server did not appear")
     def expr(server, expression):
-        return subprocess.check_output(["nvim","--server",server,"--remote-expr",expression],env=env,text=True).strip()
+        return subprocess.check_output(["nvim","--headless","--server",server,"--remote-expr",expression],env=env,text=True).strip()
+
+    def lua(server, code): return expr(server, "luaeval("+json.dumps(code)+")")
 
     server1=str(root/"one.sock")
     tmux("-f","/dev/null","new-session","-d","-s","test",f"nvim --listen {server1} -u {init} {source}")
-    wait_server(server1); time.sleep(.3)
+    wait_server(server1); time.sleep(1.1)
+    lua(server1, '''(function()
+      local module = require("tmux_workspace_resurrect")
+      workspace_test_save = module.save
+      vim.g.workspace_test_save_count = 0
+      module.save = function()
+        vim.g.workspace_test_save_count = vim.g.workspace_test_save_count + 1
+        return workspace_test_save()
+      end
+      return true
+    end)()''')
+    lua(server1, '''(function()
+      local buffer = vim.api.nvim_create_buf(false, true)
+      workspace_test_float = vim.api.nvim_open_win(buffer, false, {
+        relative = "editor", row = 1, col = 1, width = 10, height = 1,
+        focusable = false, style = "minimal",
+      })
+      return true
+    end)()''')
+    time.sleep(1.1)
+    assert int(expr(server1, "g:workspace_test_save_count")) == 0, "opening a float scheduled a save"
+    lua(server1, "vim.api.nvim_win_close(workspace_test_float, true)")
+    time.sleep(1.1)
+    assert int(expr(server1, "g:workspace_test_save_count")) == 0, "closing a float scheduled a save"
+    lua(server1, 'vim.cmd("split")')
+    time.sleep(1.1)
+    assert int(expr(server1, "g:workspace_test_save_count")) == 1, "opening a normal split did not save"
+    lua(server1, 'vim.cmd("close")')
+    time.sleep(1.1)
+    assert int(expr(server1, "g:workspace_test_save_count")) == 2, "closing a normal split did not save"
+    lua(server1, '''(function()
+      require("tmux_workspace_resurrect").save = workspace_test_save
+      workspace_test_save, workspace_test_float = nil, nil
+      return true
+    end)()''')
     expr(server1, 'luaeval("vim.api.nvim_buf_set_lines(0,0,-1,false,{\\\"latest named\\\",\\\"unsaved\\\"})")')
     expr(server1, 'luaeval("(function() for _,text in ipairs({\\\"unnamed one\\\",\\\"unnamed two\\\"}) do local b=vim.api.nvim_create_buf(true,false); vim.api.nvim_buf_set_lines(b,0,-1,false,{text}); vim.cmd(\\\"split\\\"); vim.api.nvim_win_set_buf(0,b) end return true end)()")')
     expr(server1,'luaeval("require(\\\"tmux_workspace_resurrect\\\").save()")')
@@ -70,4 +106,4 @@ with tempfile.TemporaryDirectory(prefix="nvim-workspace-resurrect-") as director
     assert new_session != session
     tmux("kill-server")
 
-print("PASS: stable generation, named modified text, unnamed text, and no disk overwrite")
+print("PASS: floats skip saves, normal splits save, stable generation, named modified text, unnamed text, and no disk overwrite")

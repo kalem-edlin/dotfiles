@@ -67,6 +67,29 @@ if rw_config_valid; then
         note "worker '$worker_alias': could not read allow-passthrough (no worker tmux server running yet, or unreachable)"
       fi
 
+      # The worker's tmux server: a live server whose last restore did not
+      # complete refuses every verified save (its snapshot goes stale), and
+      # rw refuses to create sessions there. Markers of servers that are
+      # gone are garbage; the next boot restore run removes them.
+      restore_report="$(rw_ssh_batch "$worker_alias" "$(rw_ssh_status_timeout)" \
+        "sh -c $(rw_shquote "$(rw_worker_restore_report_sh)")" </dev/null 2>/dev/null || true)"
+      restore_state="$(printf '%s\n' "$restore_report" | sed -n 's/^state //p' | head -n 1)"
+      case "$restore_state" in
+        ready) pass "worker '$worker_alias': tmux server restore is complete (saves are allowed)" ;;
+        none) note "worker '$worker_alias': no tmux server running (rw starts one through the boot restore when it needs it)" ;;
+        restoring) note "worker '$worker_alias': a tmux restore is in progress" ;;
+        "incomplete "*)
+          fail "worker '$worker_alias': its tmux server's last restore did not complete (${restore_state#incomplete }); every save there is refused. There, run the guarded restore (prefix C-M-r) or restart the tmux server"
+          ;;
+        no-wrapper) fail "worker '$worker_alias': boot restore wrapper setup/templates/tmux-resurrect-restore.sh not found through ~/.config/tmux (run 'make setup-headless' there)" ;;
+        old-wrapper) note "worker '$worker_alias': its boot restore wrapper predates --state; update its dotfiles checkout" ;;
+        *) note "worker '$worker_alias': could not read its tmux restore state" ;;
+      esac
+      stale_markers="$(printf '%s\n' "$restore_report" | sed -n 's/^stale //p')"
+      if [ -n "$stale_markers" ]; then
+        note "worker '$worker_alias': $(printf '%s\n' "$stale_markers" | wc -l | tr -d ' ') incomplete-restore marker(s) of tmux servers that are gone (garbage; the next boot restore run removes them): $(printf '%s\n' "$stale_markers" | paste -sd ' ' -)"
+      fi
+
       # This program is intentionally expanded by the worker's shell, not by
       # this local doctor process.
       # shellcheck disable=SC2016

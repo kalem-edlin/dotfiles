@@ -28,8 +28,13 @@ def main():
     real_peek = args.peek
     # A test editor must never overwrite the real tmux pane's restore state.
     os.environ.pop("TMUX_PANE", None)
-    with tempfile.TemporaryDirectory(prefix="nvim-mentions-ui-") as directory:
+    with tempfile.TemporaryDirectory(prefix="nvim-mentions-ui-") as directory, \
+            tempfile.TemporaryDirectory(prefix=".nvim-mentions-home-", dir=Path.home()) as home_directory:
         root = Path(directory)
+        home_fixture = Path(home_directory)
+        (home_fixture / "notes").mkdir()
+        (home_fixture / "home-note.md").write_text("home fixture\n")
+        (home_fixture / "notes" / "inside.md").write_text("nested home fixture\n")
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         for name in ["README.md", "src/handler.lua", "docs/hello world.md", ".config/tool.json",
                      "node_modules/noise.js", "dist/noise.js", ".DS_Store", "ignored.md"]:
@@ -147,12 +152,30 @@ def main():
                 nvim.input("A" if col is None else "i")
                 wait_for(lambda: nvim.funcs.mode() == "i", "insert mode")
 
+            # Observe actual close events, not just visibility after ranking.
+            lua("""
+              _G.mention_menu_closes = 0
+              vim.api.nvim_create_autocmd('User', {
+                pattern = 'BlinkCmpMenuClose',
+                callback = function() _G.mention_menu_closes = _G.mention_menu_closes + 1 end,
+              })
+            """)
+
+            def menu_window():
+                return lua("return require('blink.cmp.completion.windows.menu').win:get_win()")
+
+            def menu_text():
+                return lua("return vim.api.nvim_buf_get_lines("
+                           "require('blink.cmp.completion.windows.menu').win:get_buf(), 0, -1, false)")
+
             reset("Inspect ")
             nvim.input("@")
             wait_for(visible, "bare @ opens popup")
             assert nvim.current.line == "Inspect @", "menu must not insert a candidate"
-            assert "src/handler.lua" in labels(), labels()
-            assert ".config/tool.json" in labels(), "hidden dotfiles should be offered"
+            assert "README.md" in labels(), labels()
+            assert ".config/" in labels(), "hidden directories should be offered"
+            assert "src/handler.lua" not in labels(), "bare @ must not expand directories"
+            assert ".config/tool.json" not in labels(), "hidden directories must remain collapsed"
             assert all(path in labels() for path in ["src/", ".config/", "empty/", "folder with spaces/"]), labels()
             assert not any(name in labels() for name in [
                 "node_modules/", "dist/", ".git/", "node_modules/noise.js", "dist/noise.js", ".DS_Store", "ignored.md",
@@ -161,15 +184,112 @@ def main():
                               "require('blink.cmp.completion.windows.menu').win:get_win())")
             assert menu_config["relative"] != "", menu_config
             assert menu_config["row"] > 0, "menu should open below the first line"
-            nvim.input("srchdl")
-            wait_for(lambda: labels() == ["src/handler.lua"], "recursive fuzzy filtering")
+            window = menu_window()
+            closes = lua("return _G.mention_menu_closes")
+            for char in "README":
+                nvim.input(char)
+                wait_for(lambda: visible() and labels(), "per-character refresh")
+                time.sleep(0.06)
+                assert menu_window() == window, "typing recreated the menu window"
+                assert lua("return _G.mention_menu_closes") == closes, "typing closed the menu"
+            wait_for(lambda: labels() == ["README.md"], "current-directory fuzzy filtering")
             nvim.input("<Tab>")
-            wait_for(lambda: "@src/handler.lua" in nvim.current.line, "Tab accepts first match")
+            wait_for(lambda: "@README.md" in nvim.current.line, "Tab accepts first match")
             assert not visible()
+
+            reset("Loading ")
+            nvim.input("@")
+            wait_for(lambda: visible() and labels(), "loading test opens menu")
+            window = menu_window()
+            closes = lua("return _G.mention_menu_closes")
+            lua("require('blink.cmp.sources.lib').get_provider_by_id('file_mentions').module.opts.rank_delay_ms = 350")
+            nvim.input("README")
+            wait_for(lambda: "Searching" in str(lua("return vim.api.nvim_win_get_config(...).title", window)),
+                     "slow searches show a static border label")
+            assert menu_window() == window
+            assert lua("return _G.mention_menu_closes") == closes
+            assert not labels(), "old results must be unselectable during loading"
+            wait_for(lambda: labels() == ["README.md"], "slow search finishes")
+            assert not lua("return vim.api.nvim_win_get_config(...).title", window), "loading label remained after completion"
+            reset("Cold ")
+            nvim.input("@README")
+            wait_for(lambda: visible() and any("Searching" in row for row in menu_text()),
+                     "cold slow search opens an informational row")
+            assert not labels(), "loading row must not become a completion"
+            nvim.input("<Tab><Esc>")
+            wait_for(lambda: nvim.funcs.mode() == "n" and not visible(), "Escape cancels loading")
+            assert nvim.current.line == "Cold @README", "loading row was inserted"
+            time.sleep(0.40)
+            assert not visible(), "cancelled loading timer reopened the menu"
+            lua("require('blink.cmp.sources.lib').get_provider_by_id('file_mentions').module.opts.rank_delay_ms = 25")
+
+            reset("Inspect ")
+            nvim.input("@")
+            wait_for(visible, "empty-state test opens menu")
+            window = menu_window()
+            closes = lua("return _G.mention_menu_closes")
+            nvim.input("zz_no_match_at_all")
+            wait_for(lambda: visible() and not labels() and any("No matches" in row for row in menu_text()),
+                     "zero results keep an informational menu")
+            assert menu_window() == window
+            assert lua("return _G.mention_menu_closes") == closes
+            unmatched = nvim.current.line
+            nvim.input("<C-n><Tab>")
+            time.sleep(0.08)
+            assert nvim.current.line == unmatched, "empty state must not be accepted"
+            nvim.input("<BS>" * len("zz_no_match_at_all"))
+            wait_for(lambda: visible() and "src/" in labels(), "backspace restores matches")
+            assert menu_window() == window
+            assert lua("return _G.mention_menu_closes") == closes
+            nvim.input(" ")
+            wait_for(lambda: not visible(), "leaving empty-state query closes menu")
+
+            # Use a controlled ancestor rather than recursively scanning /tmp.
+            nvim.input("<Esc>")
+            nested = root / "src" / "nested"
+            nested.mkdir()
+            wait_for(lambda: nvim.funcs.mode() == "n", "normal mode before root override")
+            lua("vim.b.file_mentions_root = ...; require('file_mentions').clear_cache()", str(nested))
+            reset("Inspect ")
+            nvim.input("@")
+            wait_for(visible, "empty root still opens a menu")
+            window = menu_window()
+            closes = lua("return _G.mention_menu_closes")
+            for char in "../":
+                nvim.input(char)
+                time.sleep(0.08)
+                assert visible(), "parent traversal punctuation closed the menu"
+                assert menu_window() == window
+                assert lua("return _G.mention_menu_closes") == closes
+            wait_for(lambda: "../handler.lua" in labels(), "parent directory files")
+            nvim.input("../README")
+            wait_for(lambda: labels() == ["../../README.md"], "repeated parent traversal")
+            assert menu_window() == window
+            assert lua("return _G.mention_menu_closes") == closes
+            nvim.input("<Tab>")
+            wait_for(lambda: nvim.current.line == "Inspect @../../README.md", "accept ancestor file")
+            nvim.input("<Esc>")
+            wait_for(lambda: nvim.funcs.mode() == "n", "normal mode before root reset")
+            lua("vim.b.file_mentions_root = nil; require('file_mentions').clear_cache()")
+
+            reset("Home ")
+            nvim.input("@~")
+            wait_for(lambda: visible() and labels() and all(path.startswith("~/") for path in labels()),
+                     "bare tilde lists the home directory")
+            assert all("/" not in path[2:].rstrip("/") for path in labels()), "home results expanded descendants"
+            reset("Home ")
+            home_prefix = "~/" + home_fixture.name + "/"
+            nvim.input("@" + home_prefix)
+            wait_for(lambda: visible() and set(labels()) == {home_prefix + "home-note.md", home_prefix + "notes/"},
+                     "home directory is scoped to immediate children")
+            nvim.input("notes/in")
+            wait_for(lambda: labels() == [home_prefix + "notes/inside.md"], "home subdirectory search")
+            nvim.input("<Tab>")
+            wait_for(lambda: nvim.current.line == "Home @" + home_prefix + "notes/inside.md", "home acceptance preserves tilde")
 
             reset("Inspect ")
             nvim.input("@src")
-            wait_for(lambda: visible() and labels()[0] == "src/", "directory ranks first")
+            wait_for(lambda: visible() and labels() == ["src/"], "directory remains collapsed")
             nvim.input("<Tab>")
             wait_for(lambda: nvim.current.line == "Inspect @src/", "Tab accepts directory")
             assert not visible()
@@ -223,20 +343,28 @@ def main():
                 assert not visible(), f"unexpected popup for {text!r}"
 
             reset("Unicode café ☕  remains", len("Unicode café ☕ ".encode()))
-            nvim.input("@srchdl")
+            nvim.input("@src/hdl")
             wait_for(visible, "Unicode prefix mention")
             nvim.input("<Tab>")
             wait_for(lambda: "@src/handler.lua" in nvim.current.line, "Unicode insertion")
             assert nvim.current.line == "Unicode café ☕ @src/handler.lua remains", nvim.current.line
 
             reset()
-            nvim.input('@"hello w')
+            nvim.input("@")
+            wait_for(visible, "quoted query opens menu")
+            window = menu_window()
+            closes = lua("return _G.mention_menu_closes")
+            for char in '\"docs/hello w':
+                nvim.input(char)
+                time.sleep(0.06)
+                assert visible() and menu_window() == window, "quoted input recreated the menu"
+                assert lua("return _G.mention_menu_closes") == closes
             wait_for(lambda: visible() and labels() == ["docs/hello world.md"], "quoted query")
             nvim.input("<Tab>")
             wait_for(lambda: '@"docs/hello world.md"' in nvim.current.line, "quoted insertion")
 
             reset('See @"" next', len('See @"'.encode()))
-            nvim.input("hello w")
+            nvim.input("docs/hello w")
             wait_for(visible, "query before an existing closing quote")
             nvim.input("<Tab>")
             wait_for(lambda: "docs/hello world.md" in nvim.current.line, "existing quote insertion")
@@ -246,7 +374,7 @@ def main():
             # query. Blink must retain the provider's result even though its
             # own keyword extraction sees only the final word.
             reset()
-            nvim.input('@"world hello')
+            nvim.input('@"docs/world hello')
             wait_for(lambda: visible() and labels() == ["docs/hello world.md"],
                      "reverse-order fzf extended query")
             assert source_ids() == ["file_mentions"], source_ids()
@@ -294,9 +422,48 @@ def main():
             nvim.input("@README")
             wait_for(visible, "query before deleting")
             nvim.input("<BS><BS><BS><BS><BS><BS>")
-            wait_for(lambda: "src/handler.lua" in labels(), "backspace broadens the list")
+            wait_for(lambda: "src/" in labels(), "backspace broadens the list")
             nvim.input(" ")
             wait_for(lambda: not visible(), "space ends an unquoted mention")
+
+            reset('See @"README" next', len('See @"README'.encode()))
+            nvim.input("<C-Space>")
+            wait_for(visible, "menu before closing quote")
+            nvim.input("<Right>")
+            wait_for(lambda: not visible(), "moving beyond the closing quote ends the mention")
+
+            reset("Move @src/handler next", len("Move @src/handler".encode()))
+            nvim.input("<BS>")
+            wait_for(visible, "editing an existing mention")
+            window = menu_window()
+            closes = lua("return _G.mention_menu_closes")
+            nvim.input("<Left>" * 6)
+            time.sleep(0.10)
+            assert visible() and menu_window() == window, "moving within a path closed the menu"
+            assert lua("return _G.mention_menu_closes") == closes
+            nvim.input("<Left>" * 6)
+            wait_for(lambda: not visible(), "moving before @ ends the mention")
+
+            reset("Stale ")
+            nvim.input("@README")
+            wait_for(lambda: visible() and labels() == ["README.md"], "candidate before rapid edit")
+            nvim.input("<C-n>")
+            wait_for(lambda: lua("return require('blink.cmp').get_selected_item() ~= nil"),
+                     "selected candidate before rapid edit")
+            nvim.input("x<Tab>")
+            wait_for(lambda: visible() and not labels(), "rapid edit has no matches")
+            assert nvim.current.line == "Stale @READMEx", "Tab accepted an obsolete text edit"
+
+            reset("Delete ")
+            nvim.input("@")
+            wait_for(lambda: visible() and labels(), "mention before deleting @")
+            nvim.input("<C-n>")
+            wait_for(lambda: lua("return require('blink.cmp').get_selected_item() ~= nil"),
+                     "selected item before deleting @")
+            nvim.input("<BS><Tab>")
+            time.sleep(0.10)
+            assert not visible(), f"deleting @ left the menu open: line={nvim.current.line!r}, menu={menu_text()!r}"
+            assert nvim.current.line.rstrip() == "Delete", "Tab accepted a stale item after deleting @"
 
             # The provider debounces ranking. A cancelled request must not let
             # an old fzf result reopen Blink or insert text after Esc.
@@ -311,10 +478,10 @@ def main():
             # Force both wrapping and the above-cursor fallback in a small UI.
             nvim.ui_try_resize(48, 12)
             reset("A long wrapped prose line. " * 6)
-            nvim.input("@srchdl")
+            nvim.input("@src/hdl")
             wait_for(visible, "wrapped line popup")
             assert labels() == ["src/handler.lua"], labels()
-            assert nvim.current.line.endswith("@srchdl")
+            assert nvim.current.line.endswith("@src/hdl")
             nvim.input("<Esc>")
             wait_for(lambda: not visible(), "Escape exits popup")
             nvim.ui_try_resize(90, 28)
@@ -330,7 +497,7 @@ def main():
             nvim.command("enew!")
             nvim.command("file " + nvim.funcs.fnameescape(str(external)))
             reset()
-            nvim.input("@srchdl")
+            nvim.input("@src/hdl")
             wait_for(visible, "temporary prompt uses project cwd")
             assert labels() == ["src/handler.lua"], labels()
             # A matching file after hundreds of unrelated paths must remain
@@ -343,11 +510,12 @@ def main():
             nvim.input("<Esc>")
             nvim.command("FileMentionsRefresh")
             reset()
-            nvim.input("@zzuniqndl")
+            nvim.input("@bulk/zzuniqndl")
             wait_for(lambda: visible() and labels() == ["bulk/zz_unique_needle.txt"],
                      "matches beyond the first 500 files")
-            print("PASS: Blink popup, fzf ranking, typing, acceptance, cancellation, Peek, "
-                  "Unicode, quoted paths, filetypes, external prompt, full file list")
+            print("PASS: directory-scoped files, home and parent paths, delayed loading, persistent "
+                  "Blink popup, no-match state, fzf ranking, acceptance, cancellation, Peek, Unicode, "
+                  "quoted paths, filetypes, external prompt, large directory")
         finally:
             try:
                 nvim.command("qa!")

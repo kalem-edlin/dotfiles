@@ -35,7 +35,7 @@ Outside the plugin:
 |---|---|
 | `claude/.config/claudef/settings.json` | Hook registrations for `scripts/agent-state` |
 | `pi/.config/pif/extensions/agent-state.ts` | pi publisher and pif auto titles |
-| `pi/.config/pif/extensions/subagent-widget.ts` | Emits the running `/sub` count on the `pif:subagents` event channel |
+| `pi/.config/pif/extensions/delegate.ts` | Emits the running `delegate` child count on the `pif:subagents` event channel |
 | `agents/communication.md` | The `Awaiting your input.` marker rule (symlinked from the claudef and pif config dirs) |
 | `tmux/tmux.conf` | Loads the plugin (`run-shell` of the `.tmux` file) and runs `wire-mem-chip` after TPM. `focus-events` is on and `allow-set-title` is off |
 | `setup/lib.sh` (`install_tmux_plugins`) | Builds `pane-mem-darwin` (macOS, with `clang -O2`) and `agent-picker` (macOS and Linux) |
@@ -58,7 +58,7 @@ Pane options are written only by the publishers and the focus hook, and on an rw
 | `@agent_at` | publisher on every transition except the focus-to-Idle one | Epoch of the last agent event. Fallback for `@agent_state_at` in chip and agent ages, so a visit must not move it. It no longer orders rows or picks the initial card (D79) |
 | `@agent_state_at` | publisher, focus hook | Epoch when the current state began. A repeat of the same state keeps the stamp. Drives the age shown on chips |
 | `@agent_name` | publisher | Session title (see Titles) |
-| `@agent_subs` | publisher | Running subagent count. Reset to 0 at session start. pi publishes its running `/sub` count |
+| `@agent_subs` | publisher | Running subagent count. Reset to 0 at session start. pi publishes its running `delegate` child count |
 | `@agent_empty` | publisher | `1` from session start (startup, `/new`, `/clear`) while the chat has no prompt. Unset on the first prompt, on resume and on compaction |
 | `@agent_cwd` | publisher | The agent's own working directory (D73). Claude writes the hook input's `cwd` at `SessionStart`, `UserPromptSubmit` and `Stop`, and `new_cwd` on `CwdChanged`. pi writes `ctx.cwd` at `session_start` only, since it is fixed per process. Worktree mode uses it in place of the pane directory |
 | `@pane_focus_at` | focus hook | Epoch when the pane last gained focus, on every pane, agent or not (D74). Picks the initial card in both modes and is the row ordering key: a row's last access is the newest stamp among its panes (sessions also count `session_last_attached`). Stamps are per pane, so a window shared by several worktrees only refreshes the focused pane's worktree |
@@ -67,6 +67,7 @@ Rules for the publishers:
 
 - Every write for one event is a single tmux invocation, with commands chained by `;`.
 - Both publishers do nothing without `$TMUX_PANE`, and both guard against a stale `$TMUX` (an orphaned agent that still points at a dead server, since pane ids restart at `%0` on a new server). The Claude script compares the inherited server pid with `#{pid}` where it reads from tmux anyway and otherwise checks that the server is alive. The pi extension checks the server pid with `kill(pid, 0)`.
+- An agent started inside another agent's pane (a live `pif -p` or `claudef -p` test from a Bash tool) inherits `$TMUX_PANE` and publishes nothing. Without this, its start overwrote the outer agent's options and its exit unset them all, so the picker showed the outer agent as no agent until its next `SessionStart` (seen 2026-11-18). The first agent in a pane claims it by exporting `AGENT_STATE_PANE=$TMUX_PANE`, which its children inherit. `claudef` finding its own pane already claimed exports `AGENT_STATE_OFF=1`, which makes the Claude hook script exit. The pi extension makes the same check once per process (kept across `/new`, `/resume` and reload) and then never targets a pane.
 - `@agent_state_at` is written with `set -F` using `#{?#{&&:#{==:#{@agent_state},NEW},#{@agent_state_at}},#{@agent_state_at},NOW}` before `@agent_state` is overwritten, so the age needs no read round trip.
 - `@agent_pid` for Claude: the publisher walks up from its parent with `ps -o ppid=` until it reaches the process whose parent is `#{pane_pid}`. If the first hop is a hook wrapper shell directly under the pane process, the agent is the pane process itself. This avoids depending on hook wrapping or on Claude renaming its process. For pi it is `process.pid`.
 - `@agent_subs` decrement clamps at zero: `set -pF @agent_subs '#{?#{e|>|:#{@agent_subs},0},#{e|-|:#{@agent_subs},1},0}'`.
@@ -125,12 +126,12 @@ An agent ends a reply that needs the user's answer or decision with the exact fi
 - pi: the extension reads the active branch in process on `session_start`, `session_tree` and `agent_settled`. Startup covers CLI resume, resurrection, `/resume`, reload and fork.
 - Resume classification does not reuse a marker followed by a newer user prompt or tool turn, or take markers from thinking, tool arguments, titles or other branches. Missing/unreadable history and a reply without the exact final marker fall back to Idle. The next prompt changes Awaiting to Working normally. No picker polling or terminal scraping is involved.
 - Screen scraping and a pi `report_status` tool were rejected. Scraping drifts with agent UI changes and the tool adds a round trip to every reply.
-- pif background subagents run with `--no-extensions` (`subagent-widget.ts`), so they never publish pane state.
+- pif `delegate` children run with `--no-extensions` (`delegate.ts`), so they never publish pane state.
 
 ### Subagent counting and background work
 
 - Claude: `SubagentStart` and `SubagentStop` adjust `@agent_subs`, and every `Stop` resyncs it from the hook input's `background_tasks` (present since Claude Code 2.1.29x, status `running` or `pending` counts as in flight). The counter alone drifts: a finished subagent resumed with `SendMessage` fires `SubagentStop` again at its next stop but no `SubagentStart`, so each resume takes the count one below reality and the clamp hides it at 0. Seen 2026-10-08: a session resumed one subagent twice and showed Idle with a subagent still running. The list is authoritative at `Stop`, which is when the state is decided; `SubagentStop`'s own list still contains the stopping subagent, so it is not used there.
-- pi: `subagent-widget.ts` emits the running count on `pif:subagents`. `agent-state.ts` publishes it as `@agent_subs`, and a settle with subagents running publishes Working. A finished subagent starts a parent turn, which settles as usual. If no turn starts within 2 s (after `/subrm` or `/subclear`), the held Working settles on its own.
+- pi: `delegate.ts` emits the running child count on `pif:subagents`. `agent-state.ts` publishes it as `@agent_subs`, and a settle with children running publishes Working. A `delegate` call blocks its tool call, so the parent turn is still active while the child runs and settles when the turn ends; the 2 s self-settle after a count of 0 with no turn active remains as a safety net.
 - `idle_prompt` arrives about 60 s after the prompt goes idle, including while background subagents run, so the Esc-recovery rule applies only when `@agent_subs` is 0 (D69). Recovery after a real Esc interrupt therefore takes about 60 s and the pane shows Working until then.
 - Background shell detection (D70). A subagent that backgrounds a command and ends its turn fires `SubagentStop` at once and `SubagentStart` only when it resumes, and a main-agent `run_in_background` shell fires no hook at all. `background_tasks` covers both as `shell` or `subagent` entries, so `Stop` skips the ps scan when the field is present. Without it, and always at `idle_prompt` (whose input has no task list), the publisher calls `bg_shells`, which runs one `ps -A` and looks for a direct child of the agent process whose command line contains `/.claude/shell-snapshots/`. At those two points no foreground tool runs, so any such child is background work and the state stays Working. The tmux read for the agent pid happens only if some shell-snapshots process exists at all. Cost is about 40 ms per `Stop`.
 - Known tradeoff: a dev server started as a Claude background shell keeps its agent Working unless the reply ends with the marker. This is accepted because persistent jobs belong in tmux panes.
@@ -489,7 +490,7 @@ Why the font is derived, and the Ghostty facts behind it (Ghostty 1.3.1 source):
 | `tmux-agent-sessions.tmux` or `tmux.conf` | Reload tmux config |
 | `scripts/agent-state` | Takes effect on the next hook run. Already running agents need no restart |
 | Claude hook registrations in `settings.json` | Restart the Claude session (hooks are read at session start). Until then a session misses `CwdChanged`, and its `@agent_cwd` updates only at prompts and `Stop` |
-| `agent-state.ts` or `subagent-widget.ts` | `/reload` in pif (an old runtime's state write cannot overtake a new runtime's start, because the publish chain is shared on `globalThis`) |
+| `agent-state.ts` or `delegate.ts` | `/reload` in pif (an old runtime's state write cannot overtake a new runtime's start, because the publish chain is shared on `globalThis`) |
 | Icon font, `SIZE`, codepoints, `font-codepoint-map` | Rerun `make lucide-font` if the font changed, then restart Ghostty |
 
 Maintenance cautions:

@@ -51,6 +51,7 @@ check "D: non-rw sessions stay" bash -c "! grep -q 'kill-session -t =work' '$FAK
 rw_write_json_atomic "$(rw_endpoint_file dddd0004)" '{"endpoint_id":"dddd0004","worker":"fakeworker"}'
 : >"$SANDBOX/worker-saves.log"
 "$RW_PLUGIN/scripts/rw" close --endpoint dddd0004 >/dev/null 2>&1
+wait_for 5 test -s "$SANDBOX/worker-saves.log"
 eq "D: rw close asked the worker for a verified save" "$(cat "$SANDBOX/worker-saves.log")" "save-requested"
 check "D: the save is requested only while sessions remain" bash -c "grep -q 'if tmux list-sessions' '$FAKE_SSH_LOG'"
 
