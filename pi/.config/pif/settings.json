@@ -13,8 +13,7 @@
     "blockImages": false
   },
   "packages": [
-    "npm:@burneikis/pi-vim",
-    "npm:@burneikis/pi-fzfp"
+    "npm:@burneikis/pi-vim"
   ],
   "extensions": [
     "extensions"
