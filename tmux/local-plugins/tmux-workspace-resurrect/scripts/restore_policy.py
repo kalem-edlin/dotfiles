@@ -29,6 +29,10 @@ def _regular_file(path):
 def decide(record, config):
     """Return an execute decision only for a validated, running allowlist entry."""
     agent = record.get("agent")
+    # Remote endpoint panes belong to tmux-remote-workspaces, which reattaches
+    # them before this replay runs. Nothing local is ever pasted into them.
+    if record.get("rw_endpoint") or record.get("selected_source") == "remote-endpoint":
+        return {"action": "ignore", "command": ""}
     if (record.get("selected_source") in {"codex-session", "ignored-agent"} or
             (isinstance(agent, dict) and agent.get("tool") == "codex") or
             any(AGENT_COMMAND.is_ignored(record.get(key)) for key in

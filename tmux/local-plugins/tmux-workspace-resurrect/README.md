@@ -189,6 +189,14 @@ The sidecar stores logical pane targets such as `dotfiles:1.0`, not old tmux
 `%pane` ids. The restore hook resolves those targets to the newly created pane
 ids before reconstructing Treemux or queueing input.
 
+Panes that tmux-remote-workspaces handed to a worker carry `@rw-endpoint`.
+The sidecar records it as `rw_endpoint` and treats the pane as captured: no
+command, no agent lookup, no capture error. On restore,
+`tmux-remote-workspaces/scripts/rw-post-restore.sh` runs first in
+`@resurrect-hook-post-restore-all` and reattaches such panes by endpoint id;
+this plugin's replay then skips every pane with `rw_endpoint` in its record or
+a live `@rw-endpoint` option.
+
 Commands may contain passwords, tokens, or other inline secrets. Exact command
 preservation means those values will exist in the private sidecar.
 

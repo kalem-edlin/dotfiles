@@ -241,6 +241,14 @@ Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
 - Preflight now requires `rsync` on the worker and reports `home` as the physical path (`pwd -P`).
 - rsync flags are `-rlptD --delete` (`-a` without `-o`/`-g`, since the two machines run different users), verified against openrsync protocol 29 on both machines.
 
+### Changes recorded by W4 (2026-11-18)
+
+- C6 matching: the endpoint record's `focus_session_name` + indices is the primary key. The restored sidecar's `rw_endpoint` mapping overrides it when the two disagree (the sidecar describes the exact layout tmux-resurrect recreated; the record's indices date from the handoff) and is the fallback when the record has no position; a record without `focus_session_name` resolves its session from `sessions.jsonl` via `focus_session_uuid`. Only a bare shell pane with no other `@rw-endpoint` is taken.
+- C6 sidecar: `rw_endpoint` is additive; the sidecar stays `version: 1` (the existing convention for additive fields). Endpoint panes are recorded with `selected_source: "remote-endpoint"`.
+- C6 hook order: `rw-post-restore.sh` first, everything else (the sidecar replay) in its existing order, `libexec/reconcile` last, re-placed on every plugin load.
+- New events: `restore-reattach` (success) and `restore-reattach-missing` (outcome `skipped` or `fail`, detail = reason).
+- `session-renamed` updates `sessions.jsonl` and, in every endpoint of the session, `focus_session_name` plus the bound pane's `focus_window_index`/`focus_pane_index`.
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: needs a worker-to-laptop push of `@agent_*` (candidate: the attach loop's ssh ControlMaster carrying a tiny state stream into the laptop pane's options). The picker then drops the early return at `snapshot.go:415` and the Working guard covers remote agents.

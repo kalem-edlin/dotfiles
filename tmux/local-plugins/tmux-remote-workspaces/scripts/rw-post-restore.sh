@@ -1,223 +1,294 @@
 #!/usr/bin/env bash
-# Post-restore re-establishment of remote attachments: chained onto
-# tmux-resurrect's @resurrect-hook-post-restore-all (see
-# tmux-remote-workspaces.tmux), appended BEFORE libexec/reconcile in that
-# same hook. See docs/tmux-remote-workspaces.md, "Persistence and
-# reconciliation".
+# shellcheck source-path=SCRIPTDIR
+# Laptop-side reattach after a tmux-resurrect restore (D14, contract C6).
 #
-# Never destructive: this script only ever sets cache pane options and
-# respawns a pane's *local* foreground process into attach-loop.sh, which
-# itself only reconnects/reattaches (or, per its own case-d logic, restores
-# or rebuilds the REMOTE session -- never anything this script decides). If
-# an endpoint's local pane cannot be re-resolved unambiguously, this script
-# does nothing to it and leaves it for `rw status`/`rw doctor` and
-# libexec/reconcile to reason about instead of guessing.
+# Chained FIRST onto @resurrect-hook-post-restore-all by
+# tmux-remote-workspaces.tmux: before tmux-workspace-resurrect's sidecar
+# replay (scripts/restore.sh), which skips every pane this script stamped
+# and every pane whose sidecar record carries `rw_endpoint`, and before
+# libexec/reconcile.
 #
-# Matching strategy (both steps use ONLY information that survives a tmux
-# server restart -- sessions.jsonl and endpoints/*.json on disk, plus
-# whatever the just-completed resurrect restore produced):
+# For every registered endpoint (endpoints/*.json without a tombstone):
 #
-#   1. Session-level: tmux assigns every (re)created session a brand-new
-#      internal $-id and, because our own session-created hook is
-#      global (`tmux set-hook -g session-created`), a brand-new
-#      @session-uuid too -- restored sessions do NOT keep their pre-crash
-#      UUID for free. Each endpoint's registry entry remembers the OLD
-#      stable UUID (focus_session_uuid). We look that UUID up in
-#      sessions.jsonl to recover the SESSION NAME it was last bound to
-#      (that lookup is safe even though session-created-hook.sh has
-#      already appended fresh entries for the new session by the time this
-#      runs -- those new entries are keyed on the NEW uuid, so a query for
-#      the OLD uuid's last-known name is unaffected). If a live tmux
-#      session with that exact name exists post-restore, we forcibly
-#      re-stamp ITS @session-uuid back to the OLD uuid (overriding the
-#      fresh one session-created-hook.sh assigned) and re-register it, so
-#      the stable identity survives the restart transparently. tmux's
-#      `=name` exact-match target syntax is used throughout to avoid its
-#      normal fuzzy/prefix session matching.
+#   1. Find the restored pane by endpoint id. The endpoint record says where
+#      its pane lived: focus_session_name + focus_window_index +
+#      focus_pane_index (written by `rw handoff` / `rw open`, kept current
+#      across session renames by rw-session-renamed.sh). The sidecar of the
+#      snapshot that was just restored says where it was at that save
+#      (`rw_endpoint` per pane, from @rw-endpoint). They normally agree. When
+#      they disagree the sidecar wins: it describes exactly the layout
+#      tmux-resurrect recreated, while the record's indices date from the
+#      handoff. When the record has no position (older records), the sidecar
+#      position is used; for records without focus_session_name the session
+#      name is recovered from sessions.jsonl via focus_session_uuid. A
+#      position the sidecar attributes to a different endpoint is never used.
+#   2. The pane is taken only if it is unclaimed, carries no other
+#      endpoint, and sits at a bare shell (a freshly restored pane). A pane
+#      that already runs this endpoint's attach loop (a restore over a live
+#      server) is left as is. A busy pane is never killed.
+#   3. respawn-pane the pane into attach-loop.sh <id> (no --fresh: nothing
+#      here confirmed the worker session just now), then stamp @rw-endpoint,
+#      @rw-worker, @rw-workspace, @rw-root-id, @rw-session-uuid,
+#      @remote-host and @workspace-resurrect-skip, and re-stamp the
+#      session's stable @session-uuid. Event `restore-reattach`.
 #
-#   2. Pane-level: pane identity is resolved conservatively from restored
-#      state. `renumber-windows on` means
-#      the recorded focus_window_index/focus_pane_index cannot be trusted
-#      as a primary key across a restart. Instead, within the now-resolved
-#      session, we match candidate panes by `#{pane_current_path}` against
-#      the endpoint's recorded workspace.focus_path -- tmux-resurrect
-#      itself recreates each pane at its originally-saved cwd regardless of
-#      the @workspace-resurrect-skip opt-out (that seam only stops the
-#      RESUME COMMAND from being pasted, never pane/window recreation), so
-#      a remote-backed pane reliably comes back as a bare shell sitting in
-#      the same directory. Exactly one path match -> unambiguous, use it.
-#      Zero matches -> pane wasn't restored (or moved); leave alone. More
-#      than one match (e.g. two endpoints legitimately shared a cwd) -> try
-#      narrowing to the candidate(s) whose CURRENT window/pane index also
-#      equals the recorded focus_window_index/focus_pane_index; if that
-#      narrows to exactly one, use it, otherwise give up rather than guess.
-#      A pane already claimed by an earlier endpoint in this same pass is
-#      never claimed again.
+# An endpoint whose pane cannot be found is logged (event
+# `restore-reattach-missing`, with the reason) and left registered. This
+# script never closes an endpoint and never touches a worker session: a
+# worker session dies only by explicit hand-back, `rw forget` or `rw close`.
 #
-# For each successfully resolved pane: set the @rw-* cache options fresh
-# (they do not survive a server restart) and `tmux respawn-pane` its local
-# foreground process into attach-loop.sh for that endpoint -- WITHOUT
-# --fresh, since this script makes no claim about the remote session's
-# current liveness (unlike rw-ensure.sh, which just created/confirmed it a
-# moment earlier in the same invocation). attach-loop.sh's own probe
-# handles whatever it finds remotely from there, including case (d)
-# infrastructure-loss recovery if the worker itself needs restoring too.
+# The matching is a pure function, rw_restore_match, over a list-panes dump
+# (tests/test_restore_match.sh runs it without tmux). Source this file to
+# get it; executing it runs the reattach.
 
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RW_POST_RESTORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
-source "$SCRIPT_DIR/common.sh"
+source "$RW_POST_RESTORE_DIR/common.sh"
 
-command -v jq >/dev/null 2>&1 || {
-  rw_log "post-restore skipped: jq is unavailable"
-  exit 0
+# One list-panes call. Fields are space separated and the session name sits
+# between the fifth space and the first colon (tmux replaces ':' in session
+# names), so neither spaces in names nor commands break the split, and no
+# TAB passes through tmux's control-character sanitization.
+RW_RESTORE_PANES_FORMAT='#{pane_id} #{session_id} #{window_index} #{pane_index} #{?@rw-endpoint,#{@rw-endpoint},-} #{session_name}:#{pane_current_command}'
+
+rw_restore_panes_dump() {
+  tmux list-panes -a -F "$RW_RESTORE_PANES_FORMAT" 2>/dev/null
 }
 
-endpoints_dir="$(rw_endpoints_dir)"
-if [ ! -d "$endpoints_dir" ] || [ -z "$(ls -A "$endpoints_dir" 2>/dev/null)" ]; then
-  rw_log "post-restore: no registered endpoints, nothing to re-establish"
-  exit 0
-fi
+# rw_restore_match <endpoints.json> <panes.dump> [sidecar.json] [sessions.jsonl]
+#
+#   endpoints.json  JSON array of endpoint records
+#   panes.dump      output of rw_restore_panes_dump
+#   sidecar.json    tmux-workspace-resurrect sidecar (may be absent/empty)
+#   sessions.jsonl  rw's session uuid registry (may be absent/empty)
+#
+# Prints one JSON object per endpoint, in endpoint-id order:
+#   {endpoint_id, outcome: "reattach"|"attached"|"missing", pane_id,
+#    session_id, session_name, window, pane, via: "record"|"sidecar"|"",
+#    reason}
+rw_restore_match() {
+  local endpoints="$1" dump="$2" sidecar="${3:-}" sessions="${4:-}"
+  local sidecar_json='{}' sessions_json='[]'
+  if [ -n "$sidecar" ] && [ -s "$sidecar" ]; then
+    sidecar_json="$(jq -c 'if type == "object" then . else {} end' "$sidecar" 2>/dev/null || printf '{}')"
+  fi
+  if [ -n "$sessions" ] && [ -s "$sessions" ]; then
+    sessions_json="$(jq -cs '[.[] | objects]' "$sessions" 2>/dev/null || printf '[]')"
+  fi
+  jq -nc \
+    --slurpfile endpoints "$endpoints" \
+    --rawfile dump "$dump" \
+    --argjson sidecar "$sidecar_json" \
+    --argjson sessions "$sessions_json" '
+    def shells: ["zsh", "-zsh", "bash", "-bash", "sh", "fish", "dash", "ksh", ""];
+    def pos_key: "\(.session):\(.window).\(.pane)";
 
-claimed_panes_file="$(mktemp "${TMPDIR:-/tmp}/rw-post-restore-claimed.XXXXXX")"
-trap 'rm -f "$claimed_panes_file"' EXIT
-: >"$claimed_panes_file"
+    ($dump | split("\n") | map(
+      capture("^(?<pane_id>%[0-9]+) (?<session_id>\\$[0-9]+) (?<window>[0-9]+) (?<pane>[0-9]+) (?<endpoint>[^ ]+) (?<session>[^:]*):(?<command>.*)$")
+      | .endpoint = (if .endpoint == "-" then "" else .endpoint end)
+      | .idle = (.command as $c | shells | index([$c]) != null)
+    )) as $panes
 
-reattached=0
-skipped=0
+    | ([($sidecar.panes // [])[]
+        | objects
+        | select((.rw_endpoint // "") != "")
+        | (.logical_id // "" | capture("^(?<session>.*):(?<window>[0-9]+)\\.(?<pane>[0-9]+)$")) as $p
+        | {session: $p.session, window: $p.window, pane: $p.pane, endpoint: .rw_endpoint}]) as $side
 
-for f in "$endpoints_dir"/*.json; do
-  [ -f "$f" ] || continue
-  endpoint_json="$(cat "$f")"
-  id="$(printf '%s' "$endpoint_json" | jq -r '.endpoint_id // empty')"
-  [ -n "$id" ] || continue
+    | ($side | map({key: pos_key, value: .endpoint}) | from_entries) as $side_owner
 
-  old_uuid="$(printf '%s' "$endpoint_json" | jq -r '.focus_session_uuid // empty')"
-  worker="$(printf '%s' "$endpoint_json" | jq -r '.worker // empty')"
-  remote_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.remote_path // empty')"
-  focus_path="$(printf '%s' "$endpoint_json" | jq -r '.workspace.focus_path // empty')"
-  focus_window_index="$(printf '%s' "$endpoint_json" | jq -r '.focus_window_index // empty')"
-  focus_pane_index="$(printf '%s' "$endpoint_json" | jq -r '.focus_pane_index // empty')"
+    | def name_for_uuid($u):
+        if ($u // "") == "" then ""
+        else ([$sessions[] | select(.uuid == $u)] | last | .session_name // "") end;
 
-  if [ -z "$old_uuid" ]; then
-    rw_log "post-restore: endpoint $id has no focus_session_uuid recorded; left for status/reconcile"
-    skipped=$((skipped + 1))
-    continue
+      def record_pos($e):
+        ($e.focus_session_name // "") as $n
+        | (if $n != "" then $n else name_for_uuid($e.focus_session_uuid) end) as $name
+        | if $name != "" and ($e.focus_window_index | type) == "number"
+             and ($e.focus_pane_index | type) == "number"
+          then {session: $name, window: ($e.focus_window_index | tostring),
+                pane: ($e.focus_pane_index | tostring)}
+          else null end;
+
+      def side_pos($id):
+        [$side[] | select(.endpoint == $id)] | if length == 1 then .[0] | del(.endpoint) else null end;
+
+      def missing($e; $reason; $via):
+        {endpoint_id: $e.endpoint_id, outcome: "missing", pane_id: "", session_id: "",
+         session_name: "", window: "", pane: "", via: $via, reason: $reason};
+
+      def found($e; $outcome; $p; $via):
+        {endpoint_id: $e.endpoint_id, outcome: $outcome, pane_id: $p.pane_id,
+         session_id: $p.session_id, session_name: $p.session, window: $p.window,
+         pane: $p.pane, via: $via, reason: ""};
+
+    reduce ($endpoints[0] | map(select(type == "object" and (.endpoint_id | type) == "string"
+              and .endpoint_id != "")) | sort_by(.endpoint_id) | .[]) as $e
+      ({claimed: [], out: []};
+       . as $state
+       | $e.endpoint_id as $id
+       | ([$panes[] | select(.endpoint == $id and (.idle | not))
+           | select(.pane_id as $pid | $state.claimed | index([$pid]) | not)] | first) as $live
+       | if $live != null then
+           .claimed += [$live.pane_id] | .out += [found($e; "attached"; $live; "live")]
+         else
+           record_pos($e) as $rec
+           | side_pos($id) as $sp
+           | (if $sp != null and $sp == $rec then {pos: $rec, via: "record"}
+              elif $sp != null then {pos: $sp, via: "sidecar"}
+              elif $rec == null then null
+              elif ($side_owner[$rec | pos_key] // $id) != $id then {pos: $rec, via: "record", owned: $side_owner[$rec | pos_key]}
+              else {pos: $rec, via: "record"} end) as $choice
+           | if $choice == null then
+               .out += [missing($e; "no-position"; "")]
+             elif $choice.owned != null then
+               .out += [missing($e; "position \($choice.pos | pos_key) belongs to endpoint \($choice.owned)"; "record")]
+             else
+               ([$panes[] | select(.session == $choice.pos.session and .window == $choice.pos.window
+                  and .pane == $choice.pos.pane)] | first) as $p
+               | if $p == null then
+                   .out += [missing($e; "no pane at \($choice.pos | pos_key)"; $choice.via)]
+                 elif ($state.claimed | index([$p.pane_id])) != null then
+                   .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) already claimed"; $choice.via)]
+                 elif $p.endpoint != "" and $p.endpoint != $id then
+                   .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) carries endpoint \($p.endpoint)"; $choice.via)]
+                 elif ($p.idle | not) then
+                   .out += [missing($e; "pane \($p.pane_id) at \($choice.pos | pos_key) is busy (\($p.command))"; $choice.via)]
+                 else
+                   .claimed += [$p.pane_id] | .out += [found($e; "reattach"; $p; $choice.via)]
+                 end
+             end
+         end)
+    | .out[]'
+}
+
+rw_post_restore_main() {
+  command -v jq >/dev/null 2>&1 || {
+    rw_log "post-restore skipped: jq is unavailable"
+    return 0
+  }
+
+  local endpoints_dir work f id
+  endpoints_dir="$(rw_endpoints_dir)"
+  if ! compgen -G "$endpoints_dir/*.json" >/dev/null; then
+    rw_log "post-restore: no registered endpoints, nothing to reattach"
+    return 0
   fi
 
-  session_name="$(rw_session_name_for_uuid "$old_uuid")"
-  if [ -z "$session_name" ]; then
-    rw_log "post-restore: endpoint $id's session uuid $old_uuid has no known session name; left for status/reconcile"
-    skipped=$((skipped + 1))
-    continue
-  fi
+  work="$(mktemp -d "${TMPDIR:-/tmp}/rw-post-restore.XXXXXX")" || return 0
+  # shellcheck disable=SC2064 # expand now: the path is fixed for this run
+  trap "rm -rf '$work'" EXIT
 
-  if ! tmux has-session -t "=$session_name" 2>/dev/null; then
-    rw_log "post-restore: endpoint $id's session '$session_name' is not present after restore; left for status/reconcile"
-    skipped=$((skipped + 1))
-    continue
-  fi
-
-  # --- Step 1: re-stamp the stable session UUID (idempotent across
-  # multiple endpoints that share the same local session) -----------------
-  # NOTE: unlike has-session/list-panes -s above, tmux's `display-message
-  # -t` target parser does NOT honor the "=name" exact-match session syntax
-  # (verified empirically -- it silently resolves to nothing). Resolve the
-  # exact session id ourselves by scanning `list-sessions` session ids one
-  # at a time and comparing names, instead of trusting tmux's own (fuzzy,
-  # prefix-matching) plain-name target resolution here.
-  #
-  # Deliberately NOT a TAB-joined `list-sessions -F '#{session_id}\t#{session_name}'`
-  # parsed with `awk -F'\t'`: tmux (observed: Homebrew 3.7b) sanitizes
-  # control characters -- including TAB -- to `_` in command output, which
-  # silently collapses the whole delimited record into one field and makes
-  # `$2 == n` never match (see tmux-workspace-resurrect/scripts/save.sh for
-  # the incident this mirrors). Since this script runs on the laptop at
-  # restore time, it can hit the exact same tmux version as the mini
-  # worker. A single #{...} format per call has nothing to delimit, so it's
-  # immune regardless of tmux version.
-  session_id=""
-  while IFS= read -r cand_session_id; do
-    [ -n "$cand_session_id" ] || continue
-    # -p is load-bearing: without it display-message routes to the client
-    # status line, the substitution is always empty, and the session-UUID
-    # re-stamp below never fires (smoke lane w6: restored sessions kept
-    # fresh UUIDs instead of re-resolving to their saved ones).
-    cand_session_name="$(tmux display-message -pt "$cand_session_id" -F '#{session_name}' 2>/dev/null || true)"
-    if [ "$cand_session_name" = "$session_name" ]; then
-      session_id="$cand_session_id"
-      break
+  # Registered, untombstoned endpoints; an unreadable file is skipped, not
+  # fatal to the others.
+  : >"$work/endpoints.jsonl"
+  for f in "$endpoints_dir"/*.json; do
+    [ -f "$f" ] || continue
+    id="$(jq -r 'select(type == "object") | .endpoint_id // empty' "$f" 2>/dev/null || true)"
+    [ -n "$id" ] || continue
+    if rw_tombstone_exists "$id"; then
+      rw_log "post-restore: endpoint $id is tombstoned; not reattached"
+      continue
     fi
-  done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null)
-  if [ -n "$session_id" ]; then
-    current_uuid="$(tmux show-option -t "$session_id" -qv @session-uuid 2>/dev/null || true)"
-    if [ "$current_uuid" != "$old_uuid" ]; then
-      tmux set-option -t "$session_id" -q @session-uuid "$old_uuid"
-      rw_register_session_uuid "$old_uuid" "$session_name"
-      rw_log "post-restore: re-stamped session '$session_name' ($session_id) back to stable uuid $old_uuid"
-    fi
+    jq -c . "$f" >>"$work/endpoints.jsonl" 2>/dev/null || true
+  done
+  jq -s . "$work/endpoints.jsonl" >"$work/endpoints.json"
+
+  rw_restore_panes_dump >"$work/panes.dump"
+
+  # Read-only use of the sibling plugin's path helper, as libexec/reconcile
+  # does: the sidecar of the snapshot that was just restored.
+  local sidecar="" workspace_common="$RW_PLUGIN_DIR/../tmux-workspace-resurrect/scripts/common.sh"
+  if [ -f "$workspace_common" ]; then
+    # shellcheck source=../../tmux-workspace-resurrect/scripts/common.sh
+    sidecar="$(source "$workspace_common" && workspace_sidecar_file 2>/dev/null || true)"
   fi
 
-  # --- Step 2: resolve the pane by cwd match, narrowing on ambiguity -----
-  # NOTE: pane fields are fetched one field per `display-message` call
-  # (immune to tmux's control-character sanitization, see Step 1 above)
-  # rather than a single TAB-joined `list-panes -F` format string parsed by
-  # `read`. The array elements built below (`cand_pane$'\t'cand_window...`)
-  # are safe to split on TAB even so: that TAB is inserted by this script
-  # itself from already-parsed, always-numeric window/pane index values --
-  # it never passes through tmux's own stdout sanitization.
-  candidates=()
-  while IFS= read -r cand_pane; do
-    [ -n "$cand_pane" ] || continue
-    cand_path="$(tmux display-message -pt "$cand_pane" -F '#{pane_current_path}' 2>/dev/null || true)"
-    [ "$cand_path" = "$focus_path" ] || continue
-    grep -Fqx "$cand_pane" "$claimed_panes_file" 2>/dev/null && continue
-    cand_window="$(tmux display-message -pt "$cand_pane" -F '#{window_index}' 2>/dev/null || true)"
-    cand_index="$(tmux display-message -pt "$cand_pane" -F '#{pane_index}' 2>/dev/null || true)"
-    candidates+=("$cand_pane"$'\t'"$cand_window"$'\t'"$cand_index")
-  done < <(tmux list-panes -s -t "=$session_name" -F '#{pane_id}' 2>/dev/null)
+  rw_restore_match "$work/endpoints.json" "$work/panes.dump" "$sidecar" "$(rw_sessions_file)" \
+    >"$work/matches.jsonl" || {
+    rw_log "post-restore: endpoint matching failed; nothing reattached"
+    return 0
+  }
 
-  resolved_pane=""
-  if [ "${#candidates[@]}" -eq 1 ]; then
-    resolved_pane="${candidates[0]%%$'\t'*}"
-  elif [ "${#candidates[@]}" -gt 1 ]; then
-    narrowed=()
-    for c in "${candidates[@]}"; do
-      c_pane="${c%%$'\t'*}"
-      c_rest="${c#*$'\t'}"
-      c_window="${c_rest%%$'\t'*}"
-      c_index="${c_rest#*$'\t'}"
-      if [ "$c_window" = "$focus_window_index" ] && [ "$c_index" = "$focus_pane_index" ]; then
-        narrowed+=("$c_pane")
+  local reattached=0 attached=0 missing=0 line outcome pane_id session_id session_name
+  local window pane via reason endpoint_json worker remote_path root_id old_uuid dir cmd
+  local current_uuid root_rel
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id="$(jq -r '.endpoint_id' <<<"$line")"
+    outcome="$(jq -r '.outcome' <<<"$line")"
+    pane_id="$(jq -r '.pane_id' <<<"$line")"
+    session_id="$(jq -r '.session_id' <<<"$line")"
+    session_name="$(jq -r '.session_name' <<<"$line")"
+    window="$(jq -r '.window' <<<"$line")"
+    pane="$(jq -r '.pane' <<<"$line")"
+    via="$(jq -r '.via' <<<"$line")"
+    reason="$(jq -r '.reason' <<<"$line")"
+    endpoint_json="$(jq -c --arg id "$id" '.[] | select(.endpoint_id == $id)' "$work/endpoints.json" | head -n 1)"
+    worker="$(jq -r '.worker // empty' <<<"$endpoint_json")"
+
+    case "$outcome" in
+      attached)
+        attached=$((attached + 1))
+        rw_log "post-restore: endpoint $id already attached in $pane_id; left as is"
+        continue
+        ;;
+      missing)
+        missing=$((missing + 1))
+        rw_log "post-restore: endpoint $id not reattached ($reason); left registered"
+        rw_log_event "restore-reattach-missing" "$id" "$worker" "" "skipped" "$reason"
+        continue
+        ;;
+    esac
+
+    remote_path="$(jq -r '.workspace.remote_path // .workspace.worker_root // empty' <<<"$endpoint_json")"
+    root_id="$(jq -r '.root_id // empty' <<<"$endpoint_json")"
+    root_rel="$(jq -r '.root_rel // empty' <<<"$endpoint_json")"
+    old_uuid="$(jq -r '.focus_session_uuid // empty' <<<"$endpoint_json")"
+    dir="$(jq -r '.workspace.focus_path // empty' <<<"$endpoint_json")"
+    [ -n "$dir" ] || { [ -n "$root_rel" ] && dir="$HOME/$root_rel"; }
+    [ -d "$dir" ] || dir="$HOME"
+
+    printf -v cmd '%q %q' "$RW_POST_RESTORE_DIR/attach-loop.sh" "$id"
+    if ! tmux respawn-pane -k -t "$pane_id" -c "$dir" "$cmd" 2>/dev/null; then
+      missing=$((missing + 1))
+      rw_log "post-restore: endpoint $id: respawn of $pane_id failed; left registered"
+      rw_log_event "restore-reattach-missing" "$id" "$worker" "" "fail" "respawn failed pane=$pane_id"
+      continue
+    fi
+
+    rw_pane_set "$pane_id" @rw-endpoint "$id"
+    rw_pane_set "$pane_id" @rw-worker "$worker"
+    [ -n "$remote_path" ] && rw_pane_set "$pane_id" @rw-workspace "$remote_path"
+    [ -n "$root_id" ] && rw_pane_set "$pane_id" @rw-root-id "$root_id"
+    [ -n "$old_uuid" ] && rw_pane_set "$pane_id" @rw-session-uuid "$old_uuid"
+    rw_pane_set "$pane_id" @remote-host "$worker"
+    rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
+    rw_pane_unset "$pane_id" @workspace-last-command
+
+    # A restored session got a fresh @session-uuid from session-created;
+    # give it back the stable one the endpoint remembers.
+    if [ -n "$old_uuid" ] && [ -n "$session_id" ]; then
+      current_uuid="$(tmux show-option -t "$session_id" -qv @session-uuid 2>/dev/null || true)"
+      if [ "$current_uuid" != "$old_uuid" ]; then
+        tmux set-option -t "$session_id" -q @session-uuid "$old_uuid" 2>/dev/null || true
+        rw_register_session_uuid "$old_uuid" "$session_name"
+        rw_log "post-restore: re-stamped session '$session_name' ($session_id) to stable uuid $old_uuid"
       fi
-    done
-    if [ "${#narrowed[@]}" -eq 1 ]; then
-      resolved_pane="${narrowed[0]}"
     fi
-  fi
 
-  if [ -z "$resolved_pane" ]; then
-    rw_log "post-restore: endpoint $id ($session_name, path=$focus_path) has ${#candidates[@]} candidate pane(s) -- ambiguous or absent, left for status/reconcile"
-    skipped=$((skipped + 1))
-    continue
-  fi
+    reattached=$((reattached + 1))
+    rw_log_event "restore-reattach" "$id" "$worker" "" "success" \
+      "pane=$pane_id session=$session_name window=$window pane_index=$pane via=$via"
+  done <"$work/matches.jsonl"
 
-  printf '%s\n' "$resolved_pane" >>"$claimed_panes_file"
+  rw_log "post-restore complete: reattached=$reattached already=$attached missing=$missing"
+  return 0
+}
 
-  rw_pane_set "$resolved_pane" @rw-endpoint "$id"
-  rw_pane_set "$resolved_pane" @rw-worker "$worker"
-  rw_pane_set "$resolved_pane" @rw-workspace "$remote_path"
-  rw_pane_set "$resolved_pane" @rw-session-uuid "$old_uuid"
-
-  # No --fresh here: unlike rw-ensure.sh, this script has not itself just
-  # confirmed/created the remote session, so attach-loop.sh must run its
-  # full remote-state discrimination from its very first iteration.
-  tmux respawn-pane -k -t "$resolved_pane" "bash '$SCRIPT_DIR/attach-loop.sh' '$id'" 2>/dev/null &&
-    rw_log_event "restore-reattach" "$id" "$worker" "" "success" "pane=$resolved_pane session=$session_name"
-
-  reattached=$((reattached + 1))
-done
-
-rw_log "post-restore complete: reattached=$reattached skipped=$skipped"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  rw_post_restore_main "$@"
+fi

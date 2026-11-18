@@ -180,6 +180,35 @@ class AssemblePanesTests(unittest.TestCase):
         self.assertEqual(record["last_command"], "")
         self.assertEqual(record["selected_source"], "pending-buffer")
 
+    def test_remote_endpoint_pane_is_captured_without_replay_or_capture_error(self):
+        # A handed-off pane: its local shell last ran the agent that now runs
+        # on the worker, with no fresh local hook record. Without the endpoint
+        # this is an agent_capture_error that rejects the verified save.
+        remote = self.pane(1, "claudef --model sonnet", pending="echo stale")
+        remote["rw_endpoint"] = "a1b2c3d4"
+        remote.update(nvim_server=str(self.root / "r.sock"), nvim_owner=str(os.getpid()),
+                      nvim_session=str(self.root / "remote.vim"))
+        local = self.pane(2, "claudef --model sonnet")
+        local["rw_endpoint"] = ""
+        legacy = self.pane(3, "echo old capture without the field")
+        with socket.socket(socket.AF_UNIX) as server:
+            server.bind(remote["nvim_server"])
+            records = self.assemble([remote, local, legacy], capture_nvim=True)
+        self.assertEqual(records[0]["rw_endpoint"], "a1b2c3d4")
+        self.assertEqual(records[0]["selected_source"], "remote-endpoint")
+        self.assertEqual(records[0]["selected_command"], "")
+        self.assertEqual(records[0]["last_command"], "")
+        self.assertEqual(records[0]["pending_buffer"], "")
+        self.assertEqual(records[0]["pending_cursor"], 0)
+        self.assertIsNone(records[0]["agent"])
+        self.assertIsNone(records[0]["neovim"])
+        self.assertEqual(records[0]["agent_capture_error"], "")
+        # The same command in a local pane still demands a verified resume.
+        self.assertEqual(records[1]["rw_endpoint"], "")
+        self.assertIn("missing, invalid or stale claude", records[1]["agent_capture_error"])
+        self.assertEqual(records[2]["rw_endpoint"], "")
+        self.assertEqual(records[2]["selected_source"], "last-command")
+
 
 if __name__ == "__main__":
     unittest.main()

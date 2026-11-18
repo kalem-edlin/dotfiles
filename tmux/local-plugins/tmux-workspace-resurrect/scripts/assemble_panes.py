@@ -71,8 +71,20 @@ def main():
             if ignored_pending or (not pending and ignored_last):
                 selected = ""
                 selected_source = "ignored-agent"
+            # A tmux-remote-workspaces endpoint pane is a local window onto a
+            # worker session. Its program runs on the worker; whatever the
+            # local shell last ran (often the agent that was handed off) is
+            # stale. rw-post-restore.sh reattaches it by endpoint id, so it is
+            # captured as-is: no replay, no agent lookup, no capture error.
+            rw_endpoint = source.get("rw_endpoint") or ""
+            if rw_endpoint:
+                last_command = ""
+                pending = ""
+                pending_cursor = 0
+                selected = ""
+                selected_source = "remote-endpoint"
             nvim = None
-            if not pending and not ignored_pending and capture_nvim == "1" and pane_id not in failures and source["nvim_session"] \
+            if not rw_endpoint and not pending and not ignored_pending and capture_nvim == "1" and pane_id not in failures and source["nvim_session"] \
                     and is_socket(source["nvim_server"]) and process_exists(source["nvim_owner"]):
                 session = source["nvim_session"].replace("'", "'\"'\"'")
                 selected = f"nvim -S '{session}'"
@@ -82,7 +94,7 @@ def main():
             agent = None
             agent_error = ""
             inferred = agent_command.infer(last_command)
-            if capture_agents == "1" and inferred and selected_source == "last-command":
+            if not rw_endpoint and capture_agents == "1" and inferred and selected_source == "last-command":
                 number = pane_id.removeprefix("%")
                 scoped = Path(state_dir) / "agents" / f"server-{server_key}" / f"pane-{number}.json"
                 legacy = Path(state_dir) / "agents" / f"pane-{number}.json"
@@ -120,7 +132,8 @@ def main():
                 "current_command": source["pane_command"], "last_command": last_command,
                 "pending_buffer": pending, "pending_cursor": pending_cursor,
                 "selected_command": selected, "selected_source": selected_source,
-                "agent": agent, "agent_capture_error": agent_error, "neovim": nvim})
+                "agent": agent, "agent_capture_error": agent_error, "neovim": nvim,
+                "rw_endpoint": rw_endpoint})
     with open(output_path, "w", encoding="utf-8") as stream:
         for record in records:
             json.dump(record, stream, ensure_ascii=False, separators=(",", ":"))

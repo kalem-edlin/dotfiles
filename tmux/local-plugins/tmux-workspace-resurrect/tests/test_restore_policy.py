@@ -47,6 +47,19 @@ class RestorePolicyTests(unittest.TestCase):
                 with self.subTest(config=config, record=record):
                     self.assertEqual(POLICY.decide(record, config), {"action": "ignore", "command": ""})
 
+    def test_remote_endpoint_panes_are_never_replayed(self):
+        launchable = self.agent()
+        launchable["rw_endpoint"] = "a1b2c3d4"
+        for config in (self.config, {"restore_mode": "queue"}, {}):
+            with self.subTest(config=config):
+                self.assertEqual(POLICY.decide(launchable, config), {"action": "ignore", "command": ""})
+                self.assertEqual(POLICY.decide({"selected_source": "remote-endpoint",
+                                                "selected_command": "echo stale"}, config),
+                                 {"action": "ignore", "command": ""})
+        local = self.agent()
+        local["rw_endpoint"] = ""
+        self.assertEqual(POLICY.decide(local, self.config)["action"], "execute")
+
     def test_pending_input_never_executes(self):
         record = self.agent(command="claudef --resume exact-id")
         record.update(selected_source="pending-buffer", pending_buffer="claudef --resume exact-id")

@@ -84,7 +84,7 @@ new_test_pane() {
     TMUX="$SERVER_TMUX" tmux new-session -d -s "$name" -c "$TEST_ROOT" 'zsh -f -i'
 }
 
-for session in pi codex codex-pending codex-last nvim pending unknown exited live editing; do
+for session in pi codex codex-pending codex-last nvim pending unknown exited live editing remote-sidecar remote-live; do
   new_test_pane "$session"
 done
 
@@ -124,7 +124,7 @@ install_dump_widget() {
   [ -f "$prefix.ready" ] || fail "stub PATH verification failed in $session"
 }
 
-for session in claude pi codex codex-pending codex-last nvim pending unknown exited live editing; do
+for session in claude pi codex codex-pending codex-last nvim pending unknown exited live editing remote-sidecar remote-live; do
   wait_for_shell "$(pane_for "$session")"
   install_dump_widget "$session"
 done
@@ -143,8 +143,8 @@ UNKNOWN='printf "queued unknown command"'
 
 record() {
   local session="$1" current="$2" source="$3" selected="$4" pending="$5" cursor="$6"
-  local agent_json="${7:-null}" nvim_json="${8:-null}"
-  jq -nc --arg pane_id "$(pane_for "$session")" \
+  local agent_json="${7:-null}" nvim_json="${8:-null}" rw_endpoint="${9:-}"
+  jq -nc --arg rw_endpoint "$rw_endpoint" --arg pane_id "$(pane_for "$session")" \
     --arg logical_id "$(logical_for "$session")" --arg current_command "$current" \
     --arg selected_source "$source" --arg selected_command "$selected" \
     --arg pending_buffer "$pending" --argjson pending_cursor "$cursor" \
@@ -152,7 +152,8 @@ record() {
     '{pane_id:$pane_id,logical_id:$logical_id,current_command:$current_command,
       selected_source:$selected_source,selected_command:$selected_command,
       pending_buffer:$pending_buffer,pending_cursor:$pending_cursor,
-      agent:$agent,neovim:$neovim}'
+      agent:$agent,neovim:$neovim}
+      + (if $rw_endpoint == "" then {} else {rw_endpoint:$rw_endpoint} end)'
 }
 
 panes_json="$TEST_ROOT/panes.jsonl"
@@ -176,11 +177,19 @@ panes_json="$TEST_ROOT/panes.jsonl"
     "$(jq -nc '{tool:"claude",session_id:"live-must-not-run"}')"
   record editing claudef claude-session "claudef --resume $EDITING_ID" '' 0 \
     "$(jq -nc --arg id "$EDITING_ID" '{tool:"claude",session_id:$id}')"
+  # Remote endpoint panes: a launch-eligible record must still never be
+  # replayed, whether the sidecar names the endpoint or only the live pane
+  # (stamped by rw-post-restore.sh) does.
+  record remote-sidecar claudef claude-session 'claudef --resume remote-sidecar-must-not-run' '' 0 \
+    "$(jq -nc '{tool:"claude",session_id:"remote-sidecar-must-not-run"}')" null a1b2c3d4
+  record remote-live zsh last-command 'echo remote-live-must-not-paste' '' 0
 } >>"$panes_json"
 
 jq -s --arg saved_at 'integration-test' \
   '{version:1,resurrect_snapshot:"last",saved_at:$saved_at,panes:.,treemux:[]}' \
   "$panes_json" >"$SIDECAR"
+
+tmux -L "$SOCKET" set-option -p -t "$(pane_for remote-live)" @rw-endpoint e5f6a7b8
 
 # A non-shell foreground process represents an agent that survived restore.
 # The restore must not paste into or relaunch this pane.
@@ -225,6 +234,14 @@ grep -Fq $'nvim\t-S '"$NVIM_SESSION" "$INVOCATIONS" || fail 'Neovim exact sessio
 ! grep -Fq "$EXITED_ID" "$INVOCATIONS" || fail 'exited agent was incorrectly relaunched'
 ! grep -Fq 'live-must-not-run' "$INVOCATIONS" || fail 'already-running pane was relaunched'
 ! grep -Fq "$EDITING_ID" "$INVOCATIONS" || fail 'live shell input was entered to launch an agent'
+! grep -Fq 'remote-sidecar-must-not-run' "$INVOCATIONS" || fail 'remote endpoint pane was relaunched'
+for session in remote-sidecar remote-live; do
+  pane="$(pane_for "$session")"
+  [ -z "$(tmux -L "$SOCKET" show-option -pqv -t "$pane" @workspace-pending-buffer)" ] ||
+    fail "remote endpoint pane $session had a command queued"
+  ! tmux -L "$SOCKET" capture-pane -p -t "$pane" -S -3 | grep -q 'must-not' ||
+    fail "remote endpoint pane $session had a command pasted"
+done
 
 # Launches are serialized in sidecar order with at least a 500 ms start gap.
 awk -F '\t' 'NR > 1 && $1 - previous < 450 { exit 1 } { previous=$1 }' "$INVOCATIONS" ||
@@ -269,4 +286,4 @@ sleep 2
 dump_and_assert pending "$PENDING" "$PENDING_CURSOR"
 dump_and_assert unknown "$UNKNOWN" "${#UNKNOWN}"
 
-printf 'restore autolaunch integration passed: exact IDs/path, stagger, pending bytes/cursor, queue policy, live skip, and rerestore dedupe\n'
+printf 'restore autolaunch integration passed: exact IDs/path, stagger, pending bytes/cursor, queue policy, live skip, remote endpoint skip, and rerestore dedupe\n'

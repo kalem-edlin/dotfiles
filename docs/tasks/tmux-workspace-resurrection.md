@@ -2,6 +2,67 @@
 
 Status: reopened September 17, 2026. The earlier fixes did not establish reliable operation under load.
 
+## November 18, remote endpoint panes (W4 of docs/tasks/mini-remote-sessions.md)
+
+A pane handed to a worker by tmux-remote-workspaces is a local window onto a
+worker tmux session. Until now the laptop restore never reattached such a
+pane (finding F6 there): tmux-resurrect saves no `@` options, the sidecar had
+no rw field, the sidecar replay ran first and pasted the pane's pre-handoff
+`claudef` into a plain shell, and a stale `@workspace-last-command` on the
+pane could produce an `agent_capture_error` that rejected the verified save.
+
+What changed:
+
+- `save.sh` captures `@rw-endpoint` per pane; `assemble_panes.py` writes it
+  as `rw_endpoint` (empty for local panes). A pane with an endpoint is
+  recorded with `selected_source: "remote-endpoint"`, an empty
+  `selected_command`, cleared `last_command`/`pending_buffer`, no agent or
+  Neovim lookup, and no `agent_capture_error`. Remote panes therefore never
+  reject the verified save; `tmux/scripts/resurrect_save.sh` needed no
+  change. The field is additive, so the sidecar stays `version: 1`, as it did
+  when `pending_cursor`, `agent` and `neovim` were added; every reader
+  (`restore.sh`, `doctor.sh`, the verified save, rw's reconcile) keeps
+  accepting it.
+- `restore.sh` skips a pane whose record has `rw_endpoint`, and a pane that
+  carries a live `@rw-endpoint` option (stamped by `rw-post-restore.sh`, which
+  also covers snapshots older than the field). `restore_policy.py` returns
+  `ignore` for such records as a second guard.
+- `@resurrect-hook-post-restore-all` runs, in this order:
+  `tmux-remote-workspaces/scripts/rw-post-restore.sh`, then this plugin's
+  `restore.sh`, then `tmux-remote-workspaces/libexec/reconcile`.
+  `tmux-remote-workspaces.tmux` places its two entries first and last on
+  every load, whatever was in the option before, so a config reload cannot
+  change the order.
+- `rw-post-restore.sh` reattaches each registered endpoint by id. The pane is
+  found at the endpoint record's `focus_session_name` + `focus_window_index`
+  + `focus_pane_index`; the restored sidecar's `rw_endpoint` mapping wins
+  when it places the endpoint elsewhere (the record's indices date from the
+  handoff, the sidecar from the save that was restored) and is the fallback
+  when the record has no position. Only a bare restored shell is taken; a
+  busy pane, a pane of another endpoint, or an absent position is logged as
+  `restore-reattach-missing` and the endpoint stays registered. The pane is
+  respawned into `attach-loop.sh <id>` and gets its `@rw-*`, `@remote-host`
+  and `@workspace-resurrect-skip` options back (`restore-reattach` event).
+  No worker session is ever killed by a restore.
+- A `session-renamed` hook (`rw-session-renamed.sh`) keeps `sessions.jsonl`
+  and the endpoints' `focus_session_name` (and the bound panes' indices)
+  current, so renamed worktree sessions still reattach.
+
+Validation: 36 Python tests (new: endpoint capture, policy ignore), the
+agent-resume and restore-autolaunch integrations extended with endpoint panes
+(sidecar field and live option), multiline, robustness and 68-pane batch
+integrations, rw's tmux-free suite with new `test_restore_match.sh` and
+`test_session_renamed.sh`, ShellCheck. Drill on a throwaway server
+(`-L rw-w4`, private `TMUX_TMPDIR`, scratch state dirs, ssh stubbed as
+unreachable): a handed-off pane in a session renamed after the handoff was
+saved, the server killed, the snapshot restored through upstream
+tmux-resurrect; the pane came back running `attach-loop.sh` with its options,
+the local sibling pane got its command queued, the endpoint pane was skipped
+by the replay, `events.jsonl` gained `restore-reattach`, and no ssh call
+killed anything. The drill also found that the rw plugin's session-uuid
+backfill at load never registered pre-existing sessions (`display-message`
+without `-p`); fixed.
+
 ## September 29, verified save repair and retention
 
 No user process, pane, session, or server was restarted or relaunched.

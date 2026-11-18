@@ -137,6 +137,10 @@ fields = {
     "last_command": "#{@workspace-last-command}",
     "pending_buffer": "#{@workspace-pending-buffer}",
     "pending_cursor": "#{@workspace-pending-cursor}",
+    # tmux-remote-workspaces endpoint id. A pane carrying it is a local
+    # window onto a worker session: rw-post-restore.sh reattaches it by this
+    # id, so its local command history is never captured or replayed.
+    "rw_endpoint": "#{@rw-endpoint}",
 }
 marker = "__TWR_" + secrets.token_hex(24) + "__"
 parts = []

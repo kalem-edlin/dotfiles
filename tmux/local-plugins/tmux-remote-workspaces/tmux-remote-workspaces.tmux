@@ -36,7 +36,10 @@ while IFS= read -r sid; do
   [ -n "$sid" ] || continue
   suuid="$(tmux show-option -t "$sid" -qv @session-uuid 2>/dev/null || true)"
   [ -n "$suuid" ] && continue
-  sname="$(tmux display-message -t "$sid" -F '#{session_name}' 2>/dev/null || true)"
+  # -p is load-bearing: without it the name goes to a client status line and
+  # the substitution is empty (found in the W4 drill, 2026-11-18: backfill
+  # never registered a pre-existing session).
+  sname="$(tmux display-message -pt "$sid" -F '#{session_name}' 2>/dev/null || true)"
   bash "$PLUGIN_DIR/scripts/session-created-hook.sh" "$sid" "$sname"
 done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null || true)
 
@@ -89,45 +92,53 @@ case "$existing_dir_text" in
     ;;
 esac
 
-# --- Post-restore re-establishment and reconciliation ----------------------
-# Chained onto the SAME @resurrect-hook-post-restore-all option
-# tmux-workspace-resurrect.tmux already appended its own restore.sh to --
-# this plugin loads after that one (see the file-level comment above), so
-# that append has already happened by the time this runs. Appending (never
-# replacing) is the same multi-consumer pattern tmux-workspace-resurrect
-# itself uses for its own post-save-all/post-restore-all hooks -- duplicated
-# here deliberately rather than sourced cross-plugin, matching the "sibling
-# consumer, not a fork" relationship described in
-# docs/tmux-remote-workspaces.md, "Tmux and persistence integration".
+# --- Post-restore reattach and reconciliation -------------------------------
+# @resurrect-hook-post-restore-all is one "cmd; cmd; ..." string that
+# tmux-resurrect evals after a restore; tmux-workspace-resurrect.tmux (loaded
+# before this file, see the file-level comment) has already appended its
+# sidecar replay (restore.sh) to it. The order is fixed here, whatever was
+# there before and however often the config is reloaded:
 #
-# Order matters: rw-post-restore.sh (session-UUID re-resolution + pane
-# re-establishment) runs first, then libexec/reconcile (orphan disposal)
-# so endpoint re-establishment precedes orphan reconciliation. Both are
-# independently safe regardless of order (neither
-# closes an endpoint the other one just touched), but running
-# re-establishment first means a freshly-set @rw-* pane cache and a
-# respawned attach-loop.sh are already in place by the time reconciliation
-# (and anyone glancing at the pane) runs.
-append_resurrect_hook() {
-  local hook_name="$1"
-  local command="$2"
-  local option="@resurrect-hook-${hook_name}"
-  local existing
-
-  existing="$(tmux show-option -gqv "$option")"
-  case "; $existing; " in
-    *"; $command; "*) return ;;
-  esac
-
-  if [ -n "$existing" ]; then
-    tmux set-option -gq "$option" "$existing; $command"
-  else
-    tmux set-option -gq "$option" "$command"
-  fi
+#   1. scripts/rw-post-restore.sh  reattach every registered endpoint's
+#                                  restored pane by endpoint id (D14, C6)
+#   2. ...everything else, in its existing order; in practice
+#      tmux-workspace-resurrect/scripts/restore.sh, the sidecar replay,
+#      which skips every pane with an endpoint
+#   3. libexec/reconcile           orphan disposal, last
+#
+# rw-post-restore.sh must precede the replay: the replay would otherwise
+# paste a former remote pane's stale local command (the pre-handoff agent)
+# into it before it is reattached.
+resurrect_hook_without() {
+  local list="$1" command="$2" rest="" entry
+  while [ -n "$list" ]; do
+    entry="${list%%; *}"
+    if [ "$entry" = "$list" ]; then list=""; else list="${list#*; }"; fi
+    [ "$entry" = "$command" ] && continue
+    rest="${rest:+$rest; }$entry"
+  done
+  printf '%s' "$rest"
 }
 
-append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/scripts/rw-post-restore.sh'"
-append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
+place_resurrect_hook() {
+  local hook_name="$1" position="$2" command="$3"
+  local option="@resurrect-hook-${hook_name}" rest
+  rest="$(resurrect_hook_without "$(tmux show-option -gqv "$option")" "$command")"
+  case "$position" in
+    first) tmux set-option -gq "$option" "$command${rest:+; $rest}" ;;
+    last) tmux set-option -gq "$option" "${rest:+$rest; }$command" ;;
+  esac
+}
+
+place_resurrect_hook "post-restore-all" first "bash '$PLUGIN_DIR/scripts/rw-post-restore.sh'"
+place_resurrect_hook "post-restore-all" last "bash '$PLUGIN_DIR/libexec/reconcile'"
+
+# --- Session renames -------------------------------------------------------
+# Renamed worktree sessions must still reattach after a restore: keep
+# sessions.jsonl and the endpoints' focus_session_name (and pane indices)
+# current. Nothing else in the config sets this hook.
+tmux set-hook -g session-renamed \
+  "run-shell -b \"bash '$PLUGIN_DIR/scripts/rw-session-renamed.sh' '#{session_id}' '#{session_name}'\""
 
 # --- doctor -----------------------------------------------------------------
 # `rw doctor` remains CLI-only; lifecycle bindings are wired from
@@ -136,7 +147,7 @@ append_resurrect_hook "post-restore-all" "bash '$PLUGIN_DIR/libexec/reconcile'"
 # --- Copy-mode forwarding for remote-backed panes ---------------------------
 # A remote-backed pane is an ssh-attached worker tmux client on the outer
 # pane's alternate screen, so local copy-mode ([ / PPage) scrolls the outer
-# pane's pre-attach scrollback (rw ensure output and older), not the worker
+# pane's pre-attach scrollback (rw open output and older), not the worker
 # pane's real history. Endpoint sessions run with `prefix None` (the inner
 # tmux is a headless display layer), so a forwarded prefix sequence would
 # just be typed into the remote program -- instead rw-copy-mode.sh enters

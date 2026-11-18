@@ -149,6 +149,11 @@ codex_pane="$(new_pane codex 'codex --model test-model resume old-session')"
 stale_pane="$(new_pane stale-identity 'claudef --resume old-session')"
 missing_pane="$(new_pane missing-record 'pif --session old-session')"
 pending_pane="$(new_pane pending-buffer 'codexf old-session')"
+# A handed-off pane: the agent now runs on a worker, the local pane carries
+# the endpoint id and (before rw cleared it) the old launcher, with no hook
+# record. It must be captured without a replay command or a capture error.
+remote_pane="$(new_pane remote-endpoint 'claudef --resume handed-off-to-worker')"
+tmux -L "$SOCKET" set-option -p -t "$remote_pane" @rw-endpoint 'a1b2c3d4'
 server_pid="$(tmux -L "$SOCKET" display-message -p '#{pid}')"
 socket_path="$(tmux -L "$SOCKET" display-message -p '#{socket_path}')"
 SERVER_TMUX="$socket_path,$server_pid,0"
@@ -227,6 +232,11 @@ assert_sidecar_command "$pending_pane" 'echo pending-buffer-survives' pending-bu
   fail 'pending buffer cursor was not preserved'
 [ "$(jq '.agent_capture_errors|length' "$SIDECAR")" = 2 ] ||
   fail 'expected stale and missing agent hook records to be reported'
+assert_sidecar_command "$remote_pane" '' remote-endpoint
+[ "$(jq -r --arg pane "$remote_pane" '.panes[]|select(.pane_id==$pane)|.rw_endpoint' "$SIDECAR")" = a1b2c3d4 ] ||
+  fail 'remote endpoint id was not recorded in the sidecar'
+[ "$(jq -r --arg pane "$claudef_pane" '.panes[]|select(.pane_id==$pane)|.rw_endpoint' "$SIDECAR")" = '' ] ||
+  fail 'a local pane gained an rw_endpoint'
 
 # Recreate only these disposable test panes as empty shells, then queue the
 # saved commands. Restore never receives Enter and no application is started.
@@ -237,13 +247,18 @@ jq --arg pane "$codexf_pane" --arg raw "$codex_pane" '
      .selected_command = "codexf --dangerously-bypass-approvals-and-sandbox resume old-session" |
      .agent = {tool:"codex",session_id:"old-session"}) |
   (.panes[] | select(.pane_id == $raw)) |=
-    (.selected_source = "last-command" | .selected_command = "codex resume old-session")' \
+    (.selected_source = "last-command" | .selected_command = "codex resume old-session") |
+  (.panes[] | select(.rw_endpoint != "")) |=
+    (.selected_source = "last-command" | .selected_command = "echo remote-must-not-replay")' \
   "$SIDECAR" >"$TEST_ROOT/legacy-sidecar.json"
 mv "$TEST_ROOT/legacy-sidecar.json" "$SIDECAR"
 for pane in "$claudef_pane" "$claude_pane" "$pif_pane" "$pi_pane" \
-  "$codexf_pane" "$codex_pane" "$stale_pane" "$missing_pane" "$pending_pane"; do
+  "$codexf_pane" "$codex_pane" "$stale_pane" "$missing_pane" "$pending_pane" "$remote_pane"; do
   start_clean_shell "$pane"
 done
+# Pane options do not survive a server restart: only the sidecar's
+# rw_endpoint field can keep the replay away from this pane.
+tmux -L "$SOCKET" set-option -pu -t "$remote_pane" @rw-endpoint
 env TMUX="$SERVER_TMUX" TMUX_WORKSPACE_RESURRECT_STATE_DIR="$STATE_DIR" \
   TMUX_RESURRECT_DIR="$RESURRECT_DIR" TMUX_WORKSPACE_RESURRECT_CONFIG="$CONFIG_FILE" \
   bash "$RESTORE_SCRIPT"
@@ -259,6 +274,10 @@ for pane in "$codexf_pane" "$codex_pane"; do
     fail 'excluded old Codex command was pasted'
 done
 assert_restore_buffer "$pending_pane" 'echo pending-buffer-survives'
+[ -z "$(tmux -L "$SOCKET" show-option -pqv -t "$remote_pane" @workspace-pending-buffer)" ] ||
+  fail 'remote endpoint pane had a command queued'
+! tmux -L "$SOCKET" capture-pane -p -t "$remote_pane" | grep -q 'remote-must-not-replay' ||
+  fail 'remote endpoint pane had a command pasted'
 
 # The production save wrapper must reject a validly shaped save with reported
 # agent errors and leave its last-successful marker untouched. Its fake plugin

@@ -103,6 +103,16 @@ while IFS= read -r pane_record; do
   IFS= read -r -d '' selected_command < <(printf '%s' "$pane_record" | jq -j '.selected_command, "\u0000"') || true
   selected_source="$(printf '%s' "$pane_record" | jq -r '.selected_source')"
   pending_cursor="$(printf '%s' "$pane_record" | jq -r '.pending_cursor // 0')"
+  rw_endpoint="$(printf '%s' "$pane_record" | jq -r '.rw_endpoint // ""')"
+
+  # A remote endpoint pane was reattached to its worker session by
+  # tmux-remote-workspaces' rw-post-restore.sh, which runs before this replay
+  # in @resurrect-hook-post-restore-all. Its saved local command is stale.
+  if [ -n "$rw_endpoint" ]; then
+    skipped=$((skipped + 1))
+    workspace_log "restore skipped for $logical_id: remote endpoint $rw_endpoint"
+    continue
+  fi
 
   if grep -Fqx "$logical_id" "$sidebar_file" 2>/dev/null || [ -z "$selected_command" ]; then
     continue
@@ -131,6 +141,13 @@ while IFS= read -r pane_record; do
   if [ -n "$(tmux show-option -pt "$pane_id" -qv @workspace-resurrect-skip 2>/dev/null)" ]; then
     skipped=$((skipped + 1))
     workspace_log "restore skipped for $logical_id: @workspace-resurrect-skip is set"
+    continue
+  fi
+  # rw-post-restore.sh stamps @rw-endpoint on every pane it reattached, also
+  # when the snapshot predates the sidecar's rw_endpoint field.
+  if [ -n "$(tmux show-option -pt "$pane_id" -qv @rw-endpoint 2>/dev/null)" ]; then
+    skipped=$((skipped + 1))
+    workspace_log "restore skipped for $logical_id: pane is a remote endpoint"
     continue
   fi
 
