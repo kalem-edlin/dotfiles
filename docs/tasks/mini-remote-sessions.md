@@ -264,6 +264,16 @@ Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
 - C3 agent endpoints record `agent.transcript_id` (pi: the transcript header id). pi export/install/resume-cmd address the exact `<timestamp>_<id>.jsonl`, never the newest file.
 - C6 `libexec/reconcile` applies a min-age (`RW_RECONCILE_MIN_AGE_SECONDS`, default 120) and skips attached sessions, like `reconcile-worker`.
 
+### Changes recorded by the rw smoke-test fix wave (2026-11-18)
+
+- C5 agent detection reads only the current server's SessionStart record, `<state>/agents/server-<pid>-<start>/pane-N.json` (tmux-workspace-resurrect's `workspace_pane_state_file ... write` path), never the legacy flat `agents/pane-N.json`. The claude process pattern (adapters and `rw_provider_pattern`) also matches claudef's patched build `~/.cache/claudef/bin/<version>` and `~/.local/share/claude/versions/<version>`.
+- C2 hand-back discovers agents live on the worker (process tree under each endpoint pane plus the worker's server-scoped records): an agent started after the handoff is exported and resumed locally; a running agent whose session cannot be identified refuses the hand-back (exit 1) before anything is stopped.
+- C5 claude `install` marks the destination folder trusted in that machine's `~/.claude.json` (`projects[<path>].hasTrustDialogAccepted = true`, nothing else changed) -- the one write to that file.
+- C6 `rw-worker-post-restore.sh` kills every restored `rw-*` session (named in the snapshot) whose endpoint no worker-owned mirror lists. Closing worker sessions requests a verified save on the worker (launchd `com.kalem.tmux-resurrect-save` kickstart, or the systemd unit) when sessions remain; `RW_WORKER_SAVE_TRIGGER` overrides the command (tests).
+- C2 `forget` prunes `handoff-backups/root-<id>` and `handoff-staging/root-<id>` on both sides and removes worker parent directories it emptied (not a top-level folder of home); a failed delete is exit 1 with nothing closed. A successful hand-back keeps only the newest backup per side. Endpoint close removes `attach-seen/<endpoint>`.
+- C2 the worker checkout gets the laptop branch's upstream (`branch.<b>.remote/.merge`, adding that remote with the laptop's URL). Preflight skips the git-host auth probe for local-path and `file://` remotes.
+- C3 attach loops log `reconnect` / `attached` in events.jsonl at the moment they reattach.
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: needs a worker-to-laptop push of `@agent_*` (candidate: the attach loop's ssh ControlMaster carrying a tiny state stream into the laptop pane's options). The picker then drops the early return at `snapshot.go:415` and the Working guard covers remote agents.
