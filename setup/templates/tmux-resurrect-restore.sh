@@ -66,9 +66,10 @@
 # back off instead of judging a session absent.
 #
 # --state: print one word, no side effects: `none` (no server, no boot
-# restore running), `restoring` (live boot lock, bootstrap session, or a
-# guarded restore running), `incomplete <marker>` (a live server whose last
-# restore did not complete: saves are refused), or `ready`. rw reads it
+# restore running), `restoring` (live boot lock, a guarded restore running,
+# or a bootstrap session with no marker), `incomplete <marker>` (a live
+# server whose last restore did not complete and that nothing is restoring:
+# saves are refused), or `ready`. rw reads it
 # before it creates an endpoint session (rw_worker_server_sh in
 # tmux-remote-workspaces/scripts/common.sh).
 #
@@ -243,7 +244,7 @@ if [ "${1:-}" = "--state" ]; then
     if boot_lock_live; then echo restoring; else echo none; fi
     exit 0
   fi
-  if boot_lock_live || boot_session_exists; then
+  if boot_lock_live; then
     echo restoring
     exit 0
   fi
@@ -252,10 +253,14 @@ if [ "${1:-}" = "--state" ]; then
     exit 0
   }
   lifecycle_paths "$pid"
+  # A restore that gave up leaves the marker, and the bootstrap session too
+  # when it brought sessions back: that is incomplete, not in progress.
   if restore_owner_live; then
     echo restoring
   elif [ -e "$restore_incomplete" ]; then
     printf 'incomplete %s\n' "$restore_incomplete"
+  elif boot_session_exists; then
+    echo restoring
   else
     echo ready
   fi

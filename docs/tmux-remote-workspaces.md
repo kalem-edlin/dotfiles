@@ -415,6 +415,33 @@ lock, so two laptop panes cannot race a restore. After any worker restore,
 worker resume through `claudef` and `pif`, so the worker's verified save
 captures them.
 
+rw never starts the worker's tmux server with a bare `tmux new-session`. That
+would load the worker's `tmux.conf`, whose Continuum restore-on-start then runs
+the guarded restore into the server rw just made. That restore fails and
+leaves the incomplete-restore marker
+(`<TMPDIR>/tmux-resurrect-<server pid>-restore-incomplete`), and every later
+verified save on the worker is refused. When `rw handoff`, `rw open` or an
+attach loop's rebuild finds no server, rw runs the boot restore wrapper with
+`--start <session> <dir>`. The wrapper restores the last snapshot and creates
+the session before it drops its bootstrap session. With no snapshot it starts
+an empty server and removes the marker that Continuum's empty attempt left.
+rw waits up to 120 s (`RW_WORKER_START_TIMEOUT`) for a restore in progress or
+a boot lock (wrapper exit 75). rw refuses a live server whose last restore did
+not complete, because nothing created there would ever be saved. The refusal
+is one line naming the marker and the remedy: run the guarded restore
+(`prefix C-M-r`) or restart the server. `rw handoff` checks this before any
+agent stops. `rw doctor` reports the state for each worker and lists markers
+of servers that have exited. The wrapper deletes those markers on its next
+run.
+
+After rw creates or closes worker sessions, it asks the worker for a verified
+save without waiting for the result. The worker runs the trigger in the
+background under `nohup`, and its shell returns at once. This machine's ssh
+runs detached, so no command or pane waits on it. `launchctl kickstart` of a
+job spawned less than its `ThrottleInterval` ago (10 s by default) blocks
+until that window has passed. When rw waited on it, a split made right after
+a close took 5 to 9 s longer.
+
 `prefix Ctrl-s` saves and verifies the focus machine. When the focused pane is
 remote-backed, it then runs the same verifier on that worker and updates the
 remote freshness chip only after success.

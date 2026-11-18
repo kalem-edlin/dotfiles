@@ -92,7 +92,7 @@ export TMUX_RESURRECT_RESTORE_DIR="$SANDBOX/snap"
 export TMUX_RESURRECT_RESTORE_PLUGIN_DIR="$SANDBOX/plugin"
 export TMUX_RESURRECT_GUARDED_RESTORE_SCRIPT="$SANDBOX/guarded-restore"
 export TMUX_RESURRECT_RW_POST_RESTORE_SCRIPT="$SANDBOX/post-restore"
-export TMUX_RESURRECT_RESTORE_CONTINUUM_WAIT=2
+export TMUX_RESURRECT_RESTORE_CONTINUUM_WAIT=0
 export TMUX_RESURRECT_MARKER_DIRS="$SANDBOX/server-tmp"
 export RW_WORKER_START_TIMEOUT=5
 printf '%s\n' "$SANDBOX/server-tmp" >"$FT/tmpdir"
@@ -252,14 +252,14 @@ server_down
 echo partial >"$FT/restore"
 rw_create_remote_session fakeworker "$S1" "$WD" 3
 check "partial restore: creation refused" test "$?" -ne 0
-printf "DEBUG err=%s\n" "$RW_WORKER_SERVER_ERROR"; check "  the error names the marker and the remedy" \
+check "  the error names the marker and the remedy" \
   bash -c "grep -q '$MARKER' <<<\"\$1\" && grep -q 'prefix C-M-r' <<<\"\$1\"" _ "$RW_WORKER_SERVER_ERROR"
 check "  the endpoint session was not created" bash -c "! grep -qx '$S1' '$FT/sessions'"
 
 # --- the commands refuse with the message -------------------------------------
 proj="$HOME/Developer/refused"
 make_plain "$proj"
-rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"; cat "$SANDBOX/err"
+rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"
 eq "handoff onto a server with an incomplete restore: exit 1" "$?" "1"
 check "  one rw: line naming the marker and the remedy" \
   bash -c "grep -q '$MARKER' '$SANDBOX/err' && grep -q 'prefix C-M-r' '$SANDBOX/err' && grep -q 'nothing was moved' '$SANDBOX/err'"
@@ -268,14 +268,14 @@ check "  nothing was copied to the worker" test ! -e "$FAKE_WORKER_HOME/Develope
 
 server_down
 echo fail >"$FT/restore"
-rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"; cat "$SANDBOX/err"
+rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"
 eq "handoff when the boot restore fails: exit 1" "$?" "1"
 check "  says so before anything moves" bash -c "grep -q 'did not bring its tmux server up' '$SANDBOX/err' && grep -q 'nothing was moved' '$SANDBOX/err'"
 
 # rw open on a root the worker owns (handed off while the server was fine).
 server_down
 echo ok >"$FT/restore"
-rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"; cat "$SANDBOX/err"
+rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"
 eq "handoff once the restore works: exit 0" "$?" "0"
 server_down
 echo partial >"$FT/restore"
@@ -289,6 +289,7 @@ eq "  no endpoint was recorded" "$(rw_owned_record_read "$(rw_root_id Developer/
 server_down
 rm -f "$SANDBOX/snap/last"
 echo fail >"$FT/continuum"
+export TMUX_RESURRECT_RESTORE_CONTINUUM_WAIT=3
 rw_create_remote_session fakeworker "$S1" "$WD" 3
 eq "no snapshot: the session is created" "$?" "0"
 check "  through a wrapper-started server (tmux.conf, bootstrap first)" \
