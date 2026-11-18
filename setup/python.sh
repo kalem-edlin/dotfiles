@@ -63,3 +63,31 @@ else
     pipx install httpie  # Better curl for API testing
 fi
 echo "✓ pipx configured!"
+
+# uv tools (isolated CLIs in ~/.local/share/uv/tools, entry points linked
+# into ~/.local/bin). macOS gets uv from the Brewfiles; Linux distro
+# packages lack it, so bootstrap it through pipx there.
+if ! command -v uv &> /dev/null; then
+    if [[ -x "$HOME/.local/bin/uv" ]]; then
+        export PATH="$HOME/.local/bin:$PATH"
+    else
+        echo "uv not found; installing uv via pipx..."
+        pipx install uv
+        export PATH="$HOME/.local/bin:$PATH"
+    fi
+fi
+
+# notebooklm-mcp-cli: the `nlm` CLI and `notebooklm-mcp` server for
+# NotebookLM (kept for its podcast generation). Its Google login is per
+# machine and never copied between hosts: run `nlm login` once on each.
+UV_TOOLS=(notebooklm-mcp-cli)
+for tool in "${UV_TOOLS[@]}"; do
+    if uv tool list 2>/dev/null | grep -q "^$tool "; then
+        echo "$tool already installed via uv; upgrading..."
+        uv tool upgrade "$tool"
+    else
+        echo "Installing $tool via uv..."
+        uv tool install "$tool"
+    fi
+done
+echo "✓ uv tools installed!"
