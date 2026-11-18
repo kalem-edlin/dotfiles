@@ -46,7 +46,9 @@ done
 if [ -n "$by_endpoint" ]; then
   rw_endpoint_exists "$by_endpoint" || rw_die "rw close: endpoint '$by_endpoint' is not registered" 7
   root_id="$(rw_read_endpoint "$by_endpoint" | jq -r '.root_id // empty')"
+  by_worker="$(rw_read_endpoint "$by_endpoint" | jq -r '.worker // empty')"
   rw_close_endpoint_core "$by_endpoint" "$reason"
+  [ -n "$by_worker" ] && rw_worker_request_save "$by_worker"
   if [ -n "$root_id" ] && rw_owned_record_read "$root_id" >/dev/null 2>&1; then
     rw_owned_record_write "$root_id" "$(rw_owned_record_read "$root_id" | jq -c --arg e "$by_endpoint" '.endpoints = ((.endpoints // []) - [$e])')"
   fi
@@ -66,7 +68,9 @@ fi
 # shared with libexec/reconcile's orphan disposal and attach-loop.sh's
 # remote-intentional-close discrimination so this ordering exists in one
 # place (common.sh).
+close_worker="$(rw_read_endpoint "$endpoint_id" 2>/dev/null | jq -r '.worker // empty')"
 rw_close_endpoint_core "$endpoint_id" "$reason"
+[ -n "$close_worker" ] && rw_worker_request_save "$close_worker"
 
 rw_pane_unset "$pane_id" @rw-endpoint
 rw_pane_unset "$pane_id" @rw-worker

@@ -178,7 +178,7 @@ cmd_manifest() {
 # ---------------------------------------------------------------------------
 
 cmd_sync() {
-  local direction="" source_path="" dest_path="" pull="false"
+  local direction="" source_path="" dest_path="" pull="false" sync_label="rw handoff"
   local endpoint_id="" state_file="" kind="" dest_manifest="" dest_manifest_set="false"
   local resolve="" manifest_out="" token=""
   # Local-machine defaults (this process's own state dir, override-aware for
@@ -216,6 +216,11 @@ cmd_sync() {
     esac
   done
 
+  # Messages name the operation the user ran.
+  case "$direction" in
+    handoff) sync_label="rw handoff" ;;
+    *) sync_label="rw handback" ;;
+  esac
   case "$direction" in
     handoff | handback | return) : ;;
     *) rw_die "handoff sync: --direction must be 'handoff' or 'handback'" 64 ;;
@@ -277,7 +282,7 @@ cmd_sync() {
     sm_src="$(exec_source "cd $sq_source 2>/dev/null && $sm_probe" 2>/dev/null | tr -d '\r')"
     sm_dst="$(exec_dest "cd $sq_dest 2>/dev/null && $sm_probe" 2>/dev/null | tr -d '\r')"
     if [ -n "$sm_src$sm_dst" ]; then
-      rw_warn "handoff sync: '${sm_src:-$sm_dst}' is a git submodule; roots with submodules cannot be handed off (their content would not travel). Nothing was touched."
+      rw_warn "$sync_label: '${sm_src:-$sm_dst}' is a git submodule; roots with submodules cannot be handed off (their content would not travel). Nothing was touched."
       return 1
     fi
   fi
@@ -322,7 +327,7 @@ cmd_sync() {
     [ -n "$head_commit" ] || rw_die "handoff sync: --source-path has no commits (empty repo) -- nothing to hand off" 64
     [ "$branch" = "HEAD" ] && detached="true"
 
-    rw_warn "handoff: capturing source state at $source_path ($branch @ ${head_commit:0:12})"
+    rw_warn "$sync_label: capturing source state at $source_path ($branch @ ${head_commit:0:12})"
 
     # Ask the destination what it already has, so the bundle only carries
     # what it lacks (unpushed commits travel without touching origin).
@@ -414,17 +419,17 @@ cmd_sync() {
       local inflight_mark
       inflight_mark="$(exec_dest "cat $(rw_sync_shquote "$inflight_file") 2>/dev/null" 2>/dev/null | tr -d '\r\n')"
       if [ -n "$inflight_mark" ] && [ "$inflight_mark" = "${baseline_fp:-none}" ]; then
-        rw_warn "handoff sync: resuming an interrupted sync of '$dest_path'."
+        rw_warn "$sync_label: resuming an interrupted sync of '$dest_path'."
       else
         duration_ms="$(rw_elapsed_ms "$start_ts")"
         if [ -z "$baseline_fp" ]; then
           rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
             "diverged: existing destination repository with no sync record"
-          rw_warn "handoff sync: '$dest_path' is an existing repository whose state differs from the source, and there is no record of an earlier sync to compare it with."
+          rw_warn "$sync_label: '$dest_path' is an existing repository whose state differs from the source, and there is no record of an earlier sync to compare it with."
         else
           rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
             "diverged: destination git state changed since it was last synchronized"
-          rw_warn "handoff sync: the destination's git state (commits, staged/unstaged changes, untracked file list) changed since it was last synchronized."
+          rw_warn "$sync_label: the destination's git state (commits, staged/unstaged changes, untracked file list) changed since it was last synchronized."
         fi
         rw_warn "Neither side has been touched. Reconcile manually (inspect '$dest_path'), or re-run with --force-diverged to overwrite it (a destination backup is still taken first)."
         return 2
@@ -446,7 +451,7 @@ cmd_sync() {
   # almost always a mistake (wrong mount, wiped directory), so it needs an
   # explicit overwrite.
   if [ "$kind" = "plain" ] && [ ! -s "$src_now" ] && [ -s "$dest_now" ] && [ "$resolve" != "overwrite" ]; then
-    rw_warn "handoff sync: '$source_path' has no files, so this would delete all $(wc -l <"$dest_now" | tr -d ' ') file(s) in '$dest_path'. Nothing was touched; re-run with --resolve overwrite if that is intended."
+    rw_warn "$sync_label: '$source_path' has no files, so this would delete all $(wc -l <"$dest_now" | tr -d ' ') file(s) in '$dest_path'. Nothing was touched; re-run with --resolve overwrite if that is intended."
     return 1
   fi
   if [ "$dest_manifest_set" = "true" ]; then
@@ -464,13 +469,13 @@ cmd_sync() {
           duration_ms="$(rw_elapsed_ms "$start_ts")"
           rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" \
             "manifest_conflict:$(wc -l <"$conflicts" | tr -d ' ')"
-          rw_warn "handoff sync: $(wc -l <"$conflicts" | tr -d ' ') file(s) in '$dest_path' changed since it was last synchronized; nothing was touched. Re-run with --resolve overwrite|keep-both|abort."
+          rw_warn "$sync_label: $(wc -l <"$conflicts" | tr -d ' ') file(s) in '$dest_path' changed since it was last synchronized; nothing was touched. Re-run with --resolve overwrite|keep-both|abort."
           cat "$conflicts"
           return 5
           ;;
         overwrite)
           overwritten_count="$(wc -l <"$conflicts" | tr -d ' ')"
-          rw_warn "handoff sync: overwriting $overwritten_count changed file(s) in '$dest_path' (--resolve overwrite)."
+          rw_warn "$sync_label: overwriting $overwritten_count changed file(s) in '$dest_path' (--resolve overwrite)."
           ;;
         keep-both)
           local kb_script="$work_dir/keep-both.sh" kb_stamp
@@ -485,11 +490,11 @@ cmd_sync() {
             done
           } >"$kb_script"
           if ! exec_dest_script "$kb_script" >"$protect_list" 2>"$work_dir/keep-both.err"; then
-            rw_warn "handoff sync: keep-both rename failed on the destination: $(cat "$work_dir/keep-both.err")"
+            rw_warn "$sync_label: keep-both rename failed on the destination: $(cat "$work_dir/keep-both.err")"
             return 1
           fi
           renamed_count="$(wc -l <"$protect_list" | tr -d ' ')"
-          rw_warn "handoff sync: kept $renamed_count destination file(s) as <file>.local-$kb_stamp (--resolve keep-both)."
+          rw_warn "$sync_label: kept $renamed_count destination file(s) as <file>.local-$kb_stamp (--resolve keep-both)."
           ;;
       esac
     fi
@@ -540,7 +545,7 @@ cmd_sync() {
     if ! tar -C "$snap_dir" -cf - . | exec_dest "tar -C $(rw_sync_shquote "$staging_dir") -xf -"; then
       duration_ms="$(rw_elapsed_ms "$start_ts")"
       rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "transfer_interrupted"
-      rw_warn "handoff sync: transfer to destination was interrupted. The live destination at '$dest_path' was never touched; the source at '$source_path' was never touched. Partial staging data (if any) is inert at '$staging_dir' on the destination and safe to delete."
+      rw_warn "$sync_label: transfer to destination was interrupted. The live destination at '$dest_path' was never touched; the source at '$source_path' was never touched. Partial staging data (if any) is inert at '$staging_dir' on the destination and safe to delete."
       return 3
     fi
 
@@ -551,7 +556,7 @@ cmd_sync() {
     if [ "$remote_head" != "$head_commit" ]; then
       duration_ms="$(rw_elapsed_ms "$start_ts")"
       rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "staging_verify_failed"
-      rw_warn "handoff sync: staged transfer at '$staging_dir' on the destination failed verification (meta.json missing or head_commit mismatch). The live destination at '$dest_path' was never touched; the source was never touched."
+      rw_warn "$sync_label: staged transfer at '$staging_dir' on the destination failed verification (meta.json missing or head_commit mismatch). The live destination at '$dest_path' was never touched; the source was never touched."
       return 3
     fi
 
@@ -587,10 +592,10 @@ EOS
       if [ "$bkout" != "backup-ok" ]; then
         duration_ms="$(rw_elapsed_ms "$start_ts")"
         rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "backup_failed"
-        rw_warn "handoff sync: could not create the pre-overwrite destination backup ($(cat "$work_dir/backup.err" 2>/dev/null)); refusing to overwrite '$dest_path'. Source and (previous) destination content are both untouched."
+        rw_warn "$sync_label: could not create the pre-overwrite destination backup ($(cat "$work_dir/backup.err" 2>/dev/null)); refusing to overwrite '$dest_path'. Source and (previous) destination content are both untouched."
         return 1
       fi
-      rw_warn "handoff: backed up destination's prior state to $backup_dir on the destination host"
+      rw_warn "$sync_label: backed up destination's prior state to $backup_dir on the destination host"
     fi
 
     # --- apply: staging -> live destination ---------------------------------
@@ -679,7 +684,7 @@ EOS
     if [ "$apply_status" -ne 0 ] || [ "$apply_out" != "apply-ok" ]; then
       duration_ms="$(rw_elapsed_ms "$start_ts")"
       rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "apply_failed:exit=$apply_status"
-      rw_warn "handoff sync: apply step failed on the destination (exit $apply_status): $(cat "$work_dir/apply.err" 2>/dev/null)."
+      rw_warn "$sync_label: apply step failed on the destination (exit $apply_status): $(cat "$work_dir/apply.err" 2>/dev/null)."
       if [ -n "$backup_dir" ]; then
         rw_warn "The pre-overwrite destination backup is at '$backup_dir' on the destination host and can be restored manually (git fetch its bundle.git, git apply its patches, tar -x its untracked.tar)."
       fi
@@ -698,11 +703,11 @@ EOS
       source_fp_now="$(printf '%s' "$source_fp_now" | tr -d '\r\n')"
       if [ "$source_fp_now" != "$source_fingerprint" ]; then
         rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "source_changed_during_sync"
-        rw_warn "handoff sync: the SOURCE workspace changed while the handoff was in flight (another writer -- a running agent, editor, or autosave -- is mutating '$source_path'). Nothing is corrupted; the destination holds the mid-flight snapshot. Stop or pause the other writer and re-run the handoff."
+        rw_warn "$sync_label: the SOURCE workspace changed while the handoff was in flight (another writer -- a running agent, editor, or autosave -- is mutating '$source_path'). Nothing is corrupted; the destination holds the mid-flight snapshot. Stop or pause the other writer and re-run the handoff."
         return 4
       fi
       rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "post_apply_verify_mismatch"
-      rw_warn "handoff sync: destination content does not match the captured source snapshot after apply (fingerprint mismatch). Destination was modified but is not verified correct -- inspect '$dest_path'; a pre-overwrite backup is at '${backup_dir:-<none, dest was empty>}'."
+      rw_warn "$sync_label: destination content does not match the captured source snapshot after apply (fingerprint mismatch). Destination was modified but is not verified correct -- inspect '$dest_path'; a pre-overwrite backup is at '${backup_dir:-<none, dest was empty>}'."
       return 4
     fi
   else
@@ -731,10 +736,10 @@ EOS
         printf 'COPYFILE_DISABLE=1 tar -cf %q/files.tar -T "$__rw_list.present" && printf "backup-ok\\n"\n' "$backup_dir"
       } >"$pbk"
       if [ "$(exec_dest_script "$pbk" 2>"$work_dir/plain-backup.err")" != "backup-ok" ]; then
-        rw_warn "handoff sync: could not back up the $(wc -l <"$at_risk" | tr -d ' ') destination file(s) this transfer replaces ($(cat "$work_dir/plain-backup.err" 2>/dev/null)); nothing was overwritten."
+        rw_warn "$sync_label: could not back up the $(wc -l <"$at_risk" | tr -d ' ') destination file(s) this transfer replaces ($(cat "$work_dir/plain-backup.err" 2>/dev/null)); nothing was overwritten."
         return 1
       fi
-      rw_warn "handoff: backed up $(wc -l <"$at_risk" | tr -d ' ') destination file(s) to $backup_dir on the destination host"
+      rw_warn "$sync_label: backed up $(wc -l <"$at_risk" | tr -d ' ') destination file(s) to $backup_dir on the destination host"
     fi
   fi
 
@@ -770,7 +775,7 @@ EOS
     rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "rsync_failed"
     local backup_note=""
     [ -n "$backup_dir" ] && backup_note=" (git backup at $backup_dir)"
-    rw_warn "handoff sync: the rsync channel failed: $(tail -n 5 "$work_dir/rsync.err" 2>/dev/null). The destination may be partially updated; re-run the same command to converge$backup_note."
+    rw_warn "$sync_label: the rsync channel failed: $(tail -n 5 "$work_dir/rsync.err" 2>/dev/null). The destination may be partially updated; re-run the same command to converge$backup_note."
     return 4
   fi
 
@@ -781,7 +786,7 @@ EOS
   if ! rw_sync_manifests_equal "$source_post" "$dest_post"; then
     duration_ms="$(rw_elapsed_ms "$start_ts")"
     rw_log_event "$direction" "$endpoint_id" "$dest_worker" "$duration_ms" "fail" "rsync_verify_mismatch"
-    rw_warn "handoff sync: after the rsync channel the two copies still differ ($(rw_sync_manifest_diff "$source_post" "$dest_post" | wc -l | tr -d ' ') file(s), e.g. $(rw_sync_manifest_diff "$source_post" "$dest_post" | head -n 3 | cut -f2 | paste -sd, -)). Usually another writer (a running agent, dev server, or build) is changing '$source_path'; stop it and re-run."
+    rw_warn "$sync_label: after the rsync channel the two copies still differ ($(rw_sync_manifest_diff "$source_post" "$dest_post" | wc -l | tr -d ' ') file(s), e.g. $(rw_sync_manifest_diff "$source_post" "$dest_post" | head -n 3 | cut -f2 | paste -sd, -)). Usually another writer (a running agent, dev server, or build) is changing '$source_path'; stop it and re-run."
     return 4
   fi
   if [ "$kind" = "git" ]; then

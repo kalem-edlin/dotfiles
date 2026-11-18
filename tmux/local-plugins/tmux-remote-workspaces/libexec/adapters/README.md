@@ -48,11 +48,20 @@ Two-step detection, mirroring (not reinventing) the prior art in
 1. **Liveness**: walk the pane's process tree (`common-adapter.sh`'s
    `ca_pane_has_process`) looking for the provider binary. This walks actual
    descendants rather than trusting tmux's `#{pane_current_command}` alone,
-   because npm-launched CLIs (codex, pi) commonly surface as `node` there.
+   because npm-launched CLIs (codex, pi) commonly surface as `node` there,
+   and claudef execs a patched build at `~/.cache/claudef/bin/<version>`
+   (tmux then shows the bare version, e.g. `2.1.327`). The claude pattern
+   matches bare `claude`, that build, and the native
+   `~/.local/share/claude/versions/<version>`; `scripts/common.sh`'s
+   `rw_provider_pattern` (used to verify a resume and to stop an agent) is
+   kept identical.
 2. **Session identity**: read the per-pane JSON that
-   `tmux-workspace-resurrect/scripts/record-agent-session.sh` already
-   deposits at `$XDG_STATE_HOME/tmux-workspace-resurrect/agents/pane-<id>.json`
-   via each provider's own `SessionStart` hook/extension. Adapters are a
+   `tmux-workspace-resurrect/scripts/record-agent-session.sh` deposits via
+   each provider's own `SessionStart` hook/extension, for the CURRENT tmux
+   server only: `<state>/agents/server-<pid>-<start_time>/pane-<id>.json`
+   (the path from that plugin's `workspace_pane_state_file ... write`).
+   The legacy flat `agents/pane-<id>.json` is never read: pane ids restart
+   with every server, so it names a stale session. Adapters are a
    **read-only consumer** of this file; they never write it.
 
 If the process is running but no recorded state exists (hook never fired,
@@ -87,7 +96,11 @@ transcript_file, exported_at). `--project-path` is the **source** path
 export reads it over SSH from that worker instead of locally (this is how a
 *return* handoff starts). Auth state is never touched by any adapter --
 Claude's `~/.claude.json` and Codex's `~/.codex/auth.json` /
-`~/.codex/config.toml` are never read or copied.
+`~/.codex/config.toml` are never read or copied. The one exception: Claude's
+`install` marks the destination folder trusted in that machine's own
+`~/.claude.json` (`projects["<path>"].hasTrustDialogAccepted = true`, every
+other key kept, an already trusted folder left untouched), so a resumed
+session never stops at the "trust this folder" dialog.
 
 Exit 4 if no matching transcript exists to export (gated/not-resumable).
 

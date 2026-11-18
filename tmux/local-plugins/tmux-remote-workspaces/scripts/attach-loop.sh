@@ -448,6 +448,11 @@ attach_loop_main() {
 
     start_ts="$(rw_now_epoch)"
     echo "rw: attaching to $worker ($session_name), attempt $attempt..."
+    # Record the reattach when it happens: the event logged after ssh returns
+    # only appears once that attachment ends, which can be hours later.
+    if [ "$event" = "reconnect" ]; then
+      rw_log_event "reconnect" "$endpoint_id" "$worker" "" "attached" "attempt=$attempt"
+    fi
 
     # TERM=screen-256color: the only ssh call here that allocates a PTY, so the
     # only one that forwards TERM. The focus terminal may be one the worker's

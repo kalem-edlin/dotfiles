@@ -98,6 +98,7 @@ fi
 for id in ${zombies[@]+"${zombies[@]}"}; do
   rw_close_endpoint_core "$id" "reconcile:worker-zombie" "$worker" </dev/null
 done
+rw_worker_request_save "$worker"
 
 duration_ms="$(rw_elapsed_ms "$start_ts")"
 rw_log_event "reconcile" "" "$worker" "$duration_ms" "success" "scope=worker closed=$count ids=${zombies[*]}"

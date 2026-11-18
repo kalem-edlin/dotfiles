@@ -70,16 +70,36 @@ ca_workspace_state_dir() {
   printf '%s\n' "${TMUX_WORKSPACE_RESURRECT_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-workspace-resurrect}"
 }
 
+CA_WORKSPACE_COMMON="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tmux-workspace-resurrect/scripts/common.sh"
+
+# ca_pane_agent_state_file <pane-id>
+# The agent state the SessionStart hook wrote for this pane on the CURRENT
+# tmux server: <state>/agents/server-<pid>-<start_time>/pane-N.json (since
+# 73e623a). Never the legacy flat agents/pane-N.json: pane ids restart with
+# every server, so a flat file from an older server names some other,
+# long-gone session (a handoff would resume it). The path comes from
+# tmux-workspace-resurrect's own workspace_pane_state_file, whose "write"
+# form is exactly the scoped path (its "read" form falls back to the flat
+# file, which is the bug this avoids).
 ca_pane_agent_state_file() {
-  local pane_id="${1#%}"
-  printf '%s/agents/pane-%s.json\n' "$(ca_workspace_state_dir)" "$pane_id"
+  local pane_id="${1#%}" identity
+  if [ -f "$CA_WORKSPACE_COMMON" ]; then
+    (
+      # shellcheck source=/dev/null
+      source "$CA_WORKSPACE_COMMON" && workspace_pane_state_file "$pane_id" write
+    )
+    return
+  fi
+  identity="$(tmux display-message -p '#{pid}:#{start_time}' 2>/dev/null || true)"
+  [[ "$identity" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+  printf '%s/agents/server-%s/pane-%s.json\n' "$(ca_workspace_state_dir)" "${identity/:/-}" "$pane_id"
 }
 
 # Prints the recorded state JSON for a pane iff it exists and its "tool"
 # field matches the given provider. Empty output (and failure) otherwise.
 ca_read_pane_agent_state() {
   local pane_id="$1" provider="$2" file
-  file="$(ca_pane_agent_state_file "$pane_id")"
+  file="$(ca_pane_agent_state_file "$pane_id")" || return 1
   [ -f "$file" ] || return 1
   local json tool
   json="$(cat "$file" 2>/dev/null)" || return 1
@@ -155,7 +175,11 @@ ca_pane_has_process() {
 # Per-provider process-match patterns (extended regex, case-insensitive).
 # Bounded on both sides so short names ("pi") don't match unrelated
 # commands ("pip", "print", ...).
-ca_patterns_claude() { printf '%s\n' '(^|/)claude([[:space:]]|$)'; }
+# claude: the bare binary, its versioned native install, and claudef's
+# patched build (~/.cache/claudef/bin/<version>, exec'd by claudef; tmux
+# then reports pane_current_command as the bare version, e.g. 2.1.327).
+# Keep in sync with rw_provider_pattern in scripts/common.sh.
+ca_patterns_claude() { printf '%s\n' '(^|/)claude([[:space:]]|$)' '/claudef/bin/[^/[:space:]]+([[:space:]]|$)' '/claude/versions/[^/[:space:]]+([[:space:]]|$)'; }
 ca_patterns_codex() { printf '%s\n' '(^|/)codex([[:space:]]|$)' 'codex\.js' 'codex-darwin' 'codex-linux'; }
 ca_patterns_pi() { printf '%s\n' '(^|/)pi([[:space:]]|$)' 'pi-coding-agent'; }
 

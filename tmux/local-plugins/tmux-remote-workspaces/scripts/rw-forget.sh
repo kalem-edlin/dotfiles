@@ -81,6 +81,7 @@ fi
 
 start_ts="$(rw_now_epoch)"
 unreachable=0
+failures=0
 for w in "${workers[@]}"; do
   rw_worker_known "$w" || { rw_warn "rw forget: '$w' is no longer in config.json; skipped."; continue; }
   status=0
@@ -115,6 +116,11 @@ for w in "${workers[@]}"; do
     rw_warn "rw forget: lost contact with '$w' while deleting its copy of '$root_rel'; nothing changed, retry later."
     continue
   }
+  if [ "$result" = "failed" ]; then
+    failures=$((failures + 1))
+    rw_warn "rw forget: could not delete the copy of '$root_rel' on '$w'; its panes stay open. Inspect it there and retry."
+    continue
+  fi
   if [ -n "$record" ] && [ "$rec_worker" = "$w" ]; then
     # shellcheck disable=SC2207 # endpoint ids are fixed-format hex
     eps=($(rw_owned_record_read "$root_id" 2>/dev/null | jq -r '.endpoints[]?'))
@@ -122,6 +128,7 @@ for w in "${workers[@]}"; do
     rw_owned_record_remove "$root_id"
   fi
   rw_held_unmark "$w" "$root_id"
+  rw_forget_local_backups "$root_id"
   case "$result" in
     deleted) printf 'rw: deleted the copy of %s on %s.\n' "$root_rel" "$w" ;;
     kept) printf 'rw: left the copy of %s on %s in place: that directory existed before rw handed the root off.\n' "$root_rel" "$w" ;;
@@ -132,5 +139,6 @@ for w in "${workers[@]}"; do
   rw_reconcile_pending "$w" "$home"
 done
 
+[ "$failures" -eq 0 ] || exit 1
 [ "$unreachable" -eq 0 ] || exit 6
 exit 0

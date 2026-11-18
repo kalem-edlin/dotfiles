@@ -199,6 +199,7 @@ while [ "$i" -lt "$worker_count" ]; do
   remote_now="$(printf '%s\n' "$remote_listing" | tail -n1)"
   case "$remote_now" in *[!0-9]* | '') continue ;; esac # unreachable/garbled -- zero candidates, never "everything is orphaned"
   remote_sessions="$(printf '%s\n' "$remote_listing" | sed '$d')"
+  closed_before="$closed"
   [ -n "$remote_sessions" ] || continue
 
   while read -r session_name session_created session_attached; do
@@ -231,6 +232,8 @@ while [ "$i" -lt "$worker_count" ]; do
     fi
     closed=$((closed + 1))
   done <<<"$remote_sessions"
+  # Closed something here: refresh that worker's snapshot (async).
+  [ "$dry_run" = "true" ] || [ "$closed" -eq "${closed_before:-0}" ] || rw_worker_request_save "$worker_alias"
 done
 
 duration_ms="$(rw_elapsed_ms "$start_ts")"

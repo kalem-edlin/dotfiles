@@ -331,6 +331,8 @@ rw_close_endpoint_core() {
 
   rw_write_tombstone "$endpoint_id" "$generation" "$reason"
   rm -f "$(rw_endpoint_file "$endpoint_id")"
+  # The attach loop's per-endpoint "last seen on server" marker.
+  rm -f "$(rw_state_dir)/attach-seen/$endpoint_id"
 
   remote_outcome="skipped"
   if [ -n "$worker" ]; then
@@ -446,7 +448,9 @@ rw_ssh_batch() {
 
 rw_provider_pattern() {
   case "$1" in
-    claude) printf '%s\n' '(^|/)claude([[:space:]]|$)' ;;
+    # Keep in sync with ca_patterns_claude: bare claude, the versioned
+    # native install, and claudef's patched build in ~/.cache/claudef/bin.
+    claude) printf '%s\n' '(^|/)claude([[:space:]]|$)|/claudef/bin/[^/[:space:]]+([[:space:]]|$)|/claude/versions/[^/[:space:]]+([[:space:]]|$)' ;;
     codex) printf '%s\n' '(^|/)codex([[:space:]]|$)|codex\.js|codex-darwin|codex-linux' ;;
     pi) printf '%s\n' '(^|/)pi([[:space:]]|$)|pi-coding-agent' ;;
     *) printf '%s\n' "$1" ;;
@@ -631,6 +635,20 @@ rw_git_remote_identity() {
   url="$(git -C "$path" remote get-url origin 2>/dev/null)" || return 0
   [ -n "$url" ] || return 0
   rw_normalize_git_remote "$url"
+}
+
+# rw_git_remote_is_network <url>
+# True for a remote reached over the network (ssh://, https://, git://,
+# scp-like host:path); false for a local path or file:// URL, which has no
+# host to authenticate against.
+rw_git_remote_is_network() {
+  case "$1" in
+    file://*) return 1 ;;
+    *://*) return 0 ;;
+    /* | ./* | ../* | '~'* | '') return 1 ;;
+  esac
+  case "${1%%/*}" in *:*) return 0 ;; esac
+  return 1
 }
 
 rw_git_toplevel() {
@@ -951,4 +969,19 @@ rw_root_unlock_all() {
     rm -rf "$(rw_root_lock_dir "$id")"
   done
   RW_ROOT_LOCKS_HELD=" "
+}
+
+# rw_worker_request_save <worker>
+# After rw killed sessions on a worker: when sessions remain there, ask the
+# worker for a verified tmux save (its own save agent: launchd on macOS,
+# systemd on Linux), so the snapshot a later restore reads no longer lists
+# the closed sessions. When none remain the server has exited; the worker's
+# post-restore drops any closed session a later restore would revive.
+# Asynchronous and best effort. RW_WORKER_SAVE_TRIGGER replaces the remote
+# command (tests point it at a log file, never at this machine's agents).
+rw_worker_request_save() {
+  local worker="${1:?worker required}" trigger
+  trigger="${RW_WORKER_SAVE_TRIGGER:-launchctl kickstart gui/\$(id -u)/com.kalem.tmux-resurrect-save >/dev/null 2>&1 || systemctl --user start --no-block tmux-resurrect-save.service >/dev/null 2>&1}"
+  rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+    "if tmux list-sessions >/dev/null 2>&1; then $trigger; fi; true" </dev/null >/dev/null 2>&1 || true
 }

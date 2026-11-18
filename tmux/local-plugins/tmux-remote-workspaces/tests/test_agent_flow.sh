@@ -38,7 +38,7 @@ case "$cmd" in
   export)
     out="$(arg --out "$@")"; mkdir -p "$out"
     echo '{"session":1}' >"$out/session.jsonl"
-    echo '{"provider":"claude","session_id":"sess-1"}' >"$out/manifest.json"
+    jq -nc --arg s "$(arg --session-id "$@")" '{provider: "claude", session_id: $s}' >"$out/manifest.json"
     ;;
   install) : ;;
   resume-cmd) printf 'cd %q && claudef --resume %s\n' "$(arg --dest-path "$@")" "$(arg --session-id "$@")" ;;
@@ -126,9 +126,43 @@ export FAKE_LOCAL_RESUME_OK=1
 rm -f "$wroot/app/agent.log"
 rw handback --root "$root" >/dev/null 2>"$SANDBOX/err"
 eq "2: hand-back: exit 0" "$?" "0"
-eq "2: the remote agent's last write reached the laptop copy" "$(cat "$root/app/agent.log" 2>/dev/null)" "last remote write"
+eq "2: the remote agent's last write reached the laptop copy" "$(head -n1 "$root/app/agent.log" 2>/dev/null)" "last remote write"
 check "2: the local agent resumed in the same pane" grep -q "^tmux send-keys -t %1 cd .* && claudef --resume sess-1 Enter" "$FAKE_EVENTS"
 check "2: record deleted" test ! -e "$(rw_owned_record_file "$id")"
 check "2: endpoint closed after every pane was back" order "^tmux send-keys -t %1 cd" "kill-session -t '=rw-.*-$ep'"
+
+# --- C: an agent started on the worker after the handoff comes back too ------------------
+unset FAKE_REMOTE_LASTWRITE
+root2="$HOME/Developer/agentproj2"
+make_plain "$root2"
+wroot2="$FAKE_WORKER_HOME/Developer/agentproj2"
+id2="$(rw_root_id Developer/agentproj2)"
+printf 'pane_id=%%3\tpane_current_path=%s\tsession_name=s2\twindow_index=0\tpane_index=0\tpane_current_command=zsh\tpane_pid=999996\n' "$root2" >"$FAKE_TMUX_PANES"
+export FAKE_AGENT_PANE=%99 # no local agent at handoff time
+rw handoff --worker fakeworker --root "$root2" >/dev/null 2>"$SANDBOX/err"
+eq "C: handoff of a shell-only root: exit 0" "$?" "0"
+check "C: the shell pane went remote" test -n "$(opt %3 @rw-endpoint)"
+# Now a claude agent runs in that remote pane (pane %90 under pid 999999),
+# exec'd by claudef as its patched build, with a SessionStart record on the
+# worker's server-scoped state.
+export FAKE_PS_EXTRA="$SANDBOX/ps-extra"
+echo "999990 999999 /Users/someone/.cache/claudef/bin/2.1.327 --dangerously-skip-permissions --resume live-1" >"$FAKE_PS_EXTRA"
+: >"$FAKE_EVENTS"
+rw handback --root "$root2" >/dev/null 2>"$SANDBOX/err"
+eq "C: an unidentifiable remote agent refuses the hand-back: exit 1" "$?" "1"
+check "C: says it cannot identify it" grep -q "cannot be identified" "$SANDBOX/err"
+eq "C: still remote" "$(jq -r .owner "$(rw_owned_record_file "$id2")")" "worker"
+check "C: nothing was stopped" bash -c "! grep -q 'kill -TERM' '$FAKE_SSH_LOG'"
+state_dir="$XDG_STATE_HOME/tmux-workspace-resurrect/agents/server-4242-1700000000"
+mkdir -p "$state_dir"
+jq -nc --arg cwd "$wroot2" '{tool: "claude", session_id: "live-1", cwd: $cwd}' >"$state_dir/pane-90.json"
+: >"$FAKE_EVENTS"
+rw handback --root "$root2" >/dev/null 2>"$SANDBOX/err"
+eq "C: hand-back with a live remote agent: exit 0" "$?" "0"
+check "C: the live session is exported from the worker" grep -q "^adapter export --session-id live-1 --project-path $wroot2 .*--worker fakeworker" "$FAKE_EVENTS"
+check "C: and resumed here" grep -q "^tmux send-keys -t %3 cd .* && claudef --resume live-1 Enter" "$FAKE_EVENTS"
+check "C: the remote agent was stopped first" order "kill -TERM 999990" "rsync --server"
+check "C: root is local again" test ! -e "$(rw_owned_record_file "$id2")"
+unset FAKE_PS_EXTRA
 
 finish

@@ -360,11 +360,26 @@ if [ "$sync_status" -ne 0 ]; then
   esac
 fi
 
-# Courtesy: give a git destination an `origin` so push/pull work there.
-if [ -n "$repo_remote" ]; then
-  rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
-    "git -C $(rw_shquote "$worker_root") remote get-url origin >/dev/null 2>&1 || git -C $(rw_shquote "$worker_root") remote add origin $(rw_shquote "$repo_remote")" \
-    </dev/null >/dev/null 2>&1 || true
+# Courtesy: give a git destination an `origin`, and the same upstream as the
+# laptop branch, so push/pull work there as they do here.
+if [ "$kind" = "git" ]; then
+  wq="$(rw_shquote "$worker_root")"
+  git_setup=""
+  [ -n "$repo_remote" ] &&
+    git_setup="git -C $wq remote get-url origin >/dev/null 2>&1 || git -C $wq remote add origin $(rw_shquote "$repo_remote"); "
+  up_branch="$(git -C "$root_local" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  if [ -n "$up_branch" ]; then
+    up_remote="$(git -C "$root_local" config "branch.$up_branch.remote" 2>/dev/null || true)"
+    up_merge="$(git -C "$root_local" config "branch.$up_branch.merge" 2>/dev/null || true)"
+    up_url=""
+    [ -n "$up_remote" ] && [ "$up_remote" != "." ] && up_url="$(git -C "$root_local" remote get-url "$up_remote" 2>/dev/null || true)"
+    if [ -n "$up_url" ] && [ -n "$up_merge" ]; then
+      git_setup="$git_setup git -C $wq remote get-url $(rw_shquote "$up_remote") >/dev/null 2>&1 || git -C $wq remote add $(rw_shquote "$up_remote") $(rw_shquote "$up_url"); git -C $wq config $(rw_shquote "branch.$up_branch.remote") $(rw_shquote "$up_remote") && git -C $wq config $(rw_shquote "branch.$up_branch.merge") $(rw_shquote "$up_merge"); "
+    fi
+  fi
+  if [ -n "$git_setup" ]; then
+    rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "$git_setup true" </dev/null >/dev/null 2>&1 || true
+  fi
 fi
 
 mkdir -p "$work/mdir"

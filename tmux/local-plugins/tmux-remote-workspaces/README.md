@@ -63,6 +63,18 @@ rw doctor
   worker is unreachable: it probes the worker first and refuses when it
   answers (use `handback`); `--force` skips the probe. Remote work since
   the handoff stays on the (now stale) remote copy.
+- Closing worker sessions (hand-back, forget, close, reconcile) asks that
+  worker for a verified tmux save while it still has sessions, so its
+  snapshot stops listing them. When none remain the server exits with a
+  stale snapshot; the worker's post-restore (`rw-worker-post-restore.sh`)
+  kills every restored `rw-*` session no worker-owned mirror lists, so a
+  closed session never comes back (a session not in the snapshot, i.e. one
+  rw is creating, is never touched).
+- `forget` also prunes the root's backups and staging on both sides and
+  removes worker parent directories the delete left empty (never a
+  top-level folder of the worker's home); a successful hand-back keeps only
+  the newest backup. Endpoint close removes the attach loop's
+  `attach-seen/<endpoint>` marker.
 - `close --endpoint <id>` closes a registered endpoint no local pane
   carries (e.g. an agent left running on a reclaimed root's stale copy).
 - Every command that changes a root takes a per-root lock
@@ -161,7 +173,11 @@ rw handoff --worker <alias>
 ```
 
 `rw handback` mirrors it: lock, preflight (exit 6 leaves everything as it
-was), stop the remote agents, ONE pull (manifests stored at once, so an
+was), find the agents running in the remote panes NOW (the worker's process
+tree plus its server-scoped SessionStart records), so an agent started on the
+worker after the handoff comes back too and a remote agent whose session
+cannot be identified refuses the hand-back before anything is stopped; stop
+the remote agents, ONE pull (manifests stored at once, so an
 interrupted hand-back retries cleanly), export and install every
 transcript, then give each pane its local shell back and resume its agent
 there. If any pane fails, every pane goes back on its attach loop, the
@@ -386,7 +402,11 @@ typed into the endpoint pane's interactive login shell so the launcher
 resolves whether it is a script on `PATH` or a zsh function, and fnm's node
 is active -- so hooks (agent-state publisher, resurrect session record) run
 on the worker exactly as on the laptop. `versions` refuses (before anything
-moves) when the worker cannot resolve the launcher. pi transcripts travel by
+moves) when the worker cannot resolve the launcher. Claude transcripts are
+installed with the destination folder pre-trusted, so a resumed claudef
+never waits at the trust dialog. A git root's worker checkout gets the same
+`origin` and the same branch upstream as the laptop. Preflight skips the
+git-host authentication probe for a local-path (or `file://`) origin. pi transcripts travel by
 exact id (`<timestamp>_<id>.jsonl`), so two pi agents in one root each
 resume their own session. A pane with no detected
 agent is a workspace-only pane; a busy pane no adapter recognizes aborts

@@ -140,14 +140,85 @@ worker_root="$(printf '%s' "$record" | jq -r '.worker_root // empty')"
 
 rw_reconcile_pending "$worker" "$worker_home"
 
-# Endpoint data, index-aligned.
+# Endpoint data, index-aligned. The agents are discovered LIVE on the
+# worker, not only taken from the endpoint records: an agent started in a
+# remote pane after the handoff (or a different session than the one handed
+# off) must come back too. A pane running an agent whose session cannot be
+# identified refuses the whole hand-back before anything is stopped.
 e_json=()
 e_provider=()
+e_session=()
+e_pfocus=()
+e_pworker=()
+e_mode=()
+e_resume_remote=()
+ej_field() { printf '%s' "${e_json[$1]}" | jq -r "$2 // empty" 2>/dev/null; }
+
+sessions=()
+for e in ${endpoints[@]+"${endpoints[@]}"}; do sessions+=("$(rw_session_name "$e")"); done
+probe_status=0
+rw_worker_agent_probe "$worker" ${sessions[@]+"${sessions[@]}"} >"$work/probe" || probe_status=$?
+if [ "$probe_status" -ne 0 ]; then
+  fail_event "agent_probe_unreachable"
+  rw_die "rw handback: lost contact with '$worker' while checking its panes for agents; nothing changed." 6
+fi
+sed '1,/^---$/d' "$work/probe" >"$work/probe.ps"
+
+# focus_path_for <worker path> -- the laptop path of a worker path in the root.
+focus_path_for() {
+  case "$1" in
+    "$worker_root") printf '%s
+' "$root_local" ;;
+    "$worker_root"/*) printf '%s/%s
+' "$root_local" "${1#"$worker_root"/}" ;;
+    *) printf '%s
+' "$root_local" ;;
+  esac
+}
+
 for i in "${!endpoints[@]}"; do
   e_json[i]="$(rw_read_endpoint "${endpoints[$i]}" 2>/dev/null || true)"
-  e_provider[i]="$(printf '%s' "${e_json[$i]}" | jq -r 'select(.agent.state == "handed-off") | .agent.provider // empty' 2>/dev/null)"
+  e_provider[i]="" e_session[i]="" e_pfocus[i]="" e_pworker[i]="" e_mode[i]="" e_resume_remote[i]=""
+  case "$(ej_field "$i" '.role')" in tree | tree-editor) continue ;; esac
+  rec_provider="$(printf '%s' "${e_json[$i]}" | jq -r 'select(.agent.state == "handed-off") | .agent.provider // empty' 2>/dev/null)"
+  rec_session="$(ej_field "$i" '.agent.transcript_id')"
+  [ -n "$rec_session" ] || rec_session="$(ej_field "$i" '.agent.session_id')"
+  IFS="$RW_TAB" read -r _ _ live_ppid live_state < <(awk -F '\t' -v s="${sessions[$i]}" '$1 == s { print; exit }' "$work/probe")
+  live_provider="$(rw_live_provider "$work/probe.ps" "${live_ppid:-}")"
+  if [ -n "$live_provider" ]; then
+    live_tool="$(printf '%s' "${live_state:-}" | jq -r '.tool // empty' 2>/dev/null)"
+    live_session="$(printf '%s' "${live_state:-}" | jq -r '.session_id // empty' 2>/dev/null)"
+    live_cwd="$(printf '%s' "${live_state:-}" | jq -r '.cwd // empty' 2>/dev/null)"
+    if [ "$live_tool" != "$live_provider" ] || [ -z "$live_session" ]; then
+      fail_event "agent_unidentified:${endpoints[$i]}"
+      rw_die "rw handback: a $live_provider agent is running in remote session ${sessions[$i]}, but its session cannot be identified (no SessionStart record on the remote for that pane), so it cannot be brought back. Nothing was moved or stopped; quit it there (or let it record its session), then retry." 1
+    fi
+    [ -x "$ADAPTERS_DIR/$live_provider" ] || rw_die "rw handback: no local $live_provider adapter; nothing was moved." 1
+    e_provider[i]="$live_provider"
+    e_session[i]="$live_session"
+    e_pworker[i]="${live_cwd:-$(ej_field "$i" '.workspace.remote_path')}"
+    e_pfocus[i]="$(focus_path_for "${e_pworker[$i]}")"
+    if [ "$live_provider" = "$rec_provider" ] && [ "$live_session" = "$rec_session" ]; then
+      e_mode[i]="$(ej_field "$i" '.agent.mode_flags')"
+      e_resume_remote[i]="$(ej_field "$i" '.agent.resume_intent')"
+    else
+      # Started (or switched) on the worker after the handoff.
+      rw_warn "rw handback: found a $live_provider session started remotely in ${sessions[$i]}; bringing it back too."
+      e_resume_remote[i]="$("$ADAPTERS_DIR/$live_provider" resume-cmd --dest-path "${e_pworker[$i]}" --session-id "$live_session" 2>/dev/null || true)"
+    fi
+  elif [ -n "$rec_provider" ]; then
+    # Handed off but no longer running remotely: its transcript still comes
+    # back and resumes here, as before.
+    e_provider[i]="$rec_provider"
+    e_session[i]="$rec_session"
+    e_pworker[i]="$(ej_field "$i" '.agent.project_path_worker')"
+    [ -n "${e_pworker[$i]}" ] || e_pworker[i]="$(ej_field "$i" '.workspace.remote_path')"
+    e_pfocus[i]="$(ej_field "$i" '.agent.project_path_focus')"
+    [ -n "${e_pfocus[$i]}" ] || e_pfocus[i]="$(ej_field "$i" '.workspace.focus_path')"
+    e_mode[i]="$(ej_field "$i" '.agent.mode_flags')"
+    e_resume_remote[i]="$(ej_field "$i" '.agent.resume_intent')"
+  fi
 done
-ej_field() { printf '%s' "${e_json[$1]}" | jq -r "$2 // empty" 2>/dev/null; }
 
 # ---------------------------------------------------------------------------
 # 2. Agent version policy, inverted: the local CLI resumes now.
@@ -185,7 +256,7 @@ resume_remote_agents() {
   local i session_name cmd
   for i in ${remote_stopped[@]+"${remote_stopped[@]}"}; do
     session_name="$(rw_session_name "${endpoints[$i]}")"
-    cmd="$(ej_field "$i" '.agent.resume_intent')"
+    cmd="${e_resume_remote[$i]}"
     if [ -z "$cmd" ] ||
       ! rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
         "tmux send-keys -t $(rw_shquote "$session_name") $(rw_shquote "$cmd") Enter" </dev/null >/dev/null 2>&1 ||
@@ -260,13 +331,10 @@ for i in "${!endpoints[@]}"; do
   adapter="$ADAPTERS_DIR/$provider"
   dir="$(mktemp -d "$work/agent.XXXXXX")"
   err="$dir.err"
-  session="$(ej_field "$i" '.agent.transcript_id')"
-  [ -n "$session" ] || session="$(ej_field "$i" '.agent.session_id')"
-  pfocus="$(ej_field "$i" '.agent.project_path_focus')"
-  [ -n "$pfocus" ] || pfocus="$(ej_field "$i" '.workspace.focus_path')"
-  pworker="$(ej_field "$i" '.agent.project_path_worker')"
-  [ -n "$pworker" ] || pworker="$(ej_field "$i" '.workspace.remote_path')"
-  mode="$(ej_field "$i" '.agent.mode_flags')"
+  session="${e_session[$i]}"
+  pfocus="${e_pfocus[$i]}"
+  pworker="${e_pworker[$i]}"
+  mode="${e_mode[$i]}"
   if ! "$adapter" export --session-id "$session" --project-path "$pworker" --out "$dir" --worker "$worker" </dev/null >/dev/null 2>"$err"; then
     failure="$provider export from the remote failed (endpoint ${endpoints[$i]}): $(cat "$err")"
     break
@@ -357,6 +425,7 @@ rw_owned_record_write "$root_id" "$final"
 rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
   rw_warn "rw handback: could not refresh the ownership mirror on '$worker'; the next handoff compares against the older manifest."
 rw_owned_record_remove "$root_id"
+rw_prune_root_backups "$root_id" "$worker" "$worker_home"
 
 rw_log_event "handback" "" "$worker" "$(rw_elapsed_ms "$start_ts")" "success" \
   "root=$root_rel kind=$kind panes=${#released[@]} closed=${#endpoints[@]} $(printf '%s' "$sync_out" | jq -r '"renamed=\(.renamed | length) overwritten=\(.overwritten)"' 2>/dev/null)"

@@ -127,13 +127,19 @@ case "$cmd" in
   list-panes)
     if [ -n "$target" ] && [ "${target#rw-}" != "$target" ]; then
       case "$fmt" in *pane_pid*) [ -n "${FAKE_REMOTE_LASTWRITE:-}" ] && echo "last remote write" >>"$FAKE_REMOTE_LASTWRITE" ;; esac
-      expand "$fmt" "pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}	pane_pid=999999"
+      expand "$fmt" "pane_id=%90	pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}	pane_pid=999999"
     elif [ "$all" = 1 ] && [ -n "$table" ]; then
       while IFS= read -r l; do [ -n "$l" ] && expand "$fmt" "$l"; done <"$table"
     fi
     ;;
   display-message)
     [ -n "$fmt" ] || fmt="${rest[${#rest[@]}-1]:-}"
+    if [ -z "$target" ]; then
+      # The server itself: $FAKE_TMUX_SERVER is "<pid>:<start_time>".
+      server="${FAKE_TMUX_SERVER:-4242:1700000000}"
+      expand "$fmt" "pid=${server%%:*}	start_time=${server#*:}"
+      exit 0
+    fi
     if [ "$target" = "${FAKE_AGENT_PANE:-}" ] && [ -n "${FAKE_AGENT_LASTWRITE:-}" ]; then
       case "$fmt" in *pane_pid*) echo "last local write" >>"$FAKE_AGENT_LASTWRITE" ;; esac
     fi
@@ -158,7 +164,12 @@ case "$cmd" in
     ;;
   list-sessions)
     # $FAKE_TMUX_SESSIONS: "name created-epoch attached" per line.
-    [ -n "${FAKE_TMUX_SESSIONS:-}" ] && [ -f "$FAKE_TMUX_SESSIONS" ] && cat "$FAKE_TMUX_SESSIONS"
+    if [ -n "${FAKE_TMUX_SESSIONS:-}" ] && [ -f "$FAKE_TMUX_SESSIONS" ]; then
+      [ -n "$fmt" ] || fmt='#{session_name}'
+      while read -r n c a; do
+        [ -n "$n" ] && expand "$fmt" "session_name=$n	session_created=$c	session_attached=$a"
+      done <"$FAKE_TMUX_SESSIONS"
+    fi
     ;;
 esac
 exit 0
@@ -187,7 +198,21 @@ fi
 cd "$FAKE_WORKER_HOME" || exit 255
 HOME="$FAKE_WORKER_HOME" exec bash -c "$*"
 EOF
-  chmod +x "$SANDBOX/bin/tmux" "$SANDBOX/bin/ssh"
+  cat >"$SANDBOX/bin/ps" <<'EOF'
+#!/usr/bin/env bash
+# The real ps, plus the synthetic process lines in $FAKE_PS_EXTRA (one
+# "pid ppid command" per line) for the `ps axo pid=,ppid=,command=` form:
+# a fake agent process under a fake pane pid.
+/bin/ps "$@"
+case "$*" in
+  *pid=,ppid=,command=*) [ -n "${FAKE_PS_EXTRA:-}" ] && [ -f "$FAKE_PS_EXTRA" ] && cat "$FAKE_PS_EXTRA" ;;
+esac
+exit 0
+EOF
+  chmod +x "$SANDBOX/bin/tmux" "$SANDBOX/bin/ssh" "$SANDBOX/bin/ps"
+  # Closing worker sessions asks the worker for a verified save; here that
+  # only leaves a trace (never launchctl/systemctl against this machine).
+  export RW_WORKER_SAVE_TRIGGER="echo save-requested >>'$SANDBOX/worker-saves.log'"
   export PATH="$SANDBOX/bin:$PATH"
   export RW_SSH_BIN="$SANDBOX/bin/ssh"
 

@@ -51,6 +51,31 @@ claude_slug() {
 
 claude_projects_root_local() { printf '%s/.claude/projects\n' "$HOME"; }
 
+# claude_trust_script <path>
+# A shell script (run where the agent resumes) that records <path> as a
+# trusted folder in ~/.claude.json the way claude itself does after the
+# trust dialog: projects["<path>"].hasTrustDialogAccepted = true. Every other
+# key is kept; a project already trusted is left byte-for-byte alone. The
+# file is replaced atomically and keeps mode 0600. This is the only thing
+# any adapter writes to ~/.claude.json (auth and other state are untouched).
+claude_trust_script() {
+  local q
+  q="$(printf '%q' "$1")"
+  cat <<EOS
+f="\$HOME/.claude.json"
+command -v jq >/dev/null 2>&1 || exit 1
+[ -s "\$f" ] || printf '{}\n' >"\$f"
+jq -e --arg p $q '.projects[\$p].hasTrustDialogAccepted == true' "\$f" >/dev/null 2>&1 && exit 0
+tmp="\$(mktemp "\$f.rw.XXXXXX")" || exit 1
+if jq --arg p $q '.projects = ((.projects // {}) | .[\$p] = ((.[\$p] // {}) + {hasTrustDialogAccepted: true}))' "\$f" >"\$tmp"; then
+  chmod 600 "\$tmp" && mv -f "\$tmp" "\$f"
+else
+  rm -f "\$tmp"
+  exit 1
+fi
+EOS
+}
+
 # ---------------------------------------------------------------------------
 # detect --pane <pane-id>
 # ---------------------------------------------------------------------------
@@ -292,7 +317,16 @@ cmd_install() {
     rm -f "$rewritten"
     printf 'installed claude transcript: %s/%s.jsonl\n' "$dest_dir" "$session_id"
   fi
-  printf 'note: per-path trust in ~/.claude.json is not seeded by this adapter -- claude may prompt to trust %s on first launch there.\n' "$dest_path" >&2
+  # A resumed agent in a folder claude has never opened would stop at the
+  # "trust this folder" dialog while rw reports success: mark the destination
+  # trusted first (only that one flag, in that one project entry).
+  if [ -n "$worker" ]; then
+    ca_ssh_run "$worker" "$(claude_trust_script "$dest_path")" </dev/null >/dev/null 2>&1 ||
+      ca_warn "could not mark $dest_path trusted for claude on '$worker'; it may ask to trust the folder on resume."
+  else
+    bash -c "$(claude_trust_script "$dest_path")" >/dev/null 2>&1 ||
+      ca_warn "could not mark $dest_path trusted for claude; it may ask to trust the folder on resume."
+  fi
 }
 
 # ---------------------------------------------------------------------------

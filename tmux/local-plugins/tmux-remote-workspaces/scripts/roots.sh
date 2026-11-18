@@ -176,15 +176,22 @@ rw_stop_remote_agent() {
 # before the first handoff is left in place and only the mirror goes.
 # Prints one of: deleted | kept | no-mirror. Returns 6 when unreachable.
 rw_forget_worker_copy() {
-  local worker="$1" worker_home="$2" root_id="$3" root_rel="$4" mirror root out status=0
+  local worker="$1" worker_home="$2" root_id="$3" root_rel="$4" mirror root out status=0 wstate
   case "$root_rel" in '' | /* | '~'* | ..* | */..*) return 7 ;; esac
   mirror="$(rw_worker_mirror_dir "$worker_home" "$root_id")"
   root="${worker_home%/}/$root_rel"
+  wstate="$(rw_state_dir_at "$worker_home")"
+  # Besides the copy: the root's backups and staging on the worker always go,
+  # and when the copy goes, so do parent directories it leaves empty (never
+  # a top-level folder of the worker's home).
   out="$(rw_ssh_batch "$worker" "$(rw_ssh_connect_timeout)" "
+    rm -rf -- $(rw_shquote "$wstate/handoff-backups/root-$root_id") $(rw_shquote "$wstate/handoff-staging/root-$root_id")
+    h=$(rw_shquote "${worker_home%/}")
     m=$(rw_shquote "$mirror"); r=$(rw_shquote "$root")
+    rmparents() { p=\"\$(dirname \"\$1\")\"; while [ \"\$(dirname \"\$p\")\" != \"\$h\" ] && [ \"\$p\" != \"\$h\" ] && rmdir \"\$p\" 2>/dev/null; do p=\"\$(dirname \"\$p\")\"; done; }
     if [ -f \"\$m/record.json\" ] && sed 's/\"[[:space:]]*:[[:space:]]*/\":/g' \"\$m/record.json\" | grep -Fq $(rw_shquote "\"root_rel\":\"$root_rel\""); then
       if sed 's/\"[[:space:]]*:[[:space:]]*/\":/g' \"\$m/record.json\" | grep -Fq '\"worker_root_created\":true'; then
-        rm -rf -- \"\$r\" && rm -rf -- \"\$m\" && echo deleted
+        if rm -rf -- \"\$r\" && rm -rf -- \"\$m\"; then rmparents \"\$r\"; echo deleted; else echo failed; fi
       else
         rm -rf -- \"\$m\" && echo kept
       fi
@@ -199,13 +206,17 @@ rw_forget_worker_copy() {
 # Tombstone-first close of each endpoint (kills its worker session when
 # reachable) and removes it from the record.
 rw_close_root_endpoints() {
-  local root_id="$1" reason="$2" e
+  local root_id="$1" reason="$2" e w workers=" "
   shift 2
   for e in "$@"; do
     [ -n "$e" ] || continue
+    w="$(rw_read_endpoint "$e" 2>/dev/null | jq -r '.worker // empty' 2>/dev/null)"
+    [ -n "$w" ] && case "$workers" in *" $w "*) ;; *) workers="$workers$w " ;; esac
     rw_close_endpoint_core "$e" "$reason" </dev/null
     rw_record_remove_endpoint "$root_id" "$e"
   done
+  # One verified save per worker, so its snapshot forgets the closed sessions.
+  for w in $workers; do rw_worker_request_save "$w"; done
 }
 
 # rw_endpoint_has_agent <endpoint_id> -- a handed-off agent runs in it.
@@ -277,4 +288,81 @@ rw_reconcile_pending() {
     rw_log_event "forget" "" "$worker" "" "success" "root=$root_rel pending=1 worker_copy=$out"
   done
   return 0
+}
+
+# rw_worker_agent_probe <worker> <session_name>...
+# One ssh round trip that shows what each endpoint session is running NOW:
+#   <session><TAB><pane_id><TAB><pane_pid><TAB><agent-state JSON or empty>
+# per session, then a `---` line, then the worker's `ps axo pid=,ppid=,command=`.
+# The agent state is the worker's server-scoped SessionStart record
+# (tmux-workspace-resurrect: <state>/agents/server-<pid>-<start>/pane-N.json),
+# never the legacy flat file. Returns 6 when the worker cannot be reached.
+rw_worker_agent_probe() {
+  local worker="$1" script s
+  shift
+  script="$(mktemp "${TMPDIR:-/tmp}/rw-agent-probe.XXXXXX")"
+  {
+    printf 'set -u\n'
+    printf '__rw_sessions=('
+    for s in "$@"; do printf ' %q' "$s"; done
+    printf ' )\n'
+    cat <<'EOS'
+sid="$(tmux display-message -p '#{pid}:#{start_time}' 2>/dev/null || true)"
+sd="${TMUX_WORKSPACE_RESURRECT_STATE_DIR:-}"
+[ -n "$sd" ] || sd="$(tmux show-environment -g TMUX_WORKSPACE_RESURRECT_STATE_DIR 2>/dev/null | sed -n 's/^TMUX_WORKSPACE_RESURRECT_STATE_DIR=//p')"
+[ -n "$sd" ] || sd="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-workspace-resurrect"
+for s in ${__rw_sessions[@]+"${__rw_sessions[@]}"}; do
+  line="$(tmux list-panes -t "=$s" -F '#{pane_id} #{pane_pid}' 2>/dev/null | head -n1)"
+  pane="${line%% *}"; ppid="${line#* }"
+  [ -n "$line" ] || { pane=""; ppid=""; }
+  st=""
+  if [ -n "$pane" ] && [ -n "$sid" ]; then
+    f="$sd/agents/server-${sid/:/-}/pane-${pane#%}.json"
+    [ -f "$f" ] && st="$(tr -d '\n' <"$f")"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$s" "$pane" "$ppid" "$st"
+done
+echo ---
+ps axo pid=,ppid=,command=
+EOS
+  } >"$script"
+  rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "bash -s" <"$script" 2>/dev/null
+  local status=$?
+  rm -f "$script"
+  [ "$status" -eq 0 ] || return 6
+}
+
+# rw_live_provider <ps-output-file> <pane_pid>
+# The provider whose process runs under the pane right now, or nothing.
+rw_live_provider() {
+  local ps_file="$1" ppid="$2" p
+  [ -n "$ppid" ] || return 0
+  for p in claude pi codex; do
+    if rw_ps_tree_matches "$(rw_provider_pattern "$p")" "$ppid" <"$ps_file"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+}
+
+# rw_prune_root_backups <root_id> [worker worker_home]
+# After a successful hand-back: keep only the newest backup of this root
+# (focus side, and on the worker when given) and drop its staging dirs.
+rw_prune_root_backups() {
+  local root_id="$1" worker="${2:-}" worker_home="${3:-}" script
+  # shellcheck disable=SC2016 # expands where the script runs
+  script='keep() { [ -d "$1" ] || return 0; command ls -1t "$1" 2>/dev/null | tail -n +2 | while IFS= read -r d; do rm -rf -- "$1/$d"; done; }'
+  bash -c "$script; keep $(rw_shquote "$(rw_state_dir)/handoff-backups/root-$root_id"); rm -rf -- $(rw_shquote "$(rw_state_dir)/handoff-staging/root-$root_id")" 2>/dev/null || true
+  if [ -n "$worker" ] && [ -n "$worker_home" ]; then
+    local ws
+    ws="$(rw_state_dir_at "$worker_home")"
+    rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+      "$script; keep $(rw_shquote "$ws/handoff-backups/root-$root_id"); rm -rf -- $(rw_shquote "$ws/handoff-staging/root-$root_id"); true" \
+      </dev/null >/dev/null 2>&1 || true
+  fi
+}
+
+# rw_forget_local_backups <root_id> -- the focus side's backups and staging.
+rw_forget_local_backups() {
+  rm -rf -- "$(rw_state_dir)/handoff-backups/root-$1" "$(rw_state_dir)/handoff-staging/root-$1"
 }

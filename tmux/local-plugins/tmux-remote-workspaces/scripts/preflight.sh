@@ -122,7 +122,9 @@ done <<<"$output"
 # here) proves the worker's own key/known_hosts, not this machine's.
 git_host=""
 git_host_auth_failed="false"
-if [ -n "$repo_remote" ] && [ "$git_ok" = "true" ]; then
+# A local-path origin (a bare repo on this disk, file://) has no host; there
+# is nothing to authenticate against, so the check is skipped.
+if [ -n "$repo_remote" ] && [ "$git_ok" = "true" ] && rw_git_remote_is_network "$repo_remote"; then
   git_host="$(rw_normalize_git_remote "$repo_remote")"
   git_host="${git_host%%/*}"
   auth_probe="if command -v timeout >/dev/null 2>&1; then timeout 10 git ls-remote --heads $(rw_shquote "$repo_remote") HEAD; else git ls-remote --heads $(rw_shquote "$repo_remote") HEAD; fi"
