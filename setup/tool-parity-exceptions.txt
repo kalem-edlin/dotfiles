@@ -69,6 +69,15 @@ trash-cli        accepted TODO: not yet added to any Linux package list; zsh/.zs
 uv               accepted TODO: not yet added to any Linux package list
 webp             accepted TODO: not yet added to any Linux package list
 httpd            accepted TODO: not yet added to any Linux package list
+deno             accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+gitleaks         accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+hf               accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+imagemagick      accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+just             accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+tesseract        accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+tree-sitter-cli  accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+utftex           accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
+yt-dlp           accepted TODO: not yet added to any Linux package list (laptop/worker parity, 2026-11-18)
 
 # --- Stock on macOS, so no Brewfile.headless line (no check fires today; recorded so the asymmetry is deliberate) ---
 unzip           macOS ships /usr/bin/unzip; Linux installs it as a required package because setup/rea.sh unpacks the Ghidra release zip

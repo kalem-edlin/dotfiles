@@ -348,9 +348,14 @@ telescope_live_grep = function(include_misc, opts)
   }):find()
 end
 
+-- html, latex and yaml cover inline HTML, math and front matter in the
+-- Markdown reader; every host installs the same set.
 local markdown_treesitter_parsers = {
   "markdown",
   "markdown_inline",
+  "html",
+  "latex",
+  "yaml",
 }
 
 require("lazy").setup({
