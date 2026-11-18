@@ -225,6 +225,22 @@ These are fixed so parallel builders compose without talking. A builder who need
 - The worker alias for live checks is `mini` (ssh only). Nothing created on it is left behind.
 - Commits by explicit pathspec, no co-author line, no push (the orchestrator pushes).
 
+### Changes recorded by W2 (2026-11-18)
+
+Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
+
+- C1 `record.json` also carries `worker_root` (absolute worker path) and `focus_machine_id`. The worker mirror is written by the focus machine over ssh with `root_local` = the worker path; it survives hand-back with `owner: focus` (so the next handoff can gate the worker copy against `manifest.worker.tsv`) and is deleted only by `rw forget`.
+- C1 new focus-side index `held/<worker>/<root_id>.json` (`worker`, `root_id`, `root_rel`, `worker_root`, `since`, optional `pending`): every worker copy this machine created. It outlives the record, so `rw forget` (and picker delete / `wt rm`) know which workers hold a copy after hand-back.
+- C1 manifests never list `.DS_Store` or keep-both copies; symlink rows carry mtime `0` (rsync does not carry symlink times).
+- C2 conflict rule: with no stored manifest for the copy being overwritten (first handoff onto an existing remote directory), the baseline is the incoming source, so only files that would be replaced (`changed`) or deleted (`added`) are listed. Keep-both copies (`<file>.local-YYYYMMDD-HHMMSS`) are never deleted by either channel, never listed in manifests, and excluded from the git fingerprint.
+- C2 the git divergence baseline is the stored manifest's `#git` row; a destination that fingerprints `EMPTY` (absent or not a repository) never counts as diverged.
+- C2 `rw open --worker` is optional (defaults to the record's worker; a mismatch is exit 7). `--workspace`, `--keep-local` and `--keep-remote` are gone with `ensure`/`return`.
+- C2 a hand-back whose agent resume fails for a pane leaves that endpoint open and the record `owner: focus` with `pending.action = reconcile` (exit 1); the next contact with the worker closes it.
+- C3 endpoints also carry `workspace.root_local`, `workspace.worker_root`, `workspace.mode` = the root kind, and for agents `agent.project_path_focus` / `agent.project_path_worker`.
+- C5 adapters' `versions` exits 1 (setup remediation) when the worker cannot resolve `claudef`/`pif`; `resume-cmd` emits `cd <dest> && claudef ... --resume <id>` / `cd <dest> && pif --session <ref>` on both machines, typed into the pane's interactive login shell. `claudef` drops a captured `--dangerously-skip-permissions` (it always passes it).
+- Preflight now requires `rsync` on the worker and reports `home` as the physical path (`pwd -P`).
+- rsync flags are `-rlptD --delete` (`-a` without `-o`/`-g`, since the two machines run different users), verified against openrsync protocol 29 on both machines.
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: needs a worker-to-laptop push of `@agent_*` (candidate: the attach loop's ssh ControlMaster carrying a tiny state stream into the laptop pane's options). The picker then drops the early return at `snapshot.go:415` and the Working guard covers remote agents.
