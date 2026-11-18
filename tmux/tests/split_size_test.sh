@@ -17,7 +17,7 @@ command tmux -S "$socket" set-option -g default-command 'sleep 60'
 export remote_command_log="$test_root/remote-command"
 tmux() {
   # Exercise remote split sizing without starting an actual remote endpoint.
-  if [ "$1" = split-window ] && [[ "${!#}" == *' ensure --worker '* ]]; then
+  if [ "$1" = split-window ] && [[ "${!#}" == *' open --worker '* ]]; then
     printf '%s\n' "${!#}" > "$remote_command_log"
     command tmux -S "$socket" "${@:1:$#-1}" 'sleep 60'
   else
@@ -62,7 +62,7 @@ check_split() {
   test "$(tmux display-message -p -t "$source_pane" "$dimension")" -ge "$equal_size"
   tmux kill-pane -t "$new_pane"
   if [ "$remote" = yes ]; then
-    grep -q 'ensure --worker "test-worker" --workspace "test-workspace"' "$remote_command_log"
+    grep -q 'open --worker "test-worker"' "$remote_command_log"
     for option in @rw-endpoint @remote-host @rw-worker @rw-workspace; do
       tmux set-option -pu -t "$source_pane" "$option"
     done
