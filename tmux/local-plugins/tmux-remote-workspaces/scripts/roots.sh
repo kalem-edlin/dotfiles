@@ -340,7 +340,7 @@ EOS
 rw_live_provider() {
   local ps_file="$1" ppid="$2" p
   [ -n "$ppid" ] || return 0
-  for p in claude pi codex; do
+  for p in claude pi; do
     if rw_ps_tree_matches "$(rw_provider_pattern "$p")" "$ppid" <"$ps_file"; then
       printf '%s\n' "$p"
       return 0

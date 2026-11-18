@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared helpers for the provider agent adapters.
-# (libexec/adapters/{pi,claude,codex}). Sourced by each adapter; never
+# (libexec/adapters/{pi,claude}). Sourced by each adapter; never
 # executed directly.
 #
 # Deliberately self-contained -- adapters are called blind by rw-handoff.sh
@@ -114,7 +114,7 @@ ca_read_pane_agent_state() {
 # tmux-workspace-resurrect's workspace_infer_agent() (see
 # tmux/local-plugins/tmux-workspace-resurrect/scripts/common.sh), but walks
 # the pane's actual descendant process tree instead of relying solely on
-# tmux's own #{pane_current_command}, because npm-launched CLIs (codex, pi)
+# tmux's own #{pane_current_command}, because npm-launched CLIs (such as pi)
 # commonly surface as "node" there and lose the distinguishing name.
 # ---------------------------------------------------------------------------
 
@@ -180,7 +180,6 @@ ca_pane_has_process() {
 # then reports pane_current_command as the bare version, e.g. 2.1.327).
 # Keep in sync with rw_provider_pattern in scripts/common.sh.
 ca_patterns_claude() { printf '%s\n' '(^|/)claude([[:space:]]|$)' '/claudef/bin/[^/[:space:]]+([[:space:]]|$)' '/claude/versions/[^/[:space:]]+([[:space:]]|$)'; }
-ca_patterns_codex() { printf '%s\n' '(^|/)codex([[:space:]]|$)' 'codex\.js' 'codex-darwin' 'codex-linux'; }
 ca_patterns_pi() { printf '%s\n' '(^|/)pi([[:space:]]|$)' 'pi-coding-agent'; }
 
 # ---------------------------------------------------------------------------
@@ -273,21 +272,12 @@ ca_scan_mode_flags() {
   printf '%s\n' "${out# }"
 }
 
-# Per-provider allowlists. Codex's --full-auto is deliberately absent:
-# `codex resume`/`codex fork` do not accept it (verified against codex
-# 0.55 --help), so it cannot be replayed on a resume; its effect is
-# expressible via --sandbox/--ask-for-approval, which are allowlisted.
+# Per-provider allowlists.
 # Pi has no run-mode flags -- its adapter captures nothing.
 ca_mode_flags_claude() {
   ca_scan_mode_flags "$1" \
     bare:--dangerously-skip-permissions \
     val:--permission-mode
-}
-ca_mode_flags_codex() {
-  ca_scan_mode_flags "$1" \
-    bare:--dangerously-bypass-approvals-and-sandbox \
-    val:--sandbox alias:-s:--sandbox \
-    val:--ask-for-approval alias:-a:--ask-for-approval
 }
 
 # Guard for resume-cmd's --mode-flags input (a public CLI surface, not just

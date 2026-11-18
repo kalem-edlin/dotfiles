@@ -325,11 +325,11 @@ ownership records directly and never polls over SSH. Remote agents show
 their state like local ones, from the options the attach loop mirrors onto
 their panes (see "Remote agent state").
 
-Provider adapters for Pi, Claude, and Codex own transcript discovery, version
+Provider adapters for Pi and Claude own transcript discovery, version
 checks, export, install, resume commands, and process matching. They do not own
 tmux or workspace transfer. Resumes go through `claudef --resume` and
 `pif --session` on both machines, typed into the endpoint's login shell, so
-the same hooks run on the worker as on the laptop. Codex is unchanged.
+the same hooks run on the worker as on the laptop.
 Transcripts are installed under the worker's physical path, which is what
 Claude slugs its project directory from.
 
@@ -590,7 +590,7 @@ All `scripts/` paths in this section are relative to
   generation state.
 - `libexec/sync/README.md` records the wire format, manifest rules, and exit
   contract.
-- `libexec/adapters/{pi,claude,codex}` implement provider-specific session
+- `libexec/adapters/{pi,claude}` implement provider-specific session
   movement.
 - `libexec/adapters/common-adapter.sh` holds their shared process and transport
   helpers.

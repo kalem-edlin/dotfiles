@@ -39,8 +39,8 @@
 #     elsewhere are removed, so stow can recreate them relative.
 #
 #   cleanup_focus_agent_links
-#     Removes obsolete Claude/Pi focus links and retired Codex config links
-#     when they point into this repository. Mutable runtime files remain.
+#     Removes obsolete Claude/Pi focus links when they point into this
+#     repository. Mutable runtime files remain.
 #
 #   stow_packages <package> [<package> ...]
 #     Runs `stow --no-folding --restow -d "$DOTFILES_DIR" -t "$HOME"` for
@@ -337,11 +337,6 @@ $HOME/.pi/agent/communication.md
 $HOME/.pi/agent/themes/personal.json
 $HOME/.pi/agent/extensions/statusline.ts
 $HOME/.pi/agent/extensions/tmux-workspace-resurrect.ts
-$HOME/.codex/skills/unslop
-$HOME/.codex/hooks.json
-$HOME/.codex/communication.md
-$HOME/.codex/config.toml
-$HOME/.codex
 "
 
   printf '%s\n' "$old_targets" | while IFS= read -r target; do
@@ -350,7 +345,7 @@ $HOME/.codex
     resolved="$(cd "$(dirname "$target")" 2>/dev/null && realpath "$(basename "$target")" 2>/dev/null || true)"
     link_text="$(readlink "$target")"
     case "$resolved:$link_text" in
-      "$DOTFILES_DIR"/*:*|*:*/claude/.claude/*|*:*/pi/.pi/agent/*|*:*/codex/.codex/*|*:*/codex/.codex)
+      "$DOTFILES_DIR"/*:*|*:*/claude/.claude/*|*:*/pi/.pi/agent/*)
         echo "  -> removing obsolete focus link ${target#"$HOME/"}"
         rm "$target"
         ;;
@@ -358,9 +353,7 @@ $HOME/.codex
   done
 
   rmdir "$HOME/.claude/commands" "$HOME/.claude/ccline/themes" \
-    "$HOME/.pi/agent/extensions" "$HOME/.pi/agent/themes" \
-    "$HOME/.codex/skills/unslop" "$HOME/.codex/skills" \
-    "$HOME/.codex" 2>/dev/null || true
+    "$HOME/.pi/agent/extensions" "$HOME/.pi/agent/themes" 2>/dev/null || true
 }
 
 stow_packages() {

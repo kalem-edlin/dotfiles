@@ -110,7 +110,7 @@ fi
 
 # This doctor is invoked directly by `make` (a plain bash process inheriting
 # the caller's bare PATH), which never sources zsh/.zshenv. fnm-managed
-# tools (node/npm/pi/codex/ob) and ~/.local/bin-installed tools (claude) are
+# tools (node/npm/pi/ob) and ~/.local/bin-installed tools (claude) are
 # genuinely on disk after a successful install, but this process's PATH has
 # no way to see them unless it activates fnm and puts ~/.local/bin first —
 # exactly what setup/lib.sh's activate_fnm does for setup/linux-headless.sh
@@ -329,7 +329,7 @@ if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- required commands (current environment) --"
 fi
 
-REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar unzip curl node npm pi codex claude nvim ob gh delta go"
+REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar unzip curl node npm pi claude nvim ob gh delta go"
 for cmd in $REQUIRED_CMDS; do
   if has_cmd "$cmd"; then
     c_pass "cmd:$cmd" "$(command -v "$cmd")"
@@ -416,7 +416,7 @@ if [ "$QUIET" -eq 0 ]; then
 fi
 
 ZSH_BIN="$(command -v zsh 2>/dev/null || true)"
-NONINTERACTIVE_CMDS="tmux git git-lfs jq node npm pi codex claude rsync"
+NONINTERACTIVE_CMDS="tmux git git-lfs jq node npm pi claude rsync"
 
 if [ -z "$ZSH_BIN" ]; then
   c_fail "noninteractive:zsh" "zsh not found; cannot simulate the sshd noninteractive shell" "$SETUP_REMEDIATION"
@@ -1084,7 +1084,7 @@ else
 fi
 
 c_info "ssh:manual-git-host" "Git-host key registration (GitHub/GitLab) is a MANUAL verification this doctor does not attempt"
-c_info "ssh:manual-provider-auth" "claude/codex/pi provider authentication is a MANUAL verification this doctor does not attempt"
+c_info "ssh:manual-provider-auth" "claude/pi provider authentication is a MANUAL verification this doctor does not attempt"
 c_info "ssh:manual-tailscale-up" "\`tailscale up\` authentication is a MANUAL verification this doctor does not attempt"
 
 # ===========================================================================

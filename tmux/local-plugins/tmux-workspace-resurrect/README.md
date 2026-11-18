@@ -17,9 +17,7 @@ Every Resurrect save also records:
 
 - The exact last command submitted by each integrated zsh pane.
 - The current unsubmitted ZLE edit buffer and cursor position.
-- Claude Code and Pi session ids supplied by their lifecycle integrations,
-  and live Codex session ids recovered from its native process and open
-  rollout file.
+- Claude Code and Pi session ids supplied by their lifecycle integrations.
 - A real Neovim session file containing buffers, windows, tabs, and cwd.
 - Treemux main/sidebar relationships and the original Treemux arguments.
 
@@ -30,8 +28,8 @@ this plugin chooses one command for each pane:
 2. Otherwise, a supported application restore command.
 3. Otherwise, the last submitted zsh command.
 
-Recognized running Claude, Pi, Codex, and Neovim sessions can be automatically
-resumed through `claudef`, `pif`, `codexf`, and `nvim -S`. Agent commands use
+Recognized running Claude, Pi, and Neovim sessions can be automatically
+resumed through `claudef`, `pif`, and `nvim -S`. Agent commands use
 recorded session IDs. Launches are spaced by 500 ms after shell readiness.
 An application that had already exited at save time is not auto-launched.
 
@@ -84,7 +82,7 @@ enable the periodic timer or provide cross-restart backup retention.
   "autosave_interval_minutes": 5,
   "restore_mode": "whitelist",
   "restore_whitelist": {
-    "names": ["claudef", "pif", "codexf", "nvim"],
+    "names": ["claudef", "pif", "nvim"],
     "delay_ms": 500
   },
   "capture": {
@@ -93,7 +91,7 @@ enable the periodic timer or provide cross-restart backup retention.
     "neovim_sessions": true,
     "treemux": true
   },
-  "agents": ["claude", "codex", "pi"],
+  "agents": ["claude", "pi"],
   "redact_patterns": []
 }
 ```
@@ -110,8 +108,7 @@ currently preserved exactly.
 
 The tmux plugin never rewrites provider settings at runtime. The declarations
 below live with their owning dotfile packages and call the plugin's shared
-recorder. Codex has no repo-managed config or hooks and uses native
-live-session recovery instead:
+recorder:
 
 | Provider | Repository file | Installed path |
 | --- | --- | --- |
@@ -122,10 +119,9 @@ live-session recovery instead:
 | tmux | `tmux/tmux.conf` | `~/.config/tmux/tmux.conf` |
 
 Claude and Pi load their integration when a new process starts or an existing
-process reloads its configuration. Codex requires no hook installation or
-trust step. Setup still installs Codex CLI, but does not seed
-`~/.codex/config.toml`; `codexf` loads shared instructions directly from
-`$DOTFILES/agents/communication.md`.
+process reloads its configuration. Codex is no longer installed; a `codex` or
+`codexf` launcher found in a pane or an older snapshot is never auto-launched
+or pasted.
 
 Agent state is considered only when the last submitted command identifies the
 agent and no pending shell edit buffer or Neovim restore takes precedence.
@@ -133,7 +129,6 @@ Normal and focus launcher names both map to the focus launcher on restoration:
 
 - `claudef --resume <recorded-session-id>`
 - `pif --session <recorded-session-id>`
-- `codexf resume <recorded-session-id>`; the wrapper forwards arguments unchanged.
 
 Old session selectors are replaced, never reused. Supported simple flags are
 preserved; ambiguous arguments and old task prompts are omitted. A literal
@@ -146,17 +141,11 @@ different tmux servers cannot overwrite each other's registrations. Legacy
 flat files are read-only fallback, never new-write targets.
 Legacy records require the same pane/tool/cwd and a timestamp no older than
 the running server. This compatibility check cannot prove process ownership
-as strongly as a new hook record or verified native Codex recovery; a fresh
+as strongly as a new hook record; a fresh
 Claude or Pi registration supplies the stronger recorded identity. Missing, malformed or stale records produce `agent_capture_errors`
 in the staged sidecar and no bare resume picker. The verifier rejects the
 attempt without replacing the previous published checkpoint or timestamp.
 The error identifies the affected panes.
-
-For live Codex panes, saving checks the native Codex process descended from
-that pane and the session metadata in its open rollout file. A uniquely
-verified main-session ID takes precedence over a legacy record. This recovers
-IDs without restarting Codex, guessing by cwd, or relying on Codex hooks.
-Ambiguous associations fail closed.
 
 ## Runtime state
 
@@ -317,9 +306,6 @@ registrations:
 If a provider session id is absent:
 
 - Claude: restart Claude or start/resume a session after the settings change.
-- Codex: confirm the live native process belongs to the pane and has a
-  readable open rollout file with a uniquely verified main-session ID.
-  Recovery does not use a repo-managed hook.
 - Pi: restart Pi so the extension is loaded.
 - Confirm the process is inside tmux and inherited `TMUX_PANE`.
 

@@ -205,7 +205,7 @@ hook Bogus "$FIXTURES/pre-tool-use.json"
 assert_calls "unknown event is a no-op"
 
 : >"$LOG"
-env TMUX="$FAKE_TMUX" TMUX_PANE="$PANE" bash "$SCRIPT" codex Stop <"$FIXTURES/stop-plain.json" >"$scratch/stdout" 2>&1
+env TMUX="$FAKE_TMUX" TMUX_PANE="$PANE" bash "$SCRIPT" bogus-agent Stop <"$FIXTURES/stop-plain.json" >"$scratch/stdout" 2>&1
 status=$?
 assert_calls "unknown agent is a no-op"
 

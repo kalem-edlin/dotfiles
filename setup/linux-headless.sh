@@ -649,7 +649,7 @@ verify_commands() {
   local nvim_version nvim_major nvim_minor
   local required_commands=(
     zsh git git-lfs stow tmux nvim jq curl rsync tar unzip
-    node npm pi codex claude ob go
+    node npm pi claude ob go
   )
 
   if [[ "${INSTALL_TAILSCALE:-1}" = "1" ]]; then
@@ -732,7 +732,7 @@ install_tailscale
 # setup/node.sh ran as a CHILD process — its fnm/Node PATH changes do not
 # return to THIS process. Activate fnm here too so every step below
 # (Stripe's npm fallback, verify_commands, dotfile/timer installation) can
-# resolve node/npm/pi/codex/ob in its OWN process, not just inside node.sh's
+# resolve node/npm/pi/ob in its OWN process, not just inside node.sh's
 # and obsidian.sh's separate child processes. Deliberately NOT `|| true`:
 # node.sh just installed fnm+Node moments ago, so failure to activate it
 # here means something is genuinely wrong and the rest of the run (which

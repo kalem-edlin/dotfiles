@@ -35,7 +35,7 @@ correctly omits, or a worker-only concern that local correctly omits.
 | REA and its tools | `make rea` (`setup/rea.sh`) in the `setup` chain: `~/Developer/rea` (fetch and submodule init only on rerun, never reset), `npm ci` and `npm run build` when stale, pinned JDK 21 and Ghidra under `~/Developer/tools`; `zsh/.zshenv` exports `JAVA_HOME`/`GHIDRA_INSTALL_DIR` | Same script and contract; the doctor's `rea:*`, `tool:*` and `env:jdk-ghidra` checks are required |
 | macOS system preferences | `make macos` (`setup/macos.sh`) runs as part of the `setup` chain | Not run. No headless chain calls `macos` |
 | tmux durability mechanism | tmux-continuum's status-line `#()` autosave interpolation calls the shared verified wrapper; `prefix C-s` calls it immediately and updates the powerline only after both Resurrect and workspace sidecar validation | Headless macOS: a launchd job (`com.kalem.tmux-resurrect-save`) with an absolute Homebrew tmux path baked in as `TMUX_RESURRECT_SAVE_TMUX_BIN` (launchd's own PATH lacks Homebrew's bin dir). Headless Linux: a systemd `--user` timer (`tmux-resurrect-save.timer`, `OnUnitActiveSec=5min`) plus `loginctl enable-linger` so the user's systemd instance keeps running with no login session. Both timers use the same verified wrapper; an rw-focused `prefix C-s` also invokes it immediately on that worker. |
-| Provider auth | Interactive, done once on the local machine | Independent per worker — never copied from the focus machine or any other host. Each of `claude`, `codex`, and `pi` must be authenticated on the worker itself (manual step, see `docs/headless-workers.md`) |
+| Provider auth | Interactive, done once on the local machine | Independent per worker — never copied from the focus machine or any other host. Each of `claude` and `pi` must be authenticated on the worker itself (manual step, see `docs/headless-workers.md`) |
 | Tailscale | Included in `Brewfile` (`tailscale-app` cask); `tailscale up` is a manual step | Default-on on both platforms. macOS: `tailscale-app` cask via `Brewfile.headless`. Linux: installed via `setup/linux-headless.sh`'s `install_tailscale` (the official install script) unless `INSTALL_TAILSCALE=0` is set. `tailscale up`/authentication stays a manual step on every platform |
 | Postflight validation | None — `make setup` has no equivalent gate | `make headless-doctor` (`setup/headless-doctor.sh`), profile-aware (`local`, `headless-macos`, `headless-linux`, auto-detected from `uname -s`), read-only, and gates the success banner: `setup-linux-headless` is literally `setup-linux-headless-run headless-doctor` in the Makefile, and `setup/macos-headless.sh` runs `headless-doctor` as its last step before printing "Headless setup complete!" |
 | Linux init-system boundary | N/A (macOS only) | v1 is systemd-only. `setup/linux-headless.sh`'s `check_systemd_support` runs first, before `detect_package_manager`/any package install, and exits nonzero if `systemctl` is missing or `systemctl --user show-environment` can't connect — Alpine/OpenRC and non-systemd containers fail fast rather than reaching a partially-provisioned state |
@@ -104,18 +104,11 @@ Linux and macOS headless) still diverge, as of this writing.
      (shell function wrapping/completion, not something a noninteractive
      shell needs).
 
-2. **Provider config parity.** PARTLY FIXED. The three provider CLIs still
+2. **Provider config parity.** PARTLY FIXED. The two provider CLIs still
    have different first-run experiences:
    - `claude`'s shipped `claude/.claude/settings.json` now includes a
      `"theme": "dark"` key, so theme selection is no longer a first-run
      prompt.
-   - `codex` remains installed as a CLI, but has no repo-managed Stow
-     package, config, or hooks. Setup does not seed `~/.codex/config.toml`;
-     Codex's first-run setup and mutable configuration stay native.
-     `codexf` loads shared instructions directly from
-     `$DOTFILES/agents/communication.md`. tmux recovers live Codex session
-     IDs from the native process and its open rollout file, without a
-     Codex hook installation or trust step.
    - `pi` ships `pi/.pi/agent/settings.json` with `"theme": "personal"` plus
      the theme definition itself at `pi/.pi/agent/themes/personal.json`, so
      it applies instantly with no prompt.
@@ -236,7 +229,7 @@ exit. The allowlist's existing categories: macOS/Xcode-only tools correctly
 absent from Linux (`cocoapods`, `fastlane`, `swift`, `watchman`, `rbenv`);
 things installed by a mechanism other than the package arrays (`fnm`,
 `pyenv`, `tailscale`, `stripe-cli`, `yarn`, `docker`, `docker-compose`,
-`node`, `npm`, `pi`, `codex`, `claude`, `ob`, `go`); native-build-toolchain/
+`node`, `npm`, `pi`, `claude`, `ob`, `go`); native-build-toolchain/
 trust-store packages that are required but not part of the interactive
 command contract (`ca-certificates`, `make`, `gcc`, `g++`, `pkg-config`,
 `base-devel`, `build-base`); things disabled everywhere (`zsh-autocomplete`);

@@ -1,8 +1,8 @@
 # Focus-agent profiles
 
-`claudef`, `pif`, and `codexf` are opt-in focus launchers layered over the
-normal Claude Code, Pi, and Codex installations. Bare `claude`, `pi`, and
-`codex` keep their native behavior. The split matters because other programs
+`claudef` and `pif` are opt-in focus launchers layered over the normal
+Claude Code and Pi installations. Bare `claude` and `pi` keep their native
+behavior. The split matters because other programs
 may invoke those binaries and must not inherit interactive prompts, extensions,
 themes, or focus instructions.
 
@@ -25,10 +25,6 @@ pi/
 Authentication, transcripts, caches, project history, telemetry, and other
 mutable runtime data stay in each tool's native directory. Do not commit them
 or duplicate credentials into a focus profile.
-
-Codex has no repo-managed Stow package, config, or hooks. Setup installs the
-CLI but does not seed `~/.codex/config.toml`. Codex owns its native settings
-and runtime data.
 
 ## Claude profile
 
@@ -218,10 +214,10 @@ register one tool name, so this yield is the only way a repo copy can win;
 the content-engine harness ships `web.ts` this way.
 
 Keys come from the gitignored `.env` at the dotfiles root (`.env.example`
-lists them; today only `EXA_API_KEY`). The three launchers source it with
-`set -a` inside a subshell (`pif`, `codexf`) or just before `exec`
-(`claudef`), so only the launched process sees the values; bare `pi`,
-`claude` and `codex`, and the interactive shell, do not. The file is copied
+lists them; today only `EXA_API_KEY`). The two launchers source it with
+`set -a` inside a subshell (`pif`) or just before `exec` (`claudef`), so
+only the launched process sees the values; bare `pi` and `claude`, and the
+interactive shell, do not. The file is copied
 by hand to each machine; `setup/headless-doctor.sh` warns when it is
 missing or has no key. Decisions and the deferred fallbacks (Brave,
 Firecrawl, the deeper research CLI) are in
@@ -239,16 +235,9 @@ project-local expert catalog.
 
 ## Shared communication and provenance
 
-All three focus launchers load `agents/communication.md`. Other files under
+Both focus launchers load `agents/communication.md`. Other files under
 `agents/`, including `upstream_audit.md`, are references or skill content and
 are not system instructions.
-
-`codexf` runs `codex --dangerously-bypass-approvals-and-sandbox`, forwards
-arguments unchanged, and reads `$DOTFILES/agents/communication.md` directly.
-It injects that file as `developer_instructions`,
-Codex's per-launch equivalent of these shared system rules. The former always-on
-`unslop` skill is removed because `communication.md` is now the canonical
-writing guidance. Bare Codex is unchanged.
 
 The communication prompt's upstream inspirations and the
 two Pi derivatives are recorded in `upstream-sources.json`. The profile
@@ -262,7 +251,6 @@ target. Keep that target present when enabling agent-triggered audits. See
 | --- | --- |
 | Claude launcher | `claude/.local/bin/claudef` |
 | Pi launcher and runtime links | `zsh/.zshrc`, function `pif` |
-| Codex focus launcher | `zsh/.zshrc`, function `codexf` |
 | Claude focus profile | `claude/.config/claudef/` |
 | Intentional global Claude files | `claude/.claude/keybindings.json`, `claude/.claude/commands/plan.md` |
 | Pi focus profile | `pi/.config/pif/` |
@@ -289,12 +277,10 @@ When changing a focus launcher, verify these boundaries:
 7. Subagent reports appear before the coordinator response, and `/replay` does
    not mutate theme or title.
 8. Profile launches do not write mutable runtime data into tracked paths.
-9. `codexf` forwards explicit arguments with unrestricted execution and the
-   shared communication instructions, while bare `codex` remains unchanged.
-10. `EXA_API_KEY` reaches the `pif`, `claudef` and `codexf` children and
-    nothing else; `pif` in a non-repo directory answers a `web_search`
-    prompt and a `delegate research` prompt; `claudef` lists
-    `dotfiles-focus:research`; `node --test pi/tests/*.test.mjs` passes.
+9. `EXA_API_KEY` reaches the `pif` and `claudef` children and nothing
+   else; `pif` in a non-repo directory answers a `web_search` prompt and a
+   `delegate research` prompt; `claudef` lists `dotfiles-focus:research`;
+   `node --test pi/tests/*.test.mjs` passes.
 
 The migration and noninteractive isolation checks were completed in September
-2026. Check 10 was completed on 2026-11-18.
+2026. Check 9 was completed on 2026-11-18.

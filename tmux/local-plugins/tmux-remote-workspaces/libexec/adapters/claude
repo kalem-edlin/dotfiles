@@ -289,8 +289,7 @@ cmd_install() {
   # destination path. Claude records cwd on several line types and its
   # resume path matches against them: a transcript copied verbatim across
   # hosts fails with "No conversation found" even when the file sits in
-  # the correct project slug dir (smoke lane w5; same root cause codex's
-  # adapter already handles for payload.cwd). Only objects that carry a
+  # the correct project slug dir (smoke lane w5). Only objects that carry a
   # cwd key are re-encoded; jq's re-encoding is safe here because claude
   # reads these lines with a real JSON parser.
   local rewritten

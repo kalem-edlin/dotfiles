@@ -81,7 +81,7 @@ fi
   export GHIDRA_INSTALL_DIR="$HOME/Developer/tools/ghidra_12.1.4_PUBLIC"
 
 # Initialize fnm for noninteractive shells only. This is what puts the
-# selected default Node/npm and npm-global CLIs (pi, codex) on PATH for
+# selected default Node/npm and npm-global CLIs (such as pi) on PATH for
 # `ssh worker 'command'` invocations, which never source .zshrc. Interactive
 # shells get the fuller `--use-on-cd` setup from .zshrc's own fnm block
 # (zsh/.zshrc); skipping here when interactive avoids spawning fnm and

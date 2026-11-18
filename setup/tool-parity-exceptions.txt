@@ -35,7 +35,6 @@ docker-compose   same INSTALL_DOCKER block as docker above, same reasoning
 node             fnm-managed; installed by setup/node.sh, not a package-manager array entry (see fnm above)
 npm              ships with fnm-managed node; see node/fnm above
 pi               installed as an npm global by setup/node.sh, not a package-manager array entry
-codex            installed as an npm global by setup/node.sh, not a package-manager array entry
 claude           installed by setup/misc-headless.sh (Anthropic's own installer), not a package-manager array entry
 ob               Obsidian CLI installed by setup/obsidian.sh, not a package-manager array entry
 go               pinned upstream tarball installed by setup/go.sh (distro golang-go is too old for the tmux-agent-sessions picker), not a package-manager array entry

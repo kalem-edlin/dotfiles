@@ -649,7 +649,6 @@ rw_provider_pattern() {
     # Keep in sync with ca_patterns_claude: bare claude, the versioned
     # native install, and claudef's patched build in ~/.cache/claudef/bin.
     claude) printf '%s\n' '(^|/)claude([[:space:]]|$)|/claudef/bin/[^/[:space:]]+([[:space:]]|$)|/claude/versions/[^/[:space:]]+([[:space:]]|$)' ;;
-    codex) printf '%s\n' '(^|/)codex([[:space:]]|$)|codex\.js|codex-darwin|codex-linux' ;;
     pi) printf '%s\n' '(^|/)pi([[:space:]]|$)|pi-coding-agent' ;;
     *) printf '%s\n' "$1" ;;
   esac
@@ -720,7 +719,7 @@ rw_ps_tree_match_pids() {
 # Polls a few short retries for the provider process to show up in the
 # remote endpoint session: first via tmux's own #{pane_current_command}
 # (one ssh round trip), then a `pgrep -f` fallback on the worker (an
-# npm-launched CLI such as codex/pi commonly surfaces as "node" in
+# npm-launched CLI such as pi commonly surfaces as "node" in
 # pane_current_command and loses its distinguishing name). Returns 1 if the
 # provider never shows up within the polling budget.
 rw_wait_remote_provider_started() {

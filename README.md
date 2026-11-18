@@ -44,15 +44,11 @@ setup scripts and dotfiles for:
 - Direct `~/.config` links: `nvim`, `tmux`
 - CLI tooling: zsh, tmux, Neovim, Git/Git LFS, Stow, fd/ripgrep/bat/fzf/jq,
   Python/pyenv/pipx, Node/fnm/npm globals, Go (pinned upstream tarball, builds
-  the tmux-agent-sessions picker), Stripe CLI, Claude Code, Codex CLI, Pi
-  tools, and `ob`
+  the tmux-agent-sessions picker), Stripe CLI, Claude Code, Pi tools, and
+  `ob`
 - Server connectivity/services: Docker and Tailscale by default. Set
   `INSTALL_TAILSCALE=0` only for a deliberately public/LAN-only worker;
   Tailscale authentication (`sudo tailscale up`) remains manual.
-
-Codex CLI remains installed, but this repo manages no Codex config or hooks
-and does not seed `~/.codex/config.toml`. The `codexf` launcher loads shared
-instructions directly from `$DOTFILES/agents/communication.md`.
 
 GUI/macOS-only packages are intentionally skipped on Linux: AeroSpace,
 SketchyBar, Ghostty, KindaVim, macOS defaults, fonts/casks, and login items.

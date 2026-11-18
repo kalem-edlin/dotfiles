@@ -400,8 +400,8 @@ marker from the live process tree after a config reload. The sibling plugin's
 ## Agents
 
 Agent handoff (detect/versions/export/install/resume-cmd) is wired against
-the adapter contract in `libexec/adapters/README.md`; all three provider
-adapters (`pi`, `claude`, `codex`) are implemented there. Resumes go through
+the adapter contract in `libexec/adapters/README.md`; both provider
+adapters (`pi`, `claude`) are implemented there. Resumes go through
 the focus launchers -- `claudef --resume <id>` and `pif --session <path>`,
 typed into the endpoint pane's interactive login shell so the launcher
 resolves whether it is a script on `PATH` or a zsh function, and fnm's node

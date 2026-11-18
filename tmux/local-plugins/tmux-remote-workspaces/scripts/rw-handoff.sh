@@ -207,7 +207,7 @@ for i in "${!pane_lines[@]}"; do
   pid="$(printf '%s' "$line" | cut -f1)"
   pcmd="$(printf '%s' "$line" | cut -f8)"
   provider="" session="" project="" mode=""
-  for candidate in pi claude codex; do
+  for candidate in pi claude; do
     adapter="$ADAPTERS_DIR/$candidate"
     [ -x "$adapter" ] || continue
     detect_out="$("$adapter" detect --pane "$pid" 2>/dev/null)" || continue

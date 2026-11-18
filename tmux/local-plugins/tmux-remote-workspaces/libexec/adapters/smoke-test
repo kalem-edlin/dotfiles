@@ -3,33 +3,27 @@
 # adapters. See ../README.md's "Contract" and
 # docs/tmux-remote-workspaces.md, "Handoff and return".
 #
-# For each provider (pi, claude, codex) this runs a fully sandboxed
+# For each provider (pi, claude) this runs a fully sandboxed
 # export -> install round trip against a synthetic transcript fixture and
 # asserts placement correctness:
 #   - pi:     transcript file placed under pi's own session-directory
 #             convention, and `resume-cmd` resolves to the same session.
 #   - claude: transcript lands under the DESTINATION-path-encoded projects
 #             directory (~/.claude/projects/<dest-slug>/<session-id>.jsonl).
-#   - codex:  rollout placed at a filename/date-bucket-valid path with its
-#             first line's payload.cwd rewritten to the destination path.
 #
 # Never touches the real $HOME, the live tmux server, ssh, or any
 # content-engine-trees path: every provider's local storage root
-# ($HOME/.claude, $HOME/.codex, $HOME/.pi) is resolved under a fresh
-# per-provider sandbox $HOME. CODEX_HOME is also sandboxed alongside HOME
-# for parity/documentation with the live sandboxed smoke test described in
-# the codex adapter's own header comment -- this script's export/install
-# round trip never shells out to a real provider CLI, so only $HOME is
-# actually load-bearing here (the codex adapter resolves session storage
-# from $HOME, not $CODEX_HOME).
+# ($HOME/.claude, $HOME/.pi) is resolved under a fresh per-provider
+# sandbox $HOME. The export/install round trip never shells out to a real
+# provider CLI.
 #
 # Not wired into tmux anywhere -- this is an on-demand dev tool. Run it
 # directly:
 #   libexec/adapters/smoke-test
 #
 # What this does NOT exercise (needs a real TTY): actually completing an
-# interactive resume (`claude --resume ...`, `pi --session ...`,
-# `codex resume ...`) -- authenticating, rendering, and continuing a real
+# interactive resume (`claude --resume ...`, `pi --session ...`)
+# -- authenticating, rendering, and continuing a real
 # conversation. This script only proves the exported/installed transcript is
 # placed where each provider's resume mechanism looks, per the verified
 # facts in ../README.md and each adapter's own header comment. Run one real
@@ -181,63 +175,6 @@ smoke_claude() {
 }
 
 # ---------------------------------------------------------------------------
-# codex -- rollout placed at a filename/date-bucket-valid path with
-# payload.cwd rewritten to the destination.
-# ---------------------------------------------------------------------------
-smoke_codex() {
-  local sandbox src_project dest_project session_id rollout_name
-  sandbox="$(sandbox_dir)"
-  src_project="/tmp/rw-smoke-codex-source"
-  dest_project="/tmp/rw-smoke-codex-dest"
-  session_id="33333333-3333-3333-3333-333333333333"
-  rollout_name="rollout-2026-07-31T00-00-00-${session_id}.jsonl"
-
-  local src_dir
-  src_dir="$sandbox/.codex/sessions/2026/07/31"
-  mkdir -p "$src_dir"
-  {
-    jq -nc --arg cwd "$src_project" '{type: "session_meta", payload: {cwd: $cwd}}'
-    printf '{"type":"message","role":"user"}\n'
-  } >"$src_dir/$rollout_name"
-
-  local snapshot="$sandbox/snapshot"
-  if ! HOME="$sandbox" CODEX_HOME="$sandbox/.codex" "$ADAPTERS_DIR/codex" export \
-    --session-id "$session_id" --project-path "$src_project" --out "$snapshot" \
-    >/dev/null 2>"$sandbox/export.err"; then
-    bad "codex export ($(cat "$sandbox/export.err"))"
-    rm -rf "$sandbox"
-    return
-  fi
-  ok "codex export"
-
-  if ! HOME="$sandbox" CODEX_HOME="$sandbox/.codex" "$ADAPTERS_DIR/codex" install \
-    --snapshot "$snapshot" --dest-path "$dest_project" >/dev/null 2>"$sandbox/install.err"; then
-    bad "codex install ($(cat "$sandbox/install.err"))"
-    rm -rf "$sandbox"
-    return
-  fi
-  ok "codex install"
-
-  local dest_file="$sandbox/.codex/sessions/2026/07/31/$rollout_name"
-  if [ ! -f "$dest_file" ]; then
-    bad "codex: expected rollout at $dest_file, not found"
-    rm -rf "$sandbox"
-    return
-  fi
-  ok "codex: rollout placed at a filename/date-bucket-valid path ($dest_file)"
-
-  local rewritten_cwd
-  rewritten_cwd="$(head -n1 "$dest_file" | jq -r '.payload.cwd')"
-  if [ "$rewritten_cwd" = "$dest_project" ]; then
-    ok "codex: payload.cwd rewritten to the destination path"
-  else
-    bad "codex: payload.cwd is '$rewritten_cwd', expected '$dest_project'"
-  fi
-
-  rm -rf "$sandbox"
-}
-
-# ---------------------------------------------------------------------------
 # mode-flags -- access-mode capture (allowlist extraction from a live-style
 # argline) and its replay through resume-cmd, both directions' shared path.
 # ---------------------------------------------------------------------------
@@ -267,26 +204,12 @@ smoke_mode_flags() {
     bad "claude extract: plain launch leaked '$got'"
   fi
 
-  got="$(ca_mode_flags_codex "node /x/codex.js --dangerously-bypass-approvals-and-sandbox resume 33333333-3333-3333-3333-333333333333")"
-  if [ "$got" = "--dangerously-bypass-approvals-and-sandbox" ]; then
-    ok "codex extract: dangerous flag kept, resume subcommand dropped"
-  else
-    bad "codex extract: got '$got'"
-  fi
-
-  got="$(ca_mode_flags_codex "codex -s workspace-write -a never --full-auto")"
-  if [ "$got" = "--sandbox workspace-write --ask-for-approval never" ]; then
-    ok "codex extract: -s/-a normalized to long form, --full-auto (not resumable) dropped"
-  else
-    bad "codex extract: got '$got'"
-  fi
-
   # shellcheck disable=SC2016 # literal $() on purpose -- must NOT expand.
-  got="$(ca_mode_flags_codex 'codex --sandbox $(rm -rf /)')"
+  got="$(ca_mode_flags_claude 'claude --permission-mode $(rm -rf /)')"
   if [ "$got" = "" ]; then
-    ok "codex extract: unsafe flag value refused"
+    ok "claude extract: unsafe flag value refused"
   else
-    bad "codex extract: unsafe value leaked '$got'"
+    bad "claude extract: unsafe value leaked '$got'"
   fi
 
   local cmd
@@ -309,14 +232,6 @@ smoke_mode_flags() {
     bad "claude resume-cmd: got '$cmd'"
   fi
 
-  cmd="$("$ADAPTERS_DIR/codex" resume-cmd --dest-path /tmp/rw-smoke-mode --session-id abc \
-    --mode-flags "--sandbox workspace-write" --fork 2>/dev/null)"
-  if [ "$cmd" = "codex fork abc --sandbox workspace-write -C /tmp/rw-smoke-mode" ]; then
-    ok "codex resume-cmd: mode flags spliced on the fork subcommand"
-  else
-    bad "codex resume-cmd: got '$cmd'"
-  fi
-
   if "$ADAPTERS_DIR/claude" resume-cmd --dest-path /tmp/x --session-id abc \
     --mode-flags '--foo; rm -rf /' >/dev/null 2>&1; then
     bad "resume-cmd: accepted unsafe --mode-flags"
@@ -331,16 +246,13 @@ echo
 echo "== claude =="
 smoke_claude
 echo
-echo "== codex =="
-smoke_codex
-echo
 echo "== mode-flags =="
 smoke_mode_flags
 echo
 echo "== manual step (not exercised by this script) =="
 echo "note: none of the above completes a real interactive resume -- authentication,"
 echo "      TTY rendering, and actually continuing a real conversation are unexercised."
-echo "      Run one real 'claudef --resume', 'pif --session', or 'codex resume' by hand"
+echo "      Run one real 'claudef --resume' or 'pif --session' by hand"
 echo "      against an installed transcript before trusting a live handoff end-to-end."
 echo
 echo "smoke-test: $PASS passed, $FAIL failed"

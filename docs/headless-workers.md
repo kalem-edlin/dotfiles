@@ -57,7 +57,7 @@ this contract — not just that the installer exited zero.
 - **Commands:** `bash`, `zsh`, `ssh`, `git`, `git-lfs`, `stow`, `tmux`, `jq`,
   `rsync`, `tar`, `unzip`, `tailscale` (unless provisioned with
   `INSTALL_TAILSCALE=0`), and a usable UUID source; `node`, `npm`, `pi`,
-  `codex`, and `claude` for agent handoff; Neovim `nvim >= 0.10` (required
+  and `claude` for agent handoff; Neovim `nvim >= 0.10` (required
   by the managed config and remote Treemux) and `ob` as part of the intended
   headless toolset. On Linux, provisioning installs the official upstream
   stable tarball under `~/.local/opt` and links it into `~/.local/bin` when
@@ -67,15 +67,11 @@ this contract — not just that the installer exited zero.
   because distribution packages are too old.
 - **Dotfiles:** `~/.config/tmux` and `~/.config/nvim` linked to this
   repository; the `claude`, `git`, `pi`, `ssh`, `vim`, and `zsh`
-  packages stowed; `~/.local/bin/rw` available. Codex CLI remains installed,
-  but has no repo-managed config or hooks, and setup does not seed
-  `~/.codex/config.toml`. `codexf` loads shared instructions directly from
-  `$DOTFILES/agents/communication.md`.
+  packages stowed; `~/.local/bin/rw` available.
 - **tmux plugins:** TPM itself, `tmux-resurrect` and `tmux-continuum`, and
   this repository's own `tmux-workspace-resurrect` and
   `tmux-remote-workspaces` plugin files exposed through the tmux dotfiles
-  link. Live Codex session IDs are recovered from the native process and
-  its open rollout file, without installing or trusting a Codex hook.
+  link.
 - **REA and its tools** (`make rea`, `setup/rea.sh`; the last install step
   of both headless lanes and of `make setup`):
   - `~/Developer/rea`: a clone of `git@github.com:morluto/rea.git` with its
@@ -110,9 +106,9 @@ this contract — not just that the installer exited zero.
 - **Noninteractive availability:** every command a focus machine invokes via
   `ssh worker '<command>'` resolves without an interactive or login shell —
   in particular Homebrew `tmux`/`git-lfs` on macOS and fnm-managed
-  `node`/`pi`/`codex` on both platforms.
+  `node`/`pi` on both platforms.
 - **Independent credentials:** a worker-owned SSH key exists and is
-  registered with the Git host, and `claude`, `codex`, and `pi` are
+  registered with the Git host, and `claude` and `pi` are
   authenticated independently on the worker — never copied from the focus
   machine.
 - **Focus-machine registration:** the worker has a logical OpenSSH alias on
@@ -231,7 +227,7 @@ yourself, in this rough order:
 - **`tailscale up`** — authenticate Tailscale on the worker interactively
   (or via an explicitly approved auth-key workflow). The installer only
   installs the client.
-- **Authenticate `claude`, `codex`, and `pi` independently on the worker.**
+- **Authenticate `claude` and `pi` independently on the worker.**
   Credentials are never copied from the focus machine or any other host —
   each provider CLI must be logged in on the worker itself.
 - **Mac mini-specific manual steps:**
@@ -266,7 +262,7 @@ Check `git -C $REPO status --porcelain` first (see "Full validation" step 1);
 `reset --hard` discards whatever dirtied the tree. What a rerun does for each
 piece:
 
-- Homebrew or distro packages, Node globals (`pi`, `codex`), `claude`,
+- Homebrew or distro packages, Node globals (such as `pi`), `claude`,
   dotfile links and timers: brought to what the repo declares.
 - `~/Developer/rea`: `git fetch` and `git submodule update --init
   --recursive` only. The branch, HEAD and working tree are never reset,
@@ -344,7 +340,7 @@ registered:
 ```sh
 # Noninteractive command-resolution probe — must succeed without an
 # interactive/login shell and without shell-init output on stdout.
-ssh <worker> 'command -v tmux git git-lfs jq node pi codex claude go'
+ssh <worker> 'command -v tmux git git-lfs jq node pi claude go'
 ```
 
 Durability timer, per platform:
@@ -403,7 +399,7 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    exits 0 — this also proves the doctor's own toolchain resolves under a
    noninteractive SSH shell.
 4. Full contract probe:
-   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar unzip node npm pi codex claude nvim ob go rw java'` —
+   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar unzip node npm pi claude nvim ob go rw java'` —
    every command must resolve, and the output must be paths only, with no
    shell-init noise. `tailscale` too, unless the worker was provisioned with
    `INSTALL_TAILSCALE=0`.
@@ -437,7 +433,7 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    protection), and there is exactly one timer/service registered
    (`launchctl print` / `systemctl --user list-timers`).
 9. Provider presence (auth stays manual):
-   `ssh $W 'claude --version; codex --version; pi --version'` must resolve
+   `ssh $W 'claude --version; pi --version'` must resolve
    and print versions.
 10. `rw doctor` from the laptop reports the worker healthy, and
     `rw ensure --worker <alias>` can stand up or attach to a workspace on
