@@ -6,14 +6,21 @@
 # inside it moves together.
 #
 #   1. Remote pane (@remote-host set) -> "hand <root> back to this
-#      machine? (y/n)", then `rw handback --pane <origin>`.
+#      machine? (y/n)", then `rw bg handback --pane <origin>`.
 #   2. Local pane in a root that is already remote (the frozen local copy,
 #      D17) -> "open this pane remote in <root>? (y/n)", then
 #      `rw open --pane <origin>`. Only from a shell prompt: rw open replaces
 #      the pane's process.
 #   3. Any other local pane -> the worker chooser, its header naming the
-#      resolved root and how many panes move, then
-#      `rw handoff --worker <alias> --pane <origin>`.
+#      resolved root and how many panes move (and warning about unsaved
+#      editor buffers), then `rw bg handoff --worker <alias> --pane <origin>`.
+#
+# Handoff and hand-back run in the BACKGROUND (libexec/rw-bg): once the
+# choice is made, rw bg checks the root and returns, and the popup closes at
+# once, so the client is free while the transfer runs. Progress shows in the
+# status line (@rw-transfer chip) and display-message; a conflict or failure
+# opens its dialog from the runner. A refusal rw bg finds synchronously is
+# shown here, inline. `rw open` (no sync, quick) still runs in the popup.
 #
 # rw is always RUN from here, never typed into a pane with send-keys: a
 # remote pane's foreground is an ssh PTY into the worker, where anything
@@ -21,14 +28,15 @@
 # the run, so rw takes its --pane branch (respawn that pane) instead of
 # exec-ing the popup into an attach loop.
 #
-# Exit codes from rw (scripts/rw usage): 5 -> the conflict dialog (the
-# files from rw's `conflict<TAB>path<TAB>kind` stdout lines, a screenful at
-# most, then abort / keep both / overwrite, abort first so a stray enter
-# moves nothing; the last two re-run with --resolve), 6 -> "worker
-# unreachable", 2/3/7 and anything else -> the dismissible failure dialog
-# with one cause line and one action line. Refusals the picker finds itself
-# are shown the same way, inline: display-popup from inside this popup is
-# a no-op (tmux draws one overlay per client), so rw_dialog cannot be used.
+# Exit codes from rw open (scripts/rw usage): 5 -> the conflict dialog
+# (libexec/rw-dialogs.sh, shared with the background runner: the files
+# from rw's `conflict<TAB>path<TAB>kind` stdout lines, a screenful at most,
+# then abort / keep both / overwrite, abort first so a stray enter moves
+# nothing; the last two re-run with --resolve), 6 -> "worker unreachable",
+# 2/3/7 and anything else -> the dismissible failure dialog with one cause
+# line and one action line. Refusals the picker finds itself are shown the
+# same way, inline: display-popup from inside this popup is a no-op (tmux
+# draws one overlay per client), so rw_dialog cannot be used.
 #
 # Modes (self-invocations; the binding only ever calls `pick`):
 #   pick    act on the focused pane
@@ -47,6 +55,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=roots.sh
 source "$SCRIPT_DIR/roots.sh"
+# shellcheck source=../libexec/rw-dialogs.sh
+source "$SCRIPT_DIR/../libexec/rw-dialogs.sh"
 
 mode="${1:-pick}"
 RW_BIN="$SCRIPT_DIR/rw"
@@ -125,9 +135,7 @@ rw_pick_tilde() {
 }
 
 # rw_pick_plural <n> <noun> -- "1 pane", "3 panes".
-rw_pick_plural() {
-  if [ "$1" -eq 1 ]; then printf '1 %s' "$2"; else printf '%d %ss' "$1" "$2"; fi
-}
+rw_pick_plural() { rw_dlg_plural "$@"; }
 
 # rw_pick_notice <title> <message> -- an inline dismissible notice in this
 # popup. Not rw_dialog: that opens a display-popup, and tmux keeps one
@@ -199,85 +207,34 @@ rw_pick_transfer() {
   return "$status"
 }
 
-# rw_pick_conflict_dialog <verb> <out_file>
-# Lists the conflicting files (a screenful, then "+N more") above a
-# three-way choice. Prints overwrite, keep-both, or nothing for abort.
-rw_pick_conflict_dialog() {
-  local verb="$1" out_file="$2" total rows room list title sel
-  total="$(grep -c $'^conflict\t' "$out_file" || true)"
-  rows="$(stty size </dev/tty 2>/dev/null | awk '{print $1}')"
-  case "$rows" in '' | *[!0-9]*) rows=24 ;; esac
-  # fzf's prompt, info line and three choices, the title and its blank.
-  room=$((rows - 9))
-  [ "$room" -ge 3 ] || room=3
-  if [ "$total" -gt "$room" ]; then
-    list="$(grep $'^conflict\t' "$out_file" | head -n $((room - 1)) | awk -F '\t' '{ printf "  %-8s %s\n", $3, $2 }')"
-    list="$list"$'\n'"  +$((total - room + 1)) more"
-  else
-    list="$(grep $'^conflict\t' "$out_file" | awk -F '\t' '{ printf "  %-8s %s\n", $3, $2 }')"
-  fi
-  case "$verb" in
-    handoff) title="$(rw_pick_plural "$total" file) changed on the remote copy since it was last synced; the local copy is about to replace it:" ;;
-    *) title="$(rw_pick_plural "$total" file) changed in the frozen local copy since the handoff; the remote copy is about to replace it:" ;;
-  esac
-  sel="$(printf '%s\n' \
-    $'abort\tabort: nothing moves' \
-    $'keep-both\tkeep both: each losing file is kept as <file>.local-<date>' \
-    $'overwrite\toverwrite: the incoming copy wins, the listed changes are lost' |
-    fzf --layout=reverse --info=hidden --no-multi --no-sort \
-      --delimiter=$'\t' --with-nth=2 \
-      --prompt='conflict ⇒ ' \
-      --header="$title"$'\n'"$list")" || return 0
-  sel="${sel%%$'\t'*}"
-  case "$sel" in overwrite | keep-both) printf '%s\n' "$sel" ;; esac
-}
+# rw_pick_conflict_dialog <verb> <out_file> -- the shared conflict dialog
+# (libexec/rw-dialogs.sh). Prints overwrite, keep-both, or nothing.
+rw_pick_conflict_dialog() { rw_conflict_dialog "$@"; }
 
 # Hold the popup open as a dismissible DIALOG explaining the failure in one
 # cause line and one action line. Never a status-bar display-message:
 # refusals flashed there were unreadable (2026-08-05, 2026-08-06; operator
 # 2026-08-08: "a dialog I can dismiss, not useless text in the command bar").
 rw_pick_failure_dialog() {
-  local label="$1" status="$2" out_file="$3" cause="" action="" refusal
-  refusal="$(grep '^rw: ' "$out_file" | tail -n 1 | sed 's/^rw: //')"
-  case "$status" in
-    6)
-      cause="worker unreachable over ssh; nothing moved"
-      action="check the worker is awake and on the network, then retry"
-      ;;
-    2)
-      cause="the git history of the copy being overwritten has diverged"
-      action="inspect it, or re-run from a shell with --force-diverged (a backup is taken)"
-      ;;
-    3)
-      cause="agent CLI version differs between here and the worker"
-      action="update the older side, then retry"
-      ;;
-    7)
-      cause="rw refused this root: ${refusal:-it is not in a state this allows}"
-      action="nothing moved. A root is a git worktree's top or a plain folder under ~ (not ~ itself, not a folder of worktrees); rw status lists remote roots"
-      ;;
-  esac
-  if [ -z "$cause" ]; then
-    if grep -q 'SOURCE workspace changed while the handoff was in flight\|source_changed_during_sync' "$out_file"; then
-      cause="another writer (a running agent or editor) edited this directory mid-transfer"
-      action="pause or finish that writer, then retry"
-    elif grep -q 'destination content does not match' "$out_file"; then
-      cause="post-sync verification failed; the copy is unverified"
-      action="inspect the destination path from the log before retrying"
-    elif grep -q 'could not confirm a supported AI agent\|neither a shell, an editor, nor a recognized agent' "$out_file"; then
-      cause="a pane in this root is busy with something that cannot move safely"
-      action="stop it, or wait for the agent to finish starting, then retry"
-    elif grep -q 'attach loop was not started\|could not start the attach loop' "$out_file"; then
-      cause="the remote side started, but a local pane could not switch into it"
-      action="retry, or check rw status for the recorded endpoint"
-    else
-      cause="${refusal:-unrecognized failure (exit $status)}"
-      action="$(tail -n 2 "$out_file" | grep -v $'^conflict\t' | tr '\n' ' ')"
-    fi
-  fi
+  local label="$1" status="$2" out_file="$3"
+  rw_failure_explain "$status" "$out_file"
   printf '\n\033[1m%s failed\033[0m\n  cause:  %s\n  action: %s\n\n  [press any key to dismiss]\n' \
-    "$label" "$cause" "$action"
+    "$label" "$RW_FAIL_CAUSE" "$RW_FAIL_ACTION"
   read -r -s -n 1 2>/dev/null </dev/tty || true
+}
+
+# rw_pick_bg <verb> <args...>
+# `rw bg <verb> <args...>`: rw bg checks the root and returns at once, the
+# transfer runs detached, and the popup closes. A synchronous refusal (the
+# root is invalid, already moving, ...) is shown inline instead.
+rw_pick_bg() {
+  local verb="$1" out status
+  shift
+  out="$(env -u TMUX_PANE "$RW_BIN" bg "$verb" "$@" </dev/null 2>&1)"
+  status=$?
+  [ "$status" -eq 0 ] && exit 0
+  rw_pick_notice "rw $verb not started" "$(printf '%s\n' "$out" | grep '^rw' | tail -n 1 | sed 's/^rw: //')"
+  exit "$status"
 }
 
 # --- 1. Remote pane: hand its root back ------------------------------------
@@ -302,8 +259,7 @@ pick_handback() {
   [ "$n" -gt 1 ] && printf ' %s come back with it.' "$(rw_pick_plural "$n" pane)"
   printf '\n'
   rw_pick_yes "hand $(rw_pick_tilde "$root") back to this machine?" || exit 0
-  printf '\n'
-  rw_pick_transfer handback --pane "$origin_pane"
+  rw_pick_bg handback --pane "$origin_pane"
 }
 
 # --- 2. Local pane in the frozen copy of a remote root: open it remote ------
@@ -336,7 +292,7 @@ pick_handoff() {
   [ "$editors" -gt 0 ] && header="$header"$'\n'"editors move too, but unsaved buffers do not: save first"
 
   alias="$(rw_pick_worker_menu 'rw handoff ⇒ ' "$header")" || exit 0
-  rw_pick_transfer handoff --worker "$alias" --pane "$origin_pane"
+  rw_pick_bg handoff --worker "$alias" --pane "$origin_pane"
 }
 
 pick() {

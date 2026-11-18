@@ -985,3 +985,21 @@ rw_worker_request_save() {
   rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
     "if tmux list-sessions >/dev/null 2>&1; then $trigger; fi; true" </dev/null >/dev/null 2>&1 || true
 }
+
+# rw_worker_copy_root_for_path <abs-path>
+# On a WORKER: prints the root_id of the worker-owned ownership mirror that
+# encloses <path> (a copy this machine holds for another, focus, machine);
+# exit 1 otherwise -- including on the focus machine itself, whose own
+# records carry its own machine id. Never creates the machine-id file.
+rw_worker_copy_root_for_path() {
+  local id own rec
+  id="$(rw_owned_root_for_path "${1:?path required}")" || return 1
+  own="$(cat "$(rw_machine_id_file)" 2>/dev/null || true)"
+  rec="$(jq -r '.focus_machine_id // empty' "$(rw_owned_record_file "$id")" 2>/dev/null)"
+  [ -n "$rec" ] && [ "$rec" != "$own" ] || return 1
+  printf '%s\n' "$id"
+}
+
+# rw_bg_dir -- background transfer jobs (libexec/rw-bg): bg/<root_id>/ holds
+# job.json and the runner's pid while a transfer of that root is in flight.
+rw_bg_dir() { printf '%s/bg\n' "$(rw_state_dir)"; }

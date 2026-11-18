@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tmux-remote-workspaces command dispatcher.
 #
-# Usage: rw <handoff|handback|open|forget|reclaim|status|close|doctor> [args...]
+# Usage: rw <handoff|handback|bg|request|open|forget|reclaim|status|close|doctor> [args...]
 #
 # The unit of handoff is a directory root (a worktree or a plain folder);
 # see docs/tasks/mini-remote-sessions.md for the model and contracts.
@@ -38,6 +38,19 @@ commands:
       Bring a remote root and all of its panes (and their agents) back.
       Refused while a remote agent is mid-turn; --wait-idle waits for it
       (default 300s).
+
+  bg handoff [--worker <alias>] --pane <pane-id> [--wait-idle <seconds>]
+  bg handback --pane <pane-id> [--wait-idle <seconds>]
+      The same transfer in the background: checks, returns at once, then
+      waits (default 600s) for the root's agents to finish their turn and
+      runs handoff / handback detached. Progress shows in the status line;
+      a conflict or failure opens a dialog. Log:
+      ~/.local/state/tmux-remote-workspaces/logs/bg-<root_id>-<time>.log.
+      --worker defaults to the only configured worker.
+
+  request handback
+      On the remote side of a handed-off pane: ask the local side to hand
+      this root back (sets the pane option @rw-request).
 
   open [--worker <alias>] [--root <path>] [--pane <pane-id>]
       A new remote pane in a root that is already remote. No sync.
@@ -82,6 +95,8 @@ shift
 case "$command" in
   handoff) exec "$SCRIPT_DIR/rw-handoff.sh" "$@" ;;
   handback) exec "$SCRIPT_DIR/rw-handback.sh" "$@" ;;
+  bg) exec "$SCRIPT_DIR/../libexec/rw-bg" "$@" ;;
+  request) exec "$SCRIPT_DIR/../libexec/rw-request" "$@" ;;
   open) exec "$SCRIPT_DIR/rw-open.sh" "$@" ;;
   forget) exec "$SCRIPT_DIR/rw-forget.sh" "$@" ;;
   reclaim) exec "$SCRIPT_DIR/rw-reclaim.sh" "$@" ;;

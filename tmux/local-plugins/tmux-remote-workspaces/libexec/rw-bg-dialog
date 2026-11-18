@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# The conflict dialog of a background transfer, run by libexec/rw-bg inside
+# a tmux display-popup: the same three-way choice the `prefix e` popup shows
+# (libexec/rw-dialogs.sh).
+#
+# Usage: rw-bg-dialog conflict <handoff|handback> <out_file> <choice_file>
+#
+# Touches <choice_file>.shown as soon as the popup runs (so the runner can
+# tell a popup tmux never drew from one still open), then writes overwrite,
+# keep-both or abort to <choice_file>.
+
+set -uo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=rw-dialogs.sh
+source "$DIR/rw-dialogs.sh"
+
+[ "${1:-}" = conflict ] && [ $# -eq 4 ] || {
+  echo "usage: rw-bg-dialog conflict <verb> <out_file> <choice_file>" >&2
+  exit 64
+}
+verb="$2" out_file="$3" choice_file="$4"
+: >"$choice_file.shown"
+choice="$(rw_conflict_dialog "$verb" "$out_file")"
+printf '%s\n' "${choice:-abort}" >"$choice_file.tmp" && mv -f "$choice_file.tmp" "$choice_file"

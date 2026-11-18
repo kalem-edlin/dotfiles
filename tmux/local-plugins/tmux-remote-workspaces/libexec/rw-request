@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# `rw request handback` -- ask for the root this pane works in to come back
+# (contract CX2, docs/tasks/mini-remote-sessions.md).
+#
+# Runs ON THE WORKER, inside a hidden endpoint session pane ($TMUX_PANE):
+# sets the pane option @rw-request=handback on that pane and prints one
+# line. The focus machine's attach loop for that pane sees the option,
+# clears it, and runs `rw bg handback --pane <its local pane>`, which waits
+# for the agents here to go idle before it moves anything.
+#
+# Refused (exit 7) where the root is held on this machine: no worker-owned
+# mirror encloses the pane's directory, or the record is this machine's own
+# (the focus machine's frozen copy). Exit 64 on usage or without $TMUX_PANE.
+
+set -uo pipefail
+
+LIBEXEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../scripts/common.sh
+source "$LIBEXEC_DIR/../scripts/common.sh"
+
+[ "${1:-}" = handback ] && [ $# -eq 1 ] || rw_die "usage: rw request handback" 64
+rw_need_jq
+pane="${TMUX_PANE:-}"
+[ -n "$pane" ] || rw_die "rw request: run it inside the tmux pane of a handed-off root (TMUX_PANE is unset)." 64
+
+cwd="$(tmux display-message -pt "$pane" -F '#{pane_current_path}' 2>/dev/null || true)"
+[ -n "$cwd" ] || cwd="$(pwd -P)"
+
+if ! root_id="$(rw_worker_copy_root_for_path "$cwd")"; then
+  if root_id="$(rw_owned_root_for_path "$cwd")"; then
+    rw_die "rw request: '$(jq -r .root_local "$(rw_owned_record_file "$root_id")")' is remote and this is its frozen local copy; hand it back with prefix e on one of its remote panes." 7
+  fi
+  rw_die "rw request: '$cwd' is held on this machine, not a remote copy; to hand it to a worker run 'rw bg handoff --pane $pane'." 7
+fi
+root_rel="$(jq -r .root_rel "$(rw_owned_record_file "$root_id")")"
+
+tmux set-option -pq -t "$pane" @rw-request handback 2>/dev/null ||
+  rw_die "rw request: could not set @rw-request on pane $pane." 1
+rw_log_event "request" "" "" "" "handback" "root=$root_rel pane=$pane"
+printf 'rw: hand-back of ~/%s requested; it runs once the agents here are idle.\n' "$root_rel"

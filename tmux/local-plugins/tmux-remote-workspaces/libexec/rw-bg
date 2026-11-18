@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+# `rw bg handoff|handback` -- a background transfer (contract CX3,
+# docs/tasks/mini-remote-sessions.md).
+#
+#   rw bg handoff  [--worker <alias>] --pane <pane-id> [--wait-idle <seconds>]
+#   rw bg handback --pane <pane-id> [--wait-idle <seconds>]
+#
+# A cheap synchronous preflight (the pane exists, its root resolves, the
+# worker is known or the root is worker-owned, this is not the worker side,
+# nothing else is transferring that root), then exit 0 at once. The transfer
+# runs detached: its own session and process group (POSIX setsid, through
+# perl), stdin from /dev/null, stdout and stderr to
+#   $(rw_state_dir)/logs/bg-<root_id>-<YYYYmmdd-HHMMSS>.log
+# so it outlives the caller, the calling agent's turn, and the respawn of
+# the very pane it was launched from. --worker may be left out when
+# config.json declares exactly one worker.
+#
+# The runner (`rw-bg --run <job-dir>`):
+#   1. handoff: waits until no pane in the root has @agent_state `working`
+#      (the panes `rw handoff` itself moves, roots.sh rw_root_panes),
+#      bounded by --wait-idle (default 600s); handback: passes the remaining
+#      --wait-idle to `rw handback`, which waits for the remote agents.
+#   2. runs the ordinary `rw handoff` / `rw handback` with TMUX_PANE unset.
+#   3. exit 5 (manifest conflict): the conflict dialog of the `prefix e`
+#      popup in a display-popup, then a re-run with the chosen --resolve.
+#      Any other failure: a dismissible dialog with the error lines and the
+#      log path. A handoff refused because an agent started another turn is
+#      retried while --wait-idle lasts.
+# While it runs, global @rw-transfer ("handoff <root_rel>", several joined
+# with ", ") and @rw-transfer-label (the status chip's text) are set by
+# scripts/rw-refresh-indicators.sh --transfers; display-message reports the
+# start and the end.
+#
+# One transfer per root: bg/<root_id>/ (job.json and the runner's pid) is
+# its lock, and a live per-root rw lock (another rw command) refuses too.
+#
+# Exit (synchronous part): 0 started, 1 already running / pane missing,
+# 7 root invalid, already remote, not remote, or the worker side,
+# 64 usage. The transfer's own exit codes (2, 3, 5, 6, 7) reach the log,
+# the dialog and events.jsonl (`bg-handoff` / `bg-handback`).
+
+set -uo pipefail
+
+LIBEXEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$(cd "$LIBEXEC_DIR/../scripts" && pwd)"
+# shellcheck source=../scripts/roots.sh
+source "$SCRIPTS_DIR/roots.sh"
+# RW_BG_RW_BIN: test seam (tests/test_bg.sh fakes the transfer).
+RW_BIN="${RW_BG_RW_BIN:-$SCRIPTS_DIR/rw}"
+
+usage() {
+  sed -n '5,6s/^# \{0,1\}//p' "$0" >&2
+  exit 64
+}
+
+# tilde <path> -- ~/... under $HOME, for messages.
+# shellcheck disable=SC2088 # a literal ~ is the point
+tilde() {
+  local home_p
+  home_p="$(rw_physical_path "$HOME")"
+  case "$1" in
+    "$HOME"/*) printf '~/%s\n' "${1#"$HOME"/}" ;;
+    "$home_p"/*) printf '~/%s\n' "${1#"$home_p"/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+stamp() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+
+notify() { tmux display-message -d 6000 "$1" >/dev/null 2>&1 || true; }
+
+refresh_indicators() { bash "$SCRIPTS_DIR/rw-refresh-indicators.sh" --transfers >/dev/null 2>&1 || true; }
+
+# A pane in an rw-<8hex>-<8hex> session is the worker side of a handed-off
+# pane; so is any directory inside a worker-held copy.
+worker_side() { # <session_name> <cwd>
+  case "$1" in rw-????????-????????) return 0 ;; esac
+  [ -n "$2" ] && rw_worker_copy_root_for_path "$2" >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Detach
+# ---------------------------------------------------------------------------
+
+# bg_spawn <log> <cmd...> -- runs <cmd> in its own session (setsid), stdin
+# /dev/null, stdout+stderr appended to <log>, every other fd closed, its
+# parent gone at once (so it is reparented to init, out of the caller's
+# process tree). Prints its pid.
+bg_spawn() {
+  local log="$1"
+  shift
+  if command -v perl >/dev/null 2>&1; then
+    perl -MPOSIX -e '
+      my $log = shift @ARGV;
+      defined(my $pid = fork()) or die "fork: $!\n";
+      if ($pid) { print "$pid\n"; exit 0; }
+      POSIX::setsid();
+      open(STDIN, "<", "/dev/null");
+      open(STDOUT, ">>", $log) or exit 127;
+      open(STDERR, ">&STDOUT");
+      POSIX::close($_) for 3 .. 255;
+      exec { $ARGV[0] } @ARGV or exit 127;' "$log" "$@"
+  else
+    nohup "$@" </dev/null >>"$log" 2>&1 &
+    printf '%s\n' "$!"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Front: preflight, then start the runner
+# ---------------------------------------------------------------------------
+
+front() {
+  local verb="$1" worker="" pane="" wait_idle=600
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --worker) worker="${2:-}"; shift 2 || usage ;;
+      --pane) pane="${2:-}"; shift 2 || usage ;;
+      --wait-idle) wait_idle="${2:-}"; shift 2 || usage ;;
+      -h | --help) usage ;;
+      *) rw_die "rw bg $verb: unknown argument: $1" 64 ;;
+    esac
+  done
+  [ -n "$pane" ] || rw_die "rw bg $verb: --pane is required" 64
+  case "$wait_idle" in '' | *[!0-9]*) rw_die "rw bg $verb: --wait-idle takes a number of seconds" 64 ;; esac
+  [ "$verb" = handoff ] || [ -z "$worker" ] || rw_die "rw bg handback: --worker is not taken (the ownership record names the worker)" 64
+  rw_need_jq
+  rw_config_valid || rw_die "config.json ($RW_CONFIG_FILE) is invalid"
+
+  [ "$(tmux display-message -pt "$pane" -F '#{pane_id}' 2>/dev/null)" = "$pane" ] ||
+    rw_die "rw bg $verb: no pane $pane on this tmux server." 1
+  local sess cwd
+  sess="$(tmux display-message -pt "$pane" -F '#{session_name}' 2>/dev/null || true)"
+  cwd="$(tmux display-message -pt "$pane" -F '#{pane_current_path}' 2>/dev/null || true)"
+  if worker_side "$sess" "$cwd"; then
+    rw_die "rw bg $verb: this is the remote copy of a handed-off root; to bring it back run 'rw request handback' here." 7
+  fi
+
+  local root_id="" root_rel root_local record
+  if [ "$verb" = handoff ]; then
+    [ -n "$cwd" ] || rw_die "rw bg handoff: cannot read the directory of pane $pane." 1
+    if root_id="$(rw_owned_root_for_path "$cwd")"; then
+      record="$(rw_owned_record_read "$root_id")"
+      rw_die "rw bg handoff: $(tilde "$(printf '%s' "$record" | jq -r .root_local)") is already remote on '$(printf '%s' "$record" | jq -r .worker)'; 'rw bg handback --pane <its pane>' (or prefix e there) brings it back." 7
+    fi
+    local top kind nested
+    top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+    root_local="$(rw_physical_path "${top:-$cwd}")"
+    root_rel="$(rw_root_rel "$root_local")" ||
+      rw_die "rw bg handoff: '$root_local' is not inside your home directory (or is the home directory itself); only directories under ~ can be handed off." 7
+    root_id="$(rw_root_id "$root_rel")"
+    kind="$(rw_root_kind "$root_local")"
+    if [ "$kind" = plain ]; then
+      case "$root_rel" in
+        */*) : ;;
+        *) rw_die "rw bg handoff: '~/$root_rel' is a top-level folder of your home directory; hand off the project inside it ('rw handoff --root' moves all of it)." 7 ;;
+      esac
+      nested="$(find "$root_local" -mindepth 2 -maxdepth 5 -name .git -print -quit 2>/dev/null)"
+      [ -z "$nested" ] ||
+        rw_die "rw bg handoff: '~/$root_rel' contains the git repository '$(dirname "$nested")'; hand off that worktree instead." 7
+    fi
+    if overlap="$(rw_owned_overlap "$root_local")"; then
+      rw_die "rw bg handoff: '$root_local' overlaps the remote root '$overlap'." 7
+    fi
+    if [ -z "$worker" ]; then
+      [ "$(jq '.workers | length' "$RW_CONFIG_FILE")" = 1 ] ||
+        rw_die "rw bg handoff: --worker is required (configured: $(jq -r '[.workers[].alias] | join(", ")' "$RW_CONFIG_FILE"))." 64
+      worker="$(jq -r '.workers[0].alias' "$RW_CONFIG_FILE")"
+    fi
+    rw_worker_known "$worker" || rw_die "rw bg handoff: worker '$worker' is not declared in config.json" 64
+  else
+    root_id="$(rw_pane_get "$pane" @rw-root-id)"
+    if [ -z "$root_id" ]; then
+      local ep
+      ep="$(rw_pane_get "$pane" @rw-endpoint)"
+      [ -n "$ep" ] && root_id="$(rw_read_endpoint "$ep" 2>/dev/null | jq -r '.root_id // empty')"
+    fi
+    [ -n "$root_id" ] || { [ -n "$cwd" ] && root_id="$(rw_owned_root_for_path "$cwd" || true)"; }
+    record=""
+    [ -n "$root_id" ] && record="$(rw_owned_record_read "$root_id" 2>/dev/null || true)"
+    if [ -z "$record" ] || [ "$(printf '%s' "$record" | jq -r .owner)" != worker ]; then
+      rw_die "rw bg handback: pane $pane is not in a remote root; nothing to hand back." 7
+    fi
+    worker="$(printf '%s' "$record" | jq -r .worker)"
+    root_rel="$(printf '%s' "$record" | jq -r .root_rel)"
+    root_local="$(printf '%s' "$record" | jq -r .root_local)"
+    rw_worker_known "$worker" || rw_die "rw bg handback: worker '$worker' (from the ownership record) is not declared in config.json" 1
+  fi
+
+  # One transfer per root.
+  local lock_pid
+  lock_pid="$(cat "$(rw_root_lock_dir "$root_id")/pid" 2>/dev/null || true)"
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    rw_die "rw bg $verb: another rw operation on $(tilde "$root_local") is running (pid $lock_pid); retry when it finishes." 1
+  fi
+  local job job_pid
+  job="$(rw_bg_dir)/$root_id"
+  rw_ensure_private_dir "$(rw_bg_dir)"
+  if ! mkdir "$job" 2>/dev/null; then
+    job_pid="$(cat "$job/pid" 2>/dev/null || true)"
+    if [ -z "$job_pid" ] || kill -0 "$job_pid" 2>/dev/null; then
+      rw_die "rw bg $verb: a background $(jq -r '.verb // "transfer"' "$job/job.json" 2>/dev/null) of $(tilde "$root_local") is already running (log: $(jq -r '.log // "?"' "$job/job.json" 2>/dev/null))." 1
+    fi
+    rm -rf "$job"
+    mkdir "$job" 2>/dev/null || rw_die "rw bg $verb: a background transfer of $(tilde "$root_local") is starting." 1
+  fi
+  printf '%s\n' "$$" >"$job/pid"
+
+  local log_dir log
+  log_dir="$(rw_state_dir)/logs"
+  rw_ensure_private_dir "$log_dir"
+  log="$log_dir/bg-$root_id-$(date +%Y%m%d-%H%M%S).log"
+  : >>"$log"
+  chmod 0600 "$log" 2>/dev/null || true
+  jq -nc --arg verb "$verb" --arg root_id "$root_id" --arg root_rel "$root_rel" \
+    --arg root_local "$root_local" --arg worker "$worker" --arg pane "$pane" \
+    --argjson wait_idle "$wait_idle" --arg log "$log" --arg started "$(rw_now_iso)" \
+    '{verb: $verb, root_id: $root_id, root_rel: $root_rel, root_local: $root_local,
+      worker: $worker, pane: $pane, wait_idle: $wait_idle, log: $log, started: $started}' \
+    >"$job/job.json"
+
+  local runner
+  runner="$(bg_spawn "$log" bash "$LIBEXEC_DIR/rw-bg" --run "$job")"
+  case "$runner" in
+    '' | *[!0-9]*)
+      rm -rf "$job"
+      rw_die "rw bg $verb: could not start the background transfer (see $log)." 1
+      ;;
+  esac
+  printf '%s\n' "$runner" >"$job/pid" 2>/dev/null || true
+  if [ "$verb" = handoff ]; then
+    printf 'rw: handing off %s to %s in the background (log: %s)\n' "$(tilde "$root_local")" "$worker" "$log"
+  else
+    printf 'rw: handing %s back in the background (log: %s)\n' "$(tilde "$root_local")" "$log"
+  fi
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Runner (detached)
+# ---------------------------------------------------------------------------
+
+run() {
+  local job="$1"
+  [ -f "$job/job.json" ] || exit 1
+  printf '%s\n' "$$" >"$job/pid"
+  jf() { jq -r ".$1 // empty" "$job/job.json"; }
+  verb="$(jf verb)" root_id="$(jf root_id)" root_rel="$(jf root_rel)" root_local="$(jf root_local)"
+  worker="$(jf worker)" pane="$(jf pane)" wait_idle="$(jf wait_idle)" log="$(jf log)"
+  shown="$(tilde "$root_local")"
+  attempt="$job/attempt.out"
+  released=0
+  trap 'release' EXIT
+  trap 'exit 1' HUP TERM INT
+
+  start="$(date +%s)"
+  deadline=$((start + wait_idle))
+  start_ms="$(rw_now_epoch)"
+  refresh_indicators
+  printf '[%s] rw bg %s of %s (worker %s, pane %s, wait-idle %ss), runner pid %s\n' \
+    "$(stamp)" "$verb" "$root_local" "$worker" "$pane" "$wait_idle" "$$"
+  rw_log_event "bg-$verb" "" "$worker" "" "start" "root=$root_rel log=$log"
+  if [ "$verb" = handoff ]; then
+    notify "handing off $shown to $worker in the background"
+  else
+    notify "handing $shown back in the background"
+  fi
+
+  local resolve="" status args choice
+  while :; do
+    if [ "$verb" = handoff ] && ! wait_local_idle; then
+      printf 'rw: an agent in %s was still working after %ss; nothing was moved.\n' "$shown" "$wait_idle" >"$attempt"
+      cat "$attempt"
+      fail 1
+    fi
+    if [ "$verb" = handoff ]; then
+      args=(handoff --worker "$worker" --root "$root_local" --pane "$pane")
+    else
+      local left=$((deadline - $(date +%s)))
+      [ "$left" -gt 0 ] || left=1
+      args=(handback --root "$root_local" --pane "$pane" --wait-idle "$left")
+    fi
+    [ -n "$resolve" ] && args+=(--resolve "$resolve")
+    printf '[%s] rw %s\n' "$(stamp)" "${args[*]}"
+    env -u TMUX_PANE "$RW_BIN" "${args[@]}" </dev/null 2>&1 | tee "$attempt"
+    status=${PIPESTATUS[0]}
+    printf '[%s] exit %s\n' "$(stamp)" "$status"
+
+    if [ "$status" -eq 0 ]; then
+      rw_log_event "bg-$verb" "" "$worker" "$(rw_elapsed_ms "$start_ms")" "success" "root=$root_rel"
+      if [ "$verb" = handoff ]; then notify "$shown is now on $worker"; else notify "$shown is local again"; fi
+      exit 0
+    fi
+    if [ "$status" -eq 1 ] && [ "$verb" = handoff ] && [ -z "$resolve" ] &&
+      grep -q 'is working; nothing was moved' "$attempt" && [ "$(date +%s)" -lt "$deadline" ]; then
+      printf '[%s] an agent started another turn; waiting again\n' "$(stamp)"
+      continue
+    fi
+    if [ "$status" -eq 5 ] && [ -z "$resolve" ] && grep -q $'^conflict\t' "$attempt"; then
+      choice="$(ask_conflict)"
+      printf '[%s] conflict dialog: %s\n' "$(stamp)" "${choice:-not shown}"
+      case "$choice" in
+        overwrite | keep-both)
+          resolve="$choice"
+          continue
+          ;;
+        abort)
+          rw_log_event "bg-$verb" "" "$worker" "$(rw_elapsed_ms "$start_ms")" "fail" "root=$root_rel conflict_aborted"
+          notify "$verb of $shown aborted; nothing moved"
+          exit 5
+          ;;
+        *)
+          printf 'rw: files changed on the copy being overwritten, and no dialog could be shown to choose; nothing moved.\n' >>"$attempt"
+          fail 5
+          ;;
+      esac
+    fi
+    fail "$status"
+  done
+}
+
+# wait_local_idle -- 0 once no pane in the root runs a `working` agent; 1
+# when --wait-idle runs out first.
+wait_local_idle() {
+  local busy said=0 p
+  while :; do
+    busy=""
+    while IFS="$RW_TAB" read -r p _; do
+      [ -n "$p" ] || continue
+      [ "$(rw_pane_get "$p" @agent_state)" = working ] && busy="$busy $p"
+    done < <(rw_root_panes "$root_local")
+    [ -n "$busy" ] || return 0
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    if [ "$said" = 0 ]; then
+      printf '[%s] waiting for the agent(s) in pane(s)%s to finish their turn\n' "$(stamp)" "$busy"
+      said=1
+    fi
+    sleep 1
+  done
+}
+
+# ask_conflict -- the conflict dialog in a display-popup; prints overwrite,
+# keep-both, abort, or nothing when no popup could be shown (no client, or
+# another popup open the whole time: tmux draws one overlay per client).
+ask_conflict() {
+  local choice_file="$job/choice" cmd tries=0 waited
+  rm -f "$choice_file" "$choice_file.shown"
+  printf -v cmd '%q conflict %q %q %q' "$LIBEXEC_DIR/rw-bg-dialog" "$verb" "$attempt" "$choice_file"
+  while [ "$tries" -lt 120 ]; do
+    tmux display-popup -E -w 70% -h 60% -T " rw $verb: $shown " "$cmd" >/dev/null 2>&1
+    if [ -e "$choice_file.shown" ] || [ -s "$choice_file" ]; then
+      waited=0
+      while [ ! -s "$choice_file" ] && [ "$waited" -lt 3600 ]; do
+        sleep 1
+        waited=$((waited + 1))
+      done
+      head -n1 "$choice_file" 2>/dev/null
+      return 0
+    fi
+    tries=$((tries + 1))
+    sleep 5
+  done
+}
+
+# release -- drop the job (lock) and the status chip; idempotent.
+release() {
+  [ "$released" = 1 ] && return 0
+  released=1
+  rm -rf "$job"
+  refresh_indicators
+}
+
+# fail <status> -- report a failed transfer: status-row line, then a
+# dismissible dialog with the error lines and the log path. The lock and
+# the chip are released first: the transfer is over while the dialog waits.
+fail() {
+  local status="$1" first lines message dialog_pane=""
+  rw_log_event "bg-$verb" "" "$worker" "$(rw_elapsed_ms "$start_ms")" "fail" "root=$root_rel exit=$status log=$log"
+  first="$(grep -m1 '^rw: ' "$attempt" 2>/dev/null | sed 's/^rw: //')"
+  [ -n "$first" ] || first="$(grep -v $'^conflict\t' "$attempt" 2>/dev/null | grep . | tail -n1)"
+  [ "${#first}" -le 110 ] || first="${first:0:109}…"
+  notify "rw $verb of $shown failed: ${first:-exit $status}"
+  # shellcheck source=rw-dialogs.sh
+  source "$LIBEXEC_DIR/rw-dialogs.sh"
+  rw_failure_explain "$status" "$attempt"
+  lines="$(grep '^rw: ' "$attempt" | head -n 8)"
+  [ -n "$lines" ] || lines="$(grep -v $'^conflict\t' "$attempt" | tail -n 8)"
+  message="rw $verb of $shown failed (exit $status)"$'\n'"cause:  $RW_FAIL_CAUSE"$'\n'"action: $RW_FAIL_ACTION"$'\n\n'"$lines"$'\n\n'"log: $log"
+  release
+  [ "$(tmux display-message -pt "$pane" -F '#{pane_id}' 2>/dev/null)" = "$pane" ] && dialog_pane="$pane"
+  rw_dialog "$message" "$dialog_pane" "Remote workspace"
+  exit "$status"
+}
+
+case "${1:-}" in
+  --run)
+    [ $# -eq 2 ] || usage
+    run "$2"
+    ;;
+  handoff | handback)
+    v="$1"
+    shift
+    front "$v" "$@"
+    ;;
+  *) usage ;;
+esac
