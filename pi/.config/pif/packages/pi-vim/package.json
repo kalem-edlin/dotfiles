@@ -1,0 +1,50 @@
+{
+  "name": "@burneikis/pi-vim",
+  "version": "1.7.0",
+  "description": "Vim motions extension for pi – normal, insert, visual, and replace modes with operators, motions, text objects, registers, search, and repeat",
+  "license": "MIT",
+  "author": "burneikis",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/burneikis/pi-vim.git"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "files": [
+    "index.ts",
+    "keys.ts",
+    "motions.ts",
+    "operators.ts",
+    "registers.ts",
+    "repeat.ts",
+    "search.ts",
+    "state.ts",
+    "text-objects.ts",
+    "vim-editor.ts",
+    "modes/",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./index.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
+  "optionalDependencies": {
+    "@burneikis/pi-fzfp": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0"
+  }
+}

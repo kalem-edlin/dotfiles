@@ -13,7 +13,7 @@
     "blockImages": false
   },
   "packages": [
-    "npm:@burneikis/pi-vim"
+    "./packages/pi-vim"
   ],
   "extensions": [
     "extensions"
