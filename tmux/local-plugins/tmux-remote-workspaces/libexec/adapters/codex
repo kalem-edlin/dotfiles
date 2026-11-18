@@ -302,7 +302,7 @@ cmd_install() {
   } >"$rewritten"
 
   if [ -n "$worker" ]; then
-    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}\" && cat > \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}/${rollout_filename}\"" <"$rewritten"; then
+    if ! ca_ssh_run "$worker" "umask 077 && mkdir -p \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}\" && cat > \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}/${rollout_filename}\" && chmod 600 \"\$HOME/.codex/sessions/${yyyy}/${mm}/${dd}/${rollout_filename}\"" <"$rewritten"; then
       rm -f "$rewritten"
       ca_die "failed to install codex rollout on worker '$worker'." 1
     fi
@@ -312,6 +312,7 @@ cmd_install() {
     dest_dir="$(codex_sessions_root_local)/$yyyy/$mm/$dd"
     mkdir -p "$dest_dir"
     cp "$rewritten" "$dest_dir/$rollout_filename"
+    chmod 600 "$dest_dir/$rollout_filename"
     printf 'installed codex rollout: %s/%s\n' "$dest_dir" "$rollout_filename"
   fi
   rm -f "$rewritten"

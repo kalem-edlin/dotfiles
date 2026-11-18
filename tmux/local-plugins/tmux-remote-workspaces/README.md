@@ -32,6 +32,7 @@ rw handoff --worker <alias> [--root <path>] [--pane <pane-id>] [--check-lfs]
            [--force-diverged] [--resolve overwrite|keep-both|abort]
 rw handback [--root <path>] [--pane <pane-id>] [--check-lfs]
             [--force-diverged] [--resolve overwrite|keep-both|abort]
+            [--wait-idle [seconds]]
 rw open    [--worker <alias>] [--root <path>] [--pane <pane-id>]
 rw forget  <root> [--worker <alias>] [--force]
 rw reclaim [--force] <root>
@@ -176,11 +177,15 @@ rw handoff --worker <alias>
 was), find the agents running in the remote panes NOW (the worker's process
 tree plus its server-scoped SessionStart records), so an agent started on the
 worker after the handoff comes back too and a remote agent whose session
-cannot be identified refuses the hand-back before anything is stopped; stop
-the remote agents, ONE pull (manifests stored at once, so an
+cannot be identified refuses the hand-back before anything is stopped, as
+does one that is mid-turn (the worker pane's `@agent_state` is `working`;
+`--wait-idle [seconds]` waits for it instead); stop the remote agents, ONE
+pull (manifests stored at once, so an
 interrupted hand-back retries cleanly), export and install every
 transcript, then give each pane its local shell back and resume its agent
-there. If any pane fails, every pane goes back on its attach loop, the
+there (the ownership record already says `owner: focus` when those
+shells start, so they never print the "is remote" notice). If any pane
+fails, every pane goes back on its attach loop, the
 remote agents are resumed, and the root stays remote with nothing pending
 (exit 1). Only after every pane is back are the worker sessions closed and
 the record deleted.

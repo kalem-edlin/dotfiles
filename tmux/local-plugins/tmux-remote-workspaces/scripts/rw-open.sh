@@ -170,4 +170,5 @@ rw_pane_set "$pane_id" @rw-root-id "$root_id"
 [ -n "$session_uuid" ] && rw_pane_set "$pane_id" @rw-session-uuid "$session_uuid"
 
 rw_log_event "create" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$start_ts")" "success" "open root=$root_rel"
+rw_worker_request_save "$worker" # new session on the worker: refresh its snapshot
 start_loop "$endpoint_id" --fresh

@@ -559,6 +559,9 @@ done
 
 rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
   rw_warn "rw handoff: could not write the ownership mirror on '$worker' (it is rewritten on the next ownership change)."
+# The worker's pane set just changed: a timer save that raced this refused
+# its inconsistent capture; ask for a fresh one now.
+rw_worker_request_save "$worker"
 
 rw_log_event "handoff" "$self_endpoint" "$worker" "$(rw_elapsed_ms "$start_ts")" \
   "$([ "$failed" -eq 0 ] && echo success || echo partial)" \

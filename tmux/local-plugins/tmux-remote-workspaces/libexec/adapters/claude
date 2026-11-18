@@ -303,7 +303,7 @@ cmd_install() {
   fi
 
   if [ -n "$worker" ]; then
-    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.claude/projects/${slug}\" && cat > \"\$HOME/.claude/projects/${slug}/${session_id}.jsonl\"" <"$rewritten"; then
+    if ! ca_ssh_run "$worker" "umask 077 && mkdir -p \"\$HOME/.claude/projects/${slug}\" && cat > \"\$HOME/.claude/projects/${slug}/${session_id}.jsonl\" && chmod 600 \"\$HOME/.claude/projects/${slug}/${session_id}.jsonl\"" <"$rewritten"; then
       rm -f "$rewritten"
       ca_die "failed to install claude transcript on worker '$worker'." 1
     fi
@@ -314,6 +314,7 @@ cmd_install() {
     dest_dir="$(claude_projects_root_local)/$slug"
     mkdir -p "$dest_dir"
     cp -p "$rewritten" "$dest_dir/$session_id.jsonl"
+    chmod 600 "$dest_dir/$session_id.jsonl"
     rm -f "$rewritten"
     printf 'installed claude transcript: %s/%s.jsonl\n' "$dest_dir" "$session_id"
   fi

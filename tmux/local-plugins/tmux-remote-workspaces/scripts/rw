@@ -34,7 +34,10 @@ commands:
 
   handback [--root <path>] [--pane <pane-id>] [--check-lfs]
            [--force-diverged] [--resolve overwrite|keep-both|abort]
+           [--wait-idle [seconds]]
       Bring a remote root and all of its panes (and their agents) back.
+      Refused while a remote agent is mid-turn; --wait-idle waits for it
+      (default 300s).
 
   open [--worker <alias>] [--root <path>] [--pane <pane-id>]
       A new remote pane in a root that is already remote. No sync.

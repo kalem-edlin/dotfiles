@@ -32,6 +32,8 @@ eq "F: worker checkout has the laptop branch's upstream" \
   "$(git -C "$W" config branch.feat.remote) $(git -C "$W" config branch.feat.merge)" "origin refs/heads/feat"
 eq "F: and the same origin" "$(git -C "$W" remote get-url origin)" "/nonexistent/origin.git"
 
+check "4: the handoff asked the worker for a fresh save (its pane set changed)" test -s "$SANDBOX/worker-saves.log"
+
 # --- hand-back: conflict wording, attach-seen, backups -------------------------------
 rw open --pane %7 --root "$wt" >/dev/null 2>&1
 ep="$(rw_owned_record_read "$id" | jq -r '.endpoints[0]')"

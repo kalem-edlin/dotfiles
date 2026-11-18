@@ -32,6 +32,12 @@ mkdir -p "$wproj"
 "$PI" install --snapshot "$SANDBOX/xa" --dest-path "$wproj" --worker fakeworker >/dev/null 2>&1
 "$PI" install --snapshot "$SANDBOX/xb" --dest-path "$wproj" --worker fakeworker >/dev/null 2>&1
 
+perm() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+eq "3: pi transcripts installed on the worker are private (0600)" \
+  "$(for f in "$FAKE_WORKER_HOME"/.pi/agent/sessions/*/*.jsonl; do perm "$f"; done | sort -u)" "600"
+"$PI" install --snapshot "$SANDBOX/xa" --dest-path "$proj" >/dev/null 2>&1
+eq "3: and on the laptop" "$(perm "$(ls "$sessions"/*/*_"$id_a".jsonl)")" "600"
+
 # resume-cmd for A, run on the "worker": it must open A, not the newer B.
 cmd_a="$("$PI" resume-cmd --dest-path "$wproj" --session-id "$id_a")"
 # Turn `... && pif --session X` into `... && printf '%s\n' X`.

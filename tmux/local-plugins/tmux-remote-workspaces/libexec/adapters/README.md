@@ -106,7 +106,9 @@ Exit 4 if no matching transcript exists to export (gated/not-resumable).
 
 ### `install --snapshot <dir> --dest-path <path> [--worker <alias>]`
 
-Places the snapshot so the session is resumable from `dest-path`. Idempotent
+Places the snapshot so the session is resumable from `dest-path`. The
+installed transcript is created mode 0600 (and new directories 0700), like
+the providers' own files, on either machine. Idempotent
 (re-running with the same snapshot/dest overwrites with identical content).
 `--dest-path` is the **destination** path -- the destination's PHYSICAL path
 (under the worker's own physical home, never the laptop's user name). For Claude this is the path whose slug becomes the containing

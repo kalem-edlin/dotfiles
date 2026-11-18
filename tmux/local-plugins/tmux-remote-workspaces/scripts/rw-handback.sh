@@ -28,6 +28,11 @@
 #
 # Usage: rw-handback.sh [--root <path>] [--pane <pane-id>] [--check-lfs]
 #                       [--force-diverged] [--resolve overwrite|keep-both|abort]
+#                       [--wait-idle [seconds]]
+#
+# A remote agent in the middle of a turn is never stopped: the hand-back
+# refuses (exit 1) while any is `working`, or with --wait-idle waits up to
+# <seconds> (default 300) for all of them to go idle first.
 #
 # Exit: 0 ok, 1 failure (rolled back), 2 git divergence, 3 agent CLI version
 #       gate, 5 manifest conflict, 6 worker unreachable, 7 not a remote
@@ -61,9 +66,17 @@ pane_id="${TMUX_PANE:-}"
 check_lfs="false"
 force_diverged="false"
 resolve=""
+wait_idle=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --wait-idle)
+      case "${2:-}" in
+        '' | -*) wait_idle=300; shift ;;
+        *[!0-9]*) rw_die "rw handback: --wait-idle takes a number of seconds" 64 ;;
+        *) wait_idle="$2"; shift 2 ;;
+      esac
+      ;;
     --root) root_arg="${2:?}"; shift 2 ;;
     --pane) pane_id="${2:?}"; shift 2 ;;
     --check-lfs) check_lfs="true"; shift ;;
@@ -156,13 +169,40 @@ ej_field() { printf '%s' "${e_json[$1]}" | jq -r "$2 // empty" 2>/dev/null; }
 
 sessions=()
 for e in ${endpoints[@]+"${endpoints[@]}"}; do sessions+=("$(rw_session_name "$e")"); done
-probe_status=0
-rw_worker_agent_probe "$worker" ${sessions[@]+"${sessions[@]}"} >"$work/probe" || probe_status=$?
-if [ "$probe_status" -ne 0 ]; then
-  fail_event "agent_probe_unreachable"
-  rw_die "rw handback: lost contact with '$worker' while checking its panes for agents; nothing changed." 6
+# probe_agents -- refresh $work/probe(.ps); prints the remote sessions whose
+# pane runs an agent that is in the middle of a turn (@agent_state working).
+probe_agents() {
+  local status=0 line sess ppid astate
+  rw_worker_agent_probe "$worker" ${sessions[@]+"${sessions[@]}"} >"$work/probe" || status=$?
+  if [ "$status" -ne 0 ]; then
+    fail_event "agent_probe_unreachable"
+    rw_die "rw handback: lost contact with '$worker' while checking its panes for agents; nothing changed." 6
+  fi
+  sed '1,/^---$/d' "$work/probe" >"$work/probe.ps"
+  sed '/^---$/,$d' "$work/probe" | while IFS= read -r line; do
+    sess="$(printf '%s' "$line" | cut -f1)"
+    ppid="$(printf '%s' "$line" | cut -f3)"
+    astate="$(printf '%s' "$line" | cut -f4)"
+    [ "$astate" = "working" ] || continue
+    [ -n "$(rw_live_provider "$work/probe.ps" "$ppid")" ] && printf '%s\n' "$sess"
+  done
+}
+# Not in $(...): an unreachable worker must end the script, not a subshell.
+probe_agents >"$work/busy"
+busy="$(cat "$work/busy")"
+if [ -n "$busy" ] && [ -n "$wait_idle" ]; then
+  deadline=$(($(date +%s) + wait_idle))
+  rw_warn "rw handback: waiting up to ${wait_idle}s for the remote agent(s) in $(printf '%s' "$busy" | paste -sd' ' -) to finish their turn..."
+  while [ -n "$busy" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 2
+    probe_agents >"$work/busy"
+    busy="$(cat "$work/busy")"
+  done
 fi
-sed '1,/^---$/d' "$work/probe" >"$work/probe.ps"
+if [ -n "$busy" ]; then
+  fail_event "remote_agent_working"
+  rw_die "rw handback: the remote agent in $(printf '%s' "$busy" | paste -sd' ' -) is working (mid-turn); stopping it now would lose that turn. Nothing was moved or stopped. Retry when it is idle, or run 'rw handback --wait-idle'." 1
+fi
 
 # focus_path_for <worker path> -- the laptop path of a worker path in the root.
 focus_path_for() {
@@ -183,7 +223,9 @@ for i in "${!endpoints[@]}"; do
   rec_provider="$(printf '%s' "${e_json[$i]}" | jq -r 'select(.agent.state == "handed-off") | .agent.provider // empty' 2>/dev/null)"
   rec_session="$(ej_field "$i" '.agent.transcript_id')"
   [ -n "$rec_session" ] || rec_session="$(ej_field "$i" '.agent.session_id')"
-  IFS="$RW_TAB" read -r _ _ live_ppid live_state < <(awk -F '\t' -v s="${sessions[$i]}" '$1 == s { print; exit }' "$work/probe")
+  probe_line="$(sed '/^---$/,$d' "$work/probe" | awk -F '\t' -v s="${sessions[$i]}" '$1 == s { print; exit }')"
+  live_ppid="$(printf '%s' "$probe_line" | cut -f3)"
+  live_state="$(printf '%s' "$probe_line" | cut -f5)"
   live_provider="$(rw_live_provider "$work/probe.ps" "${live_ppid:-}")"
   if [ -n "$live_provider" ]; then
     live_tool="$(printf '%s' "${live_state:-}" | jq -r '.tool // empty' 2>/dev/null)"
@@ -357,6 +399,11 @@ if [ -n "$failure" ]; then
   rw_die "rw handback: $failure. Nothing moved: '$root_rel' stays remote and its agents were resumed there." 1
 fi
 
+# The local shells about to start must already see the root as local (the
+# zsh notice "is remote on <alias>" reads the ownership record): flip the
+# record to owner=focus now; a rollback below flips it back.
+rw_owned_record_write "$root_id" "$(rw_owned_record_read "$root_id" | jq -c '.owner = "focus"')"
+
 bound="$(rw_root_bound_panes "$root_id" ${endpoints[@]+"${endpoints[@]}"})"
 released=()   # "index<TAB>pane"
 for i in "${!endpoints[@]}"; do
@@ -409,6 +456,7 @@ if [ -n "$failure" ]; then
         rw_warn "rw handback: could not reattach pane $pid; 'rw open --pane $pid' does."
     fi
   done
+  rw_owned_record_write "$root_id" "$(rw_owned_record_read "$root_id" | jq -c '.owner = "worker"')"
   resume_remote_agents
   rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null || true
   fail_event "rolled_back: $failure"

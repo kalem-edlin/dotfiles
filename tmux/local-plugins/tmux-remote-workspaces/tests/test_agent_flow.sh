@@ -156,9 +156,31 @@ check "C: nothing was stopped" bash -c "! grep -q 'kill -TERM' '$FAKE_SSH_LOG'"
 state_dir="$XDG_STATE_HOME/tmux-workspace-resurrect/agents/server-4242-1700000000"
 mkdir -p "$state_dir"
 jq -nc --arg cwd "$wroot2" '{tool: "claude", session_id: "live-1", cwd: $cwd}' >"$state_dir/pane-90.json"
+
+# --- 1: a remote agent mid-turn is never stopped ---------------------------------
+export FAKE_REMOTE_AGENT_STATE=working
+: >"$FAKE_SSH_LOG"
+rw handback --root "$root2" >/dev/null 2>"$SANDBOX/err"
+eq "1: hand-back while the remote agent is working: exit 1" "$?" "1"
+check "1: says it is working" grep -q "is working (mid-turn)" "$SANDBOX/err"
+check "1: nothing was stopped" bash -c "! grep -q 'kill -TERM' '$FAKE_SSH_LOG'"
+eq "1: still remote" "$(jq -r .owner "$(rw_owned_record_file "$id2")")" "worker"
+start=$(date +%s)
+rw handback --root "$root2" --wait-idle 3 >/dev/null 2>"$SANDBOX/err"
+rc=$?
+eq "1: --wait-idle that runs out: exit 1" "$rc" "1"
+check "1: --wait-idle waited" bash -c "[ \$(( \$(date +%s) - $start )) -ge 3 ]"
+check "1: and said what it waited for" grep -q "waiting up to 3s" "$SANDBOX/err"
+export FAKE_REMOTE_AGENT_STATE=idle
+
+# --- 2: returned panes start with the root already local -----------------------------
+rec2="$(rw_owned_record_file "$id2")"
+export FAKE_ON_RESPAWN="jq -r .owner '$rec2' >>'$SANDBOX/owner-at-respawn' 2>/dev/null || echo gone >>'$SANDBOX/owner-at-respawn'"
 : >"$FAKE_EVENTS"
 rw handback --root "$root2" >/dev/null 2>"$SANDBOX/err"
 eq "C: hand-back with a live remote agent: exit 0" "$?" "0"
+eq "2: the record already says owner=focus when the local shell starts" "$(cat "$SANDBOX/owner-at-respawn")" "focus"
+unset FAKE_ON_RESPAWN
 check "C: the live session is exported from the worker" grep -q "^adapter export --session-id live-1 --project-path $wroot2 .*--worker fakeworker" "$FAKE_EVENTS"
 check "C: and resumed here" grep -q "^tmux send-keys -t %3 cd .* && claudef --resume live-1 Enter" "$FAKE_EVENTS"
 check "C: the remote agent was stopped first" order "kill -TERM 999990" "rsync --server"

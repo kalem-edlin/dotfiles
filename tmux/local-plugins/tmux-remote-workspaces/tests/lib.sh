@@ -147,6 +147,12 @@ case "$cmd" in
     [ -n "$l" ] && expand "$fmt" "$l"
     ;;
   show-option | show-options)
+    # %90 is the remote endpoint pane: its @agent_state comes from
+    # $FAKE_REMOTE_AGENT_STATE.
+    if [ "$target" = "%90" ]; then
+      [ "${rest[${#rest[@]}-1]:-}" = "@agent_state" ] && printf '%s\n' "${FAKE_REMOTE_AGENT_STATE:-}"
+      exit 0
+    fi
     [ -n "$target" ] && get "$target" "${rest[${#rest[@]}-1]:-}"
     ;;
   set-option)
@@ -160,6 +166,8 @@ case "$cmd" in
     fi
     ;;
   respawn-pane)
+    # $FAKE_ON_RESPAWN: a command run at each respawn (tests observe state then).
+    [ -n "${FAKE_ON_RESPAWN:-}" ] && bash -c "$FAKE_ON_RESPAWN" >/dev/null 2>&1
     [ -n "$(line_of "$target")" ] && put "$target" pane_current_command bash
     ;;
   list-sessions)

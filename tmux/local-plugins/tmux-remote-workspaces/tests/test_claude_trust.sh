@@ -21,6 +21,8 @@ wdest="$FAKE_WORKER_HOME/Developer/never opened"
 mkdir -p "$wdest"
 "$CL" install --snapshot "$snap" --dest-path "$wdest" --worker fakeworker >/dev/null 2>&1
 eq "E: worker folder trusted" "$(jq -r --arg p "$wdest" '.projects[$p].hasTrustDialogAccepted' "$FAKE_WORKER_HOME/.claude.json")" "true"
+perm() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+eq "3: the worker transcript is private (0600)" "$(perm "$(ls "$FAKE_WORKER_HOME"/.claude/projects/*/s-1.jsonl)")" "600"
 eq "E: worker ~/.claude.json stays private" "$(stat -f %Lp "$FAKE_WORKER_HOME/.claude.json" 2>/dev/null || stat -c %a "$FAKE_WORKER_HOME/.claude.json")" "600"
 
 # Laptop: an existing ~/.claude.json with other state that must survive.
@@ -30,6 +32,7 @@ jq -n --arg p "$ldest" '{oauthAccount: {x: 1}, numStartups: 9,
   projects: {"/elsewhere": {hasTrustDialogAccepted: false}, ($p): {allowedTools: ["Bash"], lastSessionId: "z"}}}' >"$HOME/.claude.json"
 "$CL" install --snapshot "$snap" --dest-path "$ldest" >/dev/null 2>&1
 j="$HOME/.claude.json"
+eq "3: the laptop transcript is private (0600)" "$(perm "$(ls "$HOME"/.claude/projects/*/s-1.jsonl)")" "600"
 eq "E: local folder trusted" "$(jq -r --arg p "$ldest" '.projects[$p].hasTrustDialogAccepted' "$j")" "true"
 eq "E: its other project keys kept" "$(jq -c --arg p "$ldest" '.projects[$p] | [.allowedTools, .lastSessionId]' "$j")" '[["Bash"],"z"]'
 eq "E: other projects untouched" "$(jq -r '.projects["/elsewhere"].hasTrustDialogAccepted' "$j")" "false"

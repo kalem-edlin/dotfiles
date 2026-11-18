@@ -321,7 +321,7 @@ cmd_install() {
   } >"$rewritten"
 
   if [ -n "$worker" ]; then
-    if ! ca_ssh_run "$worker" "mkdir -p \"\$HOME/.pi/agent/sessions/${slug}\" && cat > \"\$HOME/.pi/agent/sessions/${slug}/${basename_out}\"" <"$rewritten"; then
+    if ! ca_ssh_run "$worker" "umask 077 && mkdir -p \"\$HOME/.pi/agent/sessions/${slug}\" && cat > \"\$HOME/.pi/agent/sessions/${slug}/${basename_out}\" && chmod 600 \"\$HOME/.pi/agent/sessions/${slug}/${basename_out}\"" <"$rewritten"; then
       rm -f "$rewritten"
       ca_die "failed to install pi transcript on worker '$worker'." 1
     fi
@@ -332,6 +332,7 @@ cmd_install() {
     dest_dir="$(pi_sessions_root_local)/$slug"
     mkdir -p "$dest_dir"
     cp "$rewritten" "$dest_dir/$basename_out"
+    chmod 600 "$dest_dir/$basename_out"
     touch -r "$transcript" "$dest_dir/$basename_out" 2>/dev/null || true
     rm -f "$rewritten"
     printf 'installed pi transcript: %s/%s\n' "$dest_dir" "$basename_out"

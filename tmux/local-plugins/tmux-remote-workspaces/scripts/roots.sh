@@ -292,7 +292,9 @@ rw_reconcile_pending() {
 
 # rw_worker_agent_probe <worker> <session_name>...
 # One ssh round trip that shows what each endpoint session is running NOW:
-#   <session><TAB><pane_id><TAB><pane_pid><TAB><agent-state JSON or empty>
+#   <session><TAB><pane_id><TAB><pane_pid><TAB><@agent_state><TAB><agent-state JSON or empty>
+# (@agent_state is the agent-state publisher's pane option on the worker:
+# idle, working, awaiting, ...; empty when no agent ever published one)
 # per session, then a `---` line, then the worker's `ps axo pid=,ppid=,command=`.
 # The agent state is the worker's server-scoped SessionStart record
 # (tmux-workspace-resurrect: <state>/agents/server-<pid>-<start>/pane-N.json),
@@ -315,12 +317,13 @@ for s in ${__rw_sessions[@]+"${__rw_sessions[@]}"}; do
   line="$(tmux list-panes -t "=$s" -F '#{pane_id} #{pane_pid}' 2>/dev/null | head -n1)"
   pane="${line%% *}"; ppid="${line#* }"
   [ -n "$line" ] || { pane=""; ppid=""; }
-  st=""
+  st="" as=""
+  [ -n "$pane" ] && as="$(tmux show-option -pqvt "$pane" @agent_state 2>/dev/null || true)"
   if [ -n "$pane" ] && [ -n "$sid" ]; then
     f="$sd/agents/server-${sid/:/-}/pane-${pane#%}.json"
     [ -f "$f" ] && st="$(tr -d '\n' <"$f")"
   fi
-  printf '%s\t%s\t%s\t%s\n' "$s" "$pane" "$ppid" "$st"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$s" "$pane" "$ppid" "$as" "$st"
 done
 echo ---
 ps axo pid=,ppid=,command=
