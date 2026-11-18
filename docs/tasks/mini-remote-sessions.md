@@ -250,6 +250,20 @@ Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
 - New events: `restore-reattach` (success) and `restore-reattach-missing` (outcome `skipped` or `fail`, detail = reason).
 - `session-renamed` updates `sessions.jsonl` and, in every endpoint of the session, `focus_session_name` plus the bound pane's `focus_window_index`/`focus_pane_index`. The hook passes only `#{q:session_id}`; the script reads the current name back from tmux (out-of-order double renames), and rewrites endpoint files atomically, under `rw_root_lock` when common.sh has it, only if unchanged since read.
 
+### Changes recorded by the rw core fix wave (2026-11-18, review of fe61a15)
+
+- C1 manifests of git roots list untracked (non-ignored) files as well as gitignored ones, so the conflict gate sees content edits to untracked files on the losing copy. A conflict whose destination file already equals the incoming source (or a deletion the source shares) is dropped: nothing would be lost, and a retried sync converges.
+- C1 `record.json` (and the mirror) gains `worker_root_created` (true when rw created the worker directory at the first handoff). `rw forget` deletes a worker copy only when it is true; otherwise only the mirror goes.
+- C2 handoff and hand-back are all or nothing: agents are stopped before the sync (handoff refuses an agent whose `@agent_state` is `working`), and any per-pane resume failure rolls every pane back. A failed hand-back keeps the root worker-owned with nothing pending (the W2 "pending reconcile after a failed resume" rule is withdrawn). Pending reconcile (after `rw reclaim`) never closes an endpoint whose agent state is `handed-off`.
+- C2 `rw forget <root> [--worker <alias>] [--force]`: `--force` is required when the root is worker-owned; the picker and `wt rm` pass it after their own confirmation. The worker copy is deleted before endpoints are closed.
+- C2 `rw reclaim [--force] <root>`: probes the worker and refuses when it is reachable; `--force` skips the probe.
+- C2 `rw close --endpoint <id>` closes a registered endpoint no local pane carries.
+- C2 handoff without `--root` refuses (exit 7) a plain root that is a top-level folder of `~` or that contains a git repository; roots with git submodules are refused (exit 1) by the sync core before anything is touched.
+- C2 git divergence: with no baseline, an existing destination repository that differs from the source exits 2. An in-flight marker on the destination lets a retry after an interrupted sync continue. Plain roots get a pre-transfer backup of every replaced or deleted destination file; an owner copy with no files exits 1 unless `--resolve overwrite`.
+- C2 per-root lock (`locks/root-<root_id>`, pid file, dead holder reclaimed) around handoff, handback, open, forget, reclaim and pending reconciliation; concurrent operations on one root exit 1.
+- C3 agent endpoints record `agent.transcript_id` (pi: the transcript header id). pi export/install/resume-cmd address the exact `<timestamp>_<id>.jsonl`, never the newest file.
+- C6 `libexec/reconcile` applies a min-age (`RW_RECONCILE_MIN_AGE_SECONDS`, default 120) and skips attached sessions, like `reconcile-worker`.
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: needs a worker-to-laptop push of `@agent_*` (candidate: the attach loop's ssh ControlMaster carrying a tiny state stream into the laptop pane's options). The picker then drops the early return at `snapshot.go:415` and the Working guard covers remote agents.
