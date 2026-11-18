@@ -231,6 +231,19 @@ if neo_tree_mapping_count ~= 1 then
   error("Could not patch treemux neo-tree navigation mappings")
 end
 
+-- Pin the sidebar plugins to a lock file in this repo, so every host runs
+-- the same commits. lazy.nvim otherwise keeps an untracked lock under
+-- ~/.config/nvim-treemux that drifts per machine.
+local lockfile_count
+source, lockfile_count = source:gsub(
+  "\n}, {\n  performance = {",
+  '\n}, {\n  lockfile = vim.fn.expand("~/.config/tmux/treemux-lazy-lock.json"),\n  performance = {',
+  1
+)
+if lockfile_count ~= 1 then
+  error("Could not pin treemux lazy lockfile")
+end
+
 local chunk, err = load(source, "@treemux_init_with_catppuccin")
 if not chunk then
   error(err)

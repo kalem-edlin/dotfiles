@@ -26,7 +26,8 @@ package.preload["neo-tree.events"] = function()
   }
 end
 package.preload["lazy"] = function()
-  return { setup = function(specs)
+  return { setup = function(specs, opts)
+    configs.lazy = opts
     for _, spec in ipairs(specs) do
       if type(spec) == "table" and
         (spec[1] == "nvim-tree/nvim-tree.lua" or spec[1] == "nvim-neo-tree/neo-tree.nvim") then
@@ -38,6 +39,9 @@ end
 
 dofile("tmux/treemux_init.lua")
 assert(configs.tree and configs.neo, "Both upstream tree configurations must execute")
+assert(configs.lazy.lockfile == vim.fn.expand("~/.config/tmux/treemux-lazy-lock.json"),
+  "Sidebar plugins must use the repo lock file")
+assert(configs.lazy.performance, "Upstream lazy options must be kept")
 assert(configs.tree.git.enable == false)
 assert(configs.tree.filesystem_watchers.enable == false)
 assert(configs.neo.enable_git_status == false)

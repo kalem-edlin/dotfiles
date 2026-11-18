@@ -97,7 +97,8 @@
 #   link_rw
 #     Idempotent `ln -sf` of this repo's rw entrypoint
 #     (tmux/local-plugins/tmux-remote-workspaces/scripts/rw) into
-#     ~/.local/bin/rw.
+#     ~/.local/bin/rw, plus tmux/scripts/tmux_restore.sh as
+#     ~/.local/bin/tmux-restore.
 #
 #   install_tmux_resurrect_save_timer
 #     Installs and loads the macOS launchd timer after TPM has installed
@@ -547,6 +548,10 @@ install_tmux_plugins() {
     echo "  -> tmux-resurrect rw client-guard patch applied"
   fi
 
+  if ! pin_tmux_plugins; then
+    return 1
+  fi
+
   echo "  -> installing tmux plugins via TPM"
   if ! TMUX_PLUGIN_MANAGER_PATH="$HOME/.config/tmux/plugins/" "$tpm_dir/bin/install_plugins"; then
     echo "ERROR: TPM install_plugins failed (see output above)." >&2
@@ -627,10 +632,55 @@ install_tmux_plugins() {
   echo "  -> tmux plugins OK (TPM, tmux-resurrect save entrypoint, local-plugins entrypoints)"
 }
 
+# pin_tmux_plugins: every `@plugin 'owner/name#<40-hex sha>'` line in
+# tmux/tmux.conf is cloned (if missing) and checked out at that commit, so
+# every host runs the same plugin code. TPM cannot clone a raw SHA (see
+# tmux-resurrect above, which keeps its own pin and patch handling and is
+# skipped here), so this runs before TPM's install_plugins, which then sees
+# the directories present and leaves them alone. A plugin whose working tree
+# carries one of our patches is only checked out when HEAD differs.
+pin_tmux_plugins() {
+  local conf="$DOTFILES_DIR/tmux/tmux.conf"
+  local plugins_dir="$HOME/.config/tmux/plugins"
+  local spec repo sha name dir current
+  for spec in $(sed -nE "s/^set -g @plugin '([^'#]+)#([0-9a-f]{40})'.*/\1#\2/p" "$conf"); do
+    repo="${spec%%#*}"
+    sha="${spec#*#}"
+    name="${repo##*/}"
+    [ "$name" = "tmux-resurrect" ] && continue
+    dir="$plugins_dir/$name"
+    if [ ! -d "$dir/.git" ]; then
+      echo "  -> installing $name (pinned commit $sha)"
+      if ! git clone --quiet "https://github.com/$repo" "$dir"; then
+        echo "ERROR: failed to clone $repo." >&2
+        return 1
+      fi
+    fi
+    current="$(git -C "$dir" rev-parse HEAD 2>/dev/null)"
+    if [ "$current" = "$sha" ]; then
+      continue
+    fi
+    if ! git -C "$dir" cat-file -e "$sha^{commit}" 2>/dev/null; then
+      if ! git -C "$dir" fetch --quiet origin "$sha"; then
+        echo "ERROR: failed to fetch $name pin $sha." >&2
+        return 1
+      fi
+    fi
+    echo "  -> checking out $name pin $sha (was ${current:-none})"
+    if ! git -C "$dir" -c advice.detachedHead=false checkout --quiet "$sha"; then
+      echo "ERROR: failed to check out $name pin $sha." >&2
+      return 1
+    fi
+  done
+}
+
 link_rw() {
   mkdir -p "$HOME/.local/bin"
   ln -sf "$DOTFILES_DIR/tmux/local-plugins/tmux-remote-workspaces/scripts/rw" "$HOME/.local/bin/rw"
   echo "  -> linked rw -> ~/.local/bin/rw"
+  # docs/tmux-remote-workspaces.md: run after a total tmux server loss.
+  ln -sf "$DOTFILES_DIR/tmux/scripts/tmux_restore.sh" "$HOME/.local/bin/tmux-restore"
+  echo "  -> linked tmux-restore -> ~/.local/bin/tmux-restore"
 }
 
 install_tmux_resurrect_save_timer() {
