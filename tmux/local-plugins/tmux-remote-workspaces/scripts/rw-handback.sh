@@ -19,7 +19,10 @@
 #      pane its local shell back (same pane id, layout, window) and resume
 #      its agent there, verified. If ANY pane fails, everything rolls back:
 #      local agents stopped, panes back on their attach loops, remote agents
-#      resumed, the root stays remote (exit 1, nothing pending).
+#      resumed, the root stays remote (exit 1, nothing pending). An editor
+#      (nvim, vim, vi) running in a remote pane is reopened in its laptop
+#      pane (its nvim session, or its argv, with the root's paths
+#      rewritten); best effort: one that does not come back is a warning.
 #   6. Commit: close the worker sessions, delete the ownership record, and
 #      rewrite the worker's mirror (owner focus, fresh manifests).
 #
@@ -399,6 +402,35 @@ if [ -n "$failure" ]; then
   rw_die "rw handback: $failure. Nothing moved: '$root_rel' stays remote and its agents were resumed there." 1
 fi
 
+# Editors running in the remote panes come back too, best effort (never a
+# reason to roll back): how to reopen each is captured now, while the worker
+# sessions still exist, rewritten for the laptop root.
+ED_PATTERN='(^|/)(nvim|vim|vi)([[:space:]]|$)'
+e_editor=()
+for i in "${!endpoints[@]}"; do
+  e_editor[i]=""
+  [ -z "${e_provider[$i]}" ] || continue
+  case "$(ej_field "$i" '.role')" in tree | tree-editor) continue ;; esac
+  [ -x "$ADAPTERS_DIR/editor" ] || continue
+  live_ppid="$(sed '/^---$/,$d' "$work/probe" | awk -F '\t' -v s="${sessions[$i]}" '$1 == s { print $3; exit }')"
+  [ -n "$live_ppid" ] || continue
+  rw_ps_tree_matches "$ED_PATTERN" "$live_ppid" <"$work/probe.ps" || continue
+  dir="$(mktemp -d "$work/editor.XXXXXX")"
+  ed_status=0
+  "$ADAPTERS_DIR/editor" export --pane "${sessions[$i]}" --worker "$worker" --out "$dir" </dev/null >/dev/null 2>"$dir.err" || ed_status=$?
+  [ "$ed_status" -ne 1 ] || continue # no editor in that pane's foreground
+  wcwd=""
+  [ "$ed_status" -eq 0 ] && wcwd="$(jq -r '.cwd // empty' "$dir/manifest.json" 2>/dev/null)"
+  if [ -n "$wcwd" ]; then fdir="$(focus_path_for "$wcwd")"; else fdir="$(ej_field "$i" '.workspace.focus_path')"; fi
+  [ -d "$fdir" ] || fdir="$root_local"
+  if [ "$ed_status" -ne 0 ] ||
+    ! e_editor[i]="$("$ADAPTERS_DIR/editor" install --snapshot "$dir" --from-root "$worker_root" --to-root "$root_local" \
+      --dest-dir "$fdir" --dest-file "$(rw_state_dir)/editor-sessions/${endpoints[$i]}.vim" </dev/null 2>"$dir.err")"; then
+    e_editor[i]=""
+    rw_warn "rw handback: could not capture the editor in remote session ${sessions[$i]}, so it will not be reopened here; open it again in its pane. $(head -c 300 "$dir.err")"
+  fi
+done
+
 # The local shells about to start must already see the root as local (the
 # zsh notice "is remote on <alias>" reads the ownership record): flip the
 # record to owner=focus now; a rollback below flips it back.
@@ -415,7 +447,11 @@ for i in "${!endpoints[@]}"; do
   focus_path="$(ej_field "$i" '.workspace.focus_path')"
   [ -d "$focus_path" ] || focus_path="$root_local"
   if [ -z "$pid" ]; then
-    [ -n "${e_provider[$i]}" ] || continue
+    if [ -z "${e_provider[$i]}" ]; then
+      [ -z "${e_editor[$i]}" ] ||
+        rw_warn "rw handback: endpoint $e has no laptop pane any more, so its editor was not reopened; reopen it with: ${e_editor[$i]}"
+      continue
+    fi
     # The agent's laptop pane is gone (a restore that did not rebind it):
     # give it a fresh window in its session, or a new session.
     sess="$(ej_field "$i" '.focus_session_name')"
@@ -439,6 +475,12 @@ for i in "${!endpoints[@]}"; do
       ! rw_wait_local_provider_started "$pid" "${e_provider[$i]}"; then
       failure="could not confirm the ${e_provider[$i]} agent started locally in pane $pid"
       break
+    fi
+  fi
+  if [ -n "${e_editor[$i]}" ]; then
+    if ! tmux send-keys -t "$pid" "${e_editor[$i]}" Enter 2>/dev/null ||
+      ! rw_wait_local_provider_started "$pid" "$ED_PATTERN"; then
+      rw_warn "rw handback: could not confirm the editor reopened in pane $pid; run there: ${e_editor[$i]}"
     fi
   fi
 done

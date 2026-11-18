@@ -197,6 +197,14 @@ Nothing is replaced until every check that can refuse has run:
    only after the remote resume is confirmed. Then write the endpoint and
    replace the pane with its attach loop.
 
+An editor pane (nvim, vim, vi) is not left as a bare remote shell: its
+editor is reopened in the worker pane, from the Neovim session that
+`tmux_workspace_resurrect.lua` registers (refreshed over its RPC socket, so
+buffers, windows and tabs come back), or else from the editor's own argv,
+with paths inside the root rewritten to the worker root. Unsaved buffer
+contents never travel (the picker warns first), and an editor that cannot
+be confirmed only prints the command to run, it never fails the handoff.
+
 A pane whose agent resume cannot be verified keeps its local agent running and
 stays local, so there are never two writers and never zero. The root still
 moves, and the command reports the pane. A handoff clears
@@ -225,8 +233,9 @@ remote pane. It finds the record from `--root`, the pane's `@rw-root-id` or
    manifest stored at handoff.
 4. Per pane: replaces the attach loop with a local shell in the same pane,
    window and layout, then resumes the agent locally. The worker agent is
-   stopped only after the local one is confirmed. Remote tree and editor
-   endpoints are closed.
+   stopped only after the local one is confirmed. An editor running in a
+   remote pane is reopened in its laptop pane the same way, best effort.
+   Remote tree and editor endpoints are closed.
 5. Only after every pane is back: closes the worker sessions, makes the
    laptop the owner, deletes the record when nothing is pending, and rewrites
    the worker mirror with fresh manifests.

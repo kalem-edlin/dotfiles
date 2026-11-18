@@ -9,8 +9,20 @@ adapters/
 ├── pi                  # simplest adapter -- arbitrary-path resume
 ├── claude               # transcript placement encodes destination path
 ├── codex                # all five subcommands implemented (see "Codex gate")
+├── editor               # not an agent: reopens nvim/vim/vi panes (below)
 └── smoke-test           # on-demand dev tool -- see "Smoke test" below
 ```
+
+`editor` is not a provider and does not follow the five-subcommand
+contract. `export --pane <pane|endpoint-session> [--worker <alias>] --out
+<dir>` captures how to reopen the editor in a pane's foreground (exit 1
+when there is none): the Neovim session registered by
+`nvim/lua/tmux_workspace_resurrect.lua`, refreshed over its RPC socket and
+stripped of the lines that embed buffer contents, or else the editor's
+argv. `install --snapshot <dir> --from-root <p> --to-root <p> --dest-dir
+<p> --dest-file <p> [--worker <alias>]` rewrites the root's paths, writes
+the session file (0600) and prints the command to type into the
+destination pane. `rw-handoff.sh` and `rw-handback.sh` call it best effort.
 
 Build order (decided in the plan): Pi, then Claude, then Codex. Codex's
 `install` was gated pending a live smoke test; that test has since run and

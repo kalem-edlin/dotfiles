@@ -414,8 +414,10 @@ never waits at the trust dialog. A git root's worker checkout gets the same
 git-host authentication probe for a local-path (or `file://`) origin. pi transcripts travel by
 exact id (`<timestamp>_<id>.jsonl`), so two pi agents in one root each
 resume their own session. A pane with no detected
-agent is a workspace-only pane; a busy pane no adapter recognizes aborts
-the whole handoff.
+agent moves as a shell, except that an editor (nvim, vim, vi) is reopened
+on the other side (`libexec/adapters/editor`: its Neovim session or its
+argv, root paths rewritten; best effort, a warning when unconfirmed); a
+busy pane no adapter recognizes aborts the whole handoff.
 
 ## Reconciliation
 

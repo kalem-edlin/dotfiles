@@ -81,7 +81,9 @@ rw_test_sandbox() {
 # display-message, show-option and set-option answer from it. Remote
 # endpoint sessions (rw-*) report $FAKE_TMUX_REMOTE_CMD as their command.
 # send-keys of a claudef/pif resume flips a pane's command to the agent when
-# $FAKE_LOCAL_RESUME_OK=1; respawn-pane resets it to a shell.
+# $FAKE_LOCAL_RESUME_OK=1 (an editor reopen, "&& nvim"/"&& vim", flips it
+# to nvim); respawn-pane resets it to a shell. The remote endpoint pane's
+# other options come from $FAKE_REMOTE_PANE_OPTS ("@option=value" lines).
 # A fake agent "writes until stopped": reading the pane pid of
 # $FAKE_AGENT_PANE (how rw stops a local agent) appends to
 # $FAKE_AGENT_LASTWRITE; reading a remote session's pane pid appends to
@@ -150,7 +152,12 @@ case "$cmd" in
     # %90 is the remote endpoint pane: its @agent_state comes from
     # $FAKE_REMOTE_AGENT_STATE.
     if [ "$target" = "%90" ]; then
-      [ "${rest[${#rest[@]}-1]:-}" = "@agent_state" ] && printf '%s\n' "${FAKE_REMOTE_AGENT_STATE:-}"
+      opt="${rest[${#rest[@]}-1]:-}"
+      if [ "$opt" = "@agent_state" ]; then
+        printf '%s\n' "${FAKE_REMOTE_AGENT_STATE:-}"
+      elif [ -n "${FAKE_REMOTE_PANE_OPTS:-}" ] && [ -f "$FAKE_REMOTE_PANE_OPTS" ]; then
+        sed -n "s|^$opt=||p" "$FAKE_REMOTE_PANE_OPTS" | head -n1
+      fi
       exit 0
     fi
     [ -n "$target" ] && get "$target" "${rest[${#rest[@]}-1]:-}"
@@ -162,7 +169,10 @@ case "$cmd" in
     ;;
   send-keys)
     if [ "${FAKE_LOCAL_RESUME_OK:-0}" = 1 ] && [ -n "$(line_of "$target")" ]; then
-      case "${rest[*]}" in *claudef* | *pif*) put "$target" pane_current_command claude ;; esac
+      case "${rest[*]}" in
+        *"&& nvim "* | *"&& vim "*) put "$target" pane_current_command nvim ;;
+        *claudef* | *pif*) put "$target" pane_current_command claude ;;
+      esac
     fi
     ;;
   respawn-pane)

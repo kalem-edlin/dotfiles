@@ -23,6 +23,9 @@
 #      agent's (now final) transcript exported, installed and resumed there,
 #      and verified. If ANY pane fails, everything rolls back: worker
 #      sessions killed, local agents resumed, the root stays local (exit 1).
+#      An editor pane (nvim, vim, vi) gets its editor reopened there (its
+#      nvim session, or its argv, with the root's paths rewritten); that is
+#      best effort: an editor that does not come back is only a warning.
 #   6. Commit: ownership record (owner = worker) and mirror, endpoint
 #      records (contract C3), panes replaced by their attach loops.
 #
@@ -212,8 +215,9 @@ for i in "${!pane_lines[@]}"; do
   fi
   # A busy pane no adapter recognizes must not be replaced: detection may
   # have raced the agent's own session recording, and respawning would kill
-  # the only copy. Shells and editors are deliberate workspace-only panes;
-  # the calling pane runs this very command.
+  # the only copy. Shells and editors are safe to replace (an editor is
+  # reopened on the worker in step 5); the calling pane runs this very
+  # command.
   if [ -z "$provider" ] && [ "$pid" != "${TMUX_PANE:-}" ] && ! rw_is_idle_command "$pcmd"; then
     fail_event "agent_detection_unconfirmed:pane=$pid cmd=${pcmd:-unknown}"
     rw_die "rw handoff: pane $pid runs '${pcmd:-unknown}', which is neither a shell, an editor, nor a recognized agent session; nothing was moved. Stop it or wait for the agent to finish starting, then retry." 1
@@ -398,8 +402,34 @@ p_remote_path=()
 p_resume=()
 p_transcript=()
 p_agent_dest=()
+p_editor=()
 created_sessions=()
 failure=""
+
+# Editors come back too, best effort (never a reason to roll back): the
+# editor adapter captures how to reopen the pane's editor (its nvim session,
+# or its argv), rewritten for the worker root, and the command is typed into
+# the new remote pane's login shell like an agent resume, then verified.
+ED_PATTERN='(^|/)(nvim|vim|vi)([[:space:]]|$)'
+reopen_remote_editor() { # <index> <pane> <remote session> <remote path>
+  local i="$1" pid="$2" sname="$3" rpath="$4" dir cmd
+  case "$(pane_field "$i" 8)" in nvim | vim | vi) : ;; *) return 0 ;; esac
+  [ "$pid" != "${TMUX_PANE:-}" ] && [ -x "$ADAPTERS_DIR/editor" ] || return 0
+  dir="$(mktemp -d "$work/editor.XXXXXX")"
+  if ! "$ADAPTERS_DIR/editor" export --pane "$pid" --out "$dir" </dev/null >/dev/null 2>"$dir.err" ||
+    ! cmd="$("$ADAPTERS_DIR/editor" install --snapshot "$dir" --from-root "$root_local" --to-root "$worker_root" \
+      --dest-dir "$rpath" --dest-file "$(rw_state_dir_at "$worker_home")/editor-sessions/${p_endpoint[$i]}.vim" \
+      --worker "$worker" </dev/null 2>"$dir.err")"; then
+    rw_warn "rw handoff: could not capture the editor of pane $pid, so it was not reopened on the remote; open it again there. $(head -c 300 "$dir.err")"
+    return 0
+  fi
+  p_editor[i]="$cmd"
+  if ! rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
+    "tmux send-keys -t $(rw_shquote "$sname") $(rw_shquote "$cmd") Enter" </dev/null >/dev/null 2>&1 ||
+    ! rw_wait_remote_provider_started "$worker" "$sname" "$ED_PATTERN" </dev/null; then
+    rw_warn "rw handoff: could not confirm the editor of pane $pid reopened on the remote; in that pane run: $cmd"
+  fi
+}
 
 for i in "${!pane_lines[@]}"; do
   pid="$(pane_field "$i" 1)"
@@ -412,6 +442,7 @@ for i in "${!pane_lines[@]}"; do
   p_resume[i]=""
   p_transcript[i]=""
   p_agent_dest[i]=""
+  p_editor[i]=""
   if ! rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)" </dev/null >/dev/null 2>&1; then
     failure="could not create the remote session for pane $pid"
     break
@@ -419,7 +450,10 @@ for i in "${!pane_lines[@]}"; do
   created_sessions+=("$session_name")
 
   provider="${p_provider[$i]}"
-  [ -n "$provider" ] || continue
+  if [ -z "$provider" ]; then
+    reopen_remote_editor "$i" "$pid" "$session_name" "$remote_path"
+    continue
+  fi
   adapter="$ADAPTERS_DIR/$provider"
   export_dir="$(mktemp -d "$work/agent.XXXXXX")"
   err="$work/agent-$i.err"
@@ -515,6 +549,7 @@ for i in "${!pane_lines[@]}"; do
     --arg project_worker "${p_agent_dest[$i]}" \
     --arg mode "${p_mode[$i]}" \
     --arg resume "${p_resume[$i]}" \
+    --arg editor "${p_editor[$i]}" \
     --arg now "$now" \
     '{endpoint_id: $endpoint_id, worker: $worker, worker_identity: $worker_identity,
       focus_machine_id: $focus_machine_id, root_id: $root_id, root_rel: $root_rel,
@@ -529,6 +564,7 @@ for i in "${!pane_lines[@]}"; do
           project_path_focus: $project_focus, project_path_worker: $project_worker,
           mode_flags: (if $mode == "" then null else $mode end), outcome: "resumed",
           divergence_risk: false, state: "handed-off"} end),
+      editor: (if $editor == "" then null else {reopen_intent: $editor} end),
       created_at: $now, updated_at: $now, generation: 1}')"
   rw_record_add_endpoint "$root_id" "$endpoint_id"
 
@@ -547,7 +583,8 @@ for i in "${!pane_lines[@]}"; do
     continue
   fi
   # Local agents are already stopped, so the pane runs its shell (or an
-  # editor, whose unsaved buffers the picker warned about).
+  # editor, already reopened on the remote from its saved files; unsaved
+  # buffers stay behind, as the picker warned).
   printf -v loop_cmd '%q %q --fresh' "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id"
   if tmux respawn-pane -k -t "$pid" -c "$pcwd" "$loop_cmd" 2>/dev/null; then
     moved=$((moved + 1))

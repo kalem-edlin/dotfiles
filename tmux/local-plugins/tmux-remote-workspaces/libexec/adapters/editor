@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# Editor adapter: lets `rw handoff` / `rw handback` reopen the editor a pane
+# was running (nvim, vim, vi) on the other side, instead of leaving a bare
+# shell. Unlike the agent adapters there is no transcript and no version
+# gate; an editor that cannot be reopened only costs a warning.
+#
+# What travels:
+#   - nvim with the tmux-workspace-resurrect registration
+#     (nvim/lua/tmux_workspace_resurrect.lua: @workspace-nvim-server,
+#     @workspace-nvim-owner-pid, @workspace-nvim-session on the pane): a
+#     fresh `mksession` is requested over its RPC socket, and that session
+#     file (open buffers, windows, tabs, cursor) is carried with the root's
+#     paths rewritten, then reopened with `nvim -S <file>`. The two lines
+#     tmux-workspace-resurrect adds to embed buffer CONTENTS are dropped:
+#     unsaved text never travels (the picker warns about it before handoff).
+#   - otherwise (vim, vi, nvim without the registration): the editor's own
+#     argv (`ps`), with paths inside the root rewritten. A `-S <session>`
+#     pair names a file on the other machine and is dropped.
+#
+# Subcommands:
+#   editor export --pane <target> [--worker <alias>] --out <dir>
+#       <target> is a local pane id (%N) or, with --worker, the name of the
+#       endpoint session on the worker. Writes <dir>/manifest.json
+#       {editor, cwd, argline, session_file} and <dir>/session.vim when a
+#       session was captured. Exit 1 when no editor runs in the pane's
+#       foreground, 6 when the worker cannot be reached.
+#   editor install --snapshot <dir> --from-root <path> --to-root <path>
+#       --dest-dir <path> --dest-file <path> [--worker <alias>]
+#       Rewrites <from-root> to <to-root>, writes the session file to
+#       <dest-file> (0600; on the worker with --worker) and prints the
+#       command to type into the destination pane's login shell.
+
+set -uo pipefail
+
+CA_SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./common-adapter.sh
+source "$CA_SELF/common-adapter.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  editor export --pane <pane-id|endpoint-session> [--worker <alias>] --out <dir>
+  editor install --snapshot <dir> --from-root <path> --to-root <path>
+                 --dest-dir <path> --dest-file <path> [--worker <alias>]
+EOF
+}
+
+[ $# -ge 1 ] || {
+  usage >&2
+  exit 1
+}
+cmd="$1"
+shift
+
+# The probe runs where the pane lives (locally, or on the worker through
+# ssh), with the target as $1. Output: a header line
+#   editor<TAB><name><TAB><has-session 0|1><TAB><cwd>
+# the editor's command line, a line `---`, then the session file body.
+# Exit 1: no editor in the pane's foreground.
+ED_PROBE=""
+IFS= read -r -d '' ED_PROBE <<'EOS'
+set -u
+t="$1"
+fmt="#{pane_id}	#{pane_pid}	#{pane_current_command}	#{pane_current_path}"
+case "$t" in
+  %*) line="$(tmux display-message -p -t "$t" -F "$fmt" </dev/null 2>/dev/null)" ;;
+  *) line="$(tmux list-panes -t "=$t" -F "$fmt" </dev/null 2>/dev/null | head -n1)" ;;
+esac
+IFS='	' read -r pane ppid pcmd pcwd <<EOL
+$line
+EOL
+[ -n "${pane:-}" ] && [ -n "${ppid:-}" ] || exit 1
+case "${pcmd:-}" in nvim | vim | vi) : ;; *) exit 1 ;; esac
+ps_out="$(ps axo pid=,ppid=,command= </dev/null 2>/dev/null)"
+# The editor is the pane process itself or a direct child of it (a shell
+# running it); never the "nvim --embed" server under a TUI.
+ed="$(printf '%s\n' "$ps_out" | awk -v pp="$ppid" '
+  {
+    pid = $1; par = $2; line = $0
+    sub(/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]*/, "", line)
+    split(line, w, /[[:space:]]+/); n = w[1]; sub(/.*\//, "", n)
+    if (n != "nvim" && n != "vim" && n != "vi") next
+    if (line ~ /(^|[[:space:]])--(embed|headless)([[:space:]]|$)/) next
+    if (pid == pp) self = pid "\t" n "\t" line
+    else if (par == pp && child == "") child = pid "\t" n "\t" line
+  }
+  END { if (self != "") print self; else if (child != "") print child }')"
+[ -n "$ed" ] || exit 1
+edpid="${ed%%	*}"; rest="${ed#*	}"; name="${rest%%	*}"; argline="${rest#*	}"
+sess=""
+if [ "$name" = nvim ]; then
+  owner="$(tmux show-option -pqvt "$pane" @workspace-nvim-owner-pid </dev/null 2>/dev/null)"
+  owner_parent="$(printf '%s\n' "$ps_out" | awk -v p="${owner:-x}" '$1 == p { print $2; exit }')"
+  # The registration must belong to THIS editor (its own pid, or the
+  # embedded server it started); a stale one names some other session.
+  if [ -n "$owner" ] && { [ "$owner" = "$edpid" ] || [ "$owner_parent" = "$edpid" ]; }; then
+    server="$(tmux show-option -pqvt "$pane" @workspace-nvim-server </dev/null 2>/dev/null)"
+    if [ -n "$server" ] && [ -S "$server" ] && command -v nvim >/dev/null 2>&1; then
+      # A fresh :mksession (bounded: a busy editor must not stall rw).
+      nvim --server "$server" --remote-expr 'luaeval("require(\"tmux_workspace_resurrect\").save()")' </dev/null >/dev/null 2>&1 &
+      rpc=$!
+      i=0
+      while kill -0 "$rpc" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+      kill -TERM "$rpc" 2>/dev/null
+      wait "$rpc" 2>/dev/null
+    fi
+    sess="$(tmux show-option -pqvt "$pane" @workspace-nvim-session </dev/null 2>/dev/null)"
+    [ -n "$sess" ] && [ -r "$sess" ] || sess=""
+  fi
+fi
+printf 'editor\t%s\t%s\t%s\n' "$name" "$([ -n "$sess" ] && echo 1 || echo 0)" "${pcwd:-}"
+printf '%s\n' "$argline"
+echo ---
+if [ -n "$sess" ]; then
+  grep -Ev "^lua require\('tmux_workspace_resurrect'\)\.(prepare_restore|restore_snapshot)\(" "$sess"
+fi
+exit 0
+EOS
+
+cmd_export() {
+  local pane="" worker="" out="" status=0 raw
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pane) pane="${2:?}"; shift 2 ;;
+      --worker) worker="${2:?}"; shift 2 ;;
+      --out) out="${2:?}"; shift 2 ;;
+      *) ca_die "export: unknown argument: $1" 1 ;;
+    esac
+  done
+  [ -n "$pane" ] && [ -n "$out" ] || ca_die "export: --pane and --out are required" 1
+  ca_need_jq
+  mkdir -p "$out"
+  raw="$out/probe.out"
+  if [ -n "$worker" ]; then
+    ca_ssh_run "$worker" "bash -s -- $(printf '%q' "$pane")" <<<"$ED_PROBE" >"$raw" 2>/dev/null || status=$?
+    [ "$status" -eq 255 ] && ca_die "export: '$worker' cannot be reached." 6
+  else
+    bash -c "$ED_PROBE" _ "$pane" </dev/null >"$raw" 2>/dev/null || status=$?
+  fi
+  [ "$status" -eq 0 ] || exit 1
+  local hdr argline name cwd has_sess
+  hdr="$(sed -n 1p "$raw")"
+  argline="$(sed -n 2p "$raw")"
+  IFS="$(printf '\t')" read -r _ name has_sess cwd <<<"$hdr"
+  [ -n "${name:-}" ] || exit 1
+  if [ "${has_sess:-0}" = 1 ]; then
+    sed '1,/^---$/d' "$raw" >"$out/session.vim"
+    [ -s "$out/session.vim" ] || has_sess=0
+  fi
+  rm -f "$raw"
+  jq -nc --arg editor "$name" --arg cwd "${cwd:-}" --arg argline "$argline" \
+    --arg sess "$([ "${has_sess:-0}" = 1 ] && echo session.vim)" \
+    '{editor: $editor, cwd: $cwd, argline: $argline, session_file: (if $sess == "" then null else $sess end)}' \
+    >"$out/manifest.json"
+}
+
+# ed_rewrite <from> <to> -- a session file on stdin to stdout with every
+# literal <from> replaced by <to>, both in the backslash-escaped spelling
+# :mksession writes (a space in a path is "\ "). ENVIRON, not -v: -v would
+# interpret backslashes.
+ed_rewrite() {
+  ED_FROM="$1" ED_TO="$2" awk '
+    function swap(s, a, b,   out, i) {
+      if (a == "") return s
+      out = ""
+      while ((i = index(s, a)) > 0) { out = out substr(s, 1, i - 1) b; s = substr(s, i + length(a)) }
+      return out s
+    }
+    BEGIN {
+      from = ENVIRON["ED_FROM"]; to = ENVIRON["ED_TO"]
+      efrom = from; gsub(/ /, "\\ ", efrom); eto = to; gsub(/ /, "\\ ", eto)
+    }
+    { print swap($0, efrom, eto) }'
+}
+
+cmd_install() {
+  local snap="" from="" to="" dest_dir="" dest_file="" worker=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --snapshot) snap="${2:?}"; shift 2 ;;
+      --from-root) from="${2:?}"; shift 2 ;;
+      --to-root) to="${2:?}"; shift 2 ;;
+      --dest-dir) dest_dir="${2:?}"; shift 2 ;;
+      --dest-file) dest_file="${2:?}"; shift 2 ;;
+      --worker) worker="${2:?}"; shift 2 ;;
+      *) ca_die "install: unknown argument: $1" 1 ;;
+    esac
+  done
+  [ -n "$snap" ] && [ -n "$from" ] && [ -n "$to" ] && [ -n "$dest_dir" ] && [ -n "$dest_file" ] ||
+    ca_die "install: --snapshot, --from-root, --to-root, --dest-dir and --dest-file are required" 1
+  ca_need_jq
+  [ -f "$snap/manifest.json" ] || ca_die "install: no manifest.json in $snap" 1
+  local name argline sess
+  name="$(jq -r '.editor // empty' "$snap/manifest.json")"
+  argline="$(jq -r '.argline // empty' "$snap/manifest.json")"
+  sess="$(jq -r '.session_file // empty' "$snap/manifest.json")"
+  case "$name" in nvim | vim | vi) : ;; *) ca_die "install: unknown editor '$name'" 1 ;; esac
+
+  if [ -n "$sess" ] && [ -f "$snap/$sess" ]; then
+    local ddir
+    ddir="$(dirname "$dest_file")"
+    # Earlier reopen files are only read at editor start: a week is plenty.
+    local write
+    write="umask 077 && mkdir -p $(printf '%q' "$ddir") && find $(printf '%q' "$ddir") -name '*.vim' -mtime +7 -delete 2>/dev/null; cat >$(printf '%q' "$dest_file")"
+    if [ -n "$worker" ]; then
+      ed_rewrite "$from" "$to" <"$snap/$sess" | ca_ssh_run "$worker" "$write" ||
+        ca_die "install: could not write the editor session on '$worker'." 1
+    else
+      ed_rewrite "$from" "$to" <"$snap/$sess" | bash -c "$write" ||
+        ca_die "install: could not write the editor session to $dest_file." 1
+    fi
+    printf 'cd %q && nvim -S %q\n' "$dest_dir" "$dest_file"
+    return 0
+  fi
+
+  # No session: replay the editor's own argv. `ps` joins argv with spaces,
+  # so an argument containing a space cannot be told apart; such files come
+  # back as separate names (the editor still opens).
+  local words=() out=() w skip=0 first=1 line
+  read -ra words <<<"$argline"
+  [ "${#words[@]}" -gt 0 ] || words=("$name")
+  for w in "${words[@]}"; do
+    if [ "$first" -eq 1 ]; then
+      out+=("${w##*/}") # the binary resolves on the destination's PATH
+      first=0
+      continue
+    fi
+    if [ "$skip" -eq 1 ]; then skip=0; continue; fi
+    case "$w" in
+      -S) skip=1; continue ;;
+      -S*) continue ;;
+    esac
+    case "$w" in
+      "$from") w="$to" ;;
+      "$from"/*) w="$to/${w#"$from"/}" ;;
+    esac
+    out+=("$w")
+  done
+  printf -v line ' %q' "${out[@]}"
+  printf 'cd %q &&%s\n' "$dest_dir" "$line"
+}
+
+case "$cmd" in
+  export) cmd_export "$@" ;;
+  install) cmd_install "$@" ;;
+  -h | --help) usage ;;
+  *)
+    ca_warn "unknown subcommand: $cmd"
+    usage >&2
+    exit 1
+    ;;
+esac
