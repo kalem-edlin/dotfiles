@@ -2,7 +2,7 @@
 	setup-linux-headless setup-linux-headless-run headless-doctor check-tool-parity \
 	install install-headless brew brew-headless brew-cleanup brew-cleanup-force \
 	brew-cleanup-headless brew-cleanup-headless-force \
-	neovim node python macos helium obsidian obsidian-cli lucide-font misc misc-headless uninstall reload help
+	neovim node python macos helium obsidian obsidian-cli lucide-font misc misc-headless rea uninstall reload help
 
 # Dotfiles directory (absolute path). Resolved from this Makefile's own
 # location (not the caller's cwd) so `make -C somewhere/else -f
@@ -42,7 +42,7 @@ setup:
 	@echo "Requesting sudo access..."
 	@sudo -n true 2>/dev/null || sudo -v
 	@while true; do sudo -n true; sleep 60; kill -0 $$$$ || exit; done 2>/dev/null &
-	@$(MAKE) brew lucide-font helium neovim node obsidian python macos install misc
+	@$(MAKE) brew lucide-font helium neovim node obsidian python macos install misc rea
 	@echo ""
 	@echo "✓ Setup complete!"
 	@echo ""
@@ -421,6 +421,14 @@ lucide-font:
 	@chmod +x setup/lucide-font.sh
 	@./setup/lucide-font.sh
 
+# REA checkout (~/Developer/rea: submodules, npm ci, build) plus the pinned
+# JDK 21 and Ghidra it drives (~/Developer/tools). Rerun to update: fetches,
+# never resets the checkout. Needs node (fnm) and a GitHub-registered SSH key.
+rea:
+	@echo "Installing REA, JDK and Ghidra..."
+	@chmod +x setup/rea.sh
+	@./setup/rea.sh
+
 # Miscellaneous setup (Xcode tools, npm config, GitHub CLI check)
 misc:
 	@echo "Running miscellaneous setup..."
@@ -453,7 +461,7 @@ help:
 	@echo "Usage: make <target>"
 	@echo ""
 	@echo "Targets:"
-	@echo "  setup           Full setup (brew + node + python + macos + install + misc)"
+	@echo "  setup           Full setup (brew + node + python + macos + install + misc + rea)"
 	@echo "  setup-headless  Platform-aware headless setup for macOS or Linux (never sudo make ...)"
 	@echo "  setup-linux-headless  Linux headless setup, then headless-doctor gates success"
 	@echo "  install         Symlink dotfiles to ~/.config/, ~, and app settings"
@@ -474,5 +482,6 @@ help:
 	@echo "  obsidian     Configure Obsidian Headless (ob)"
 	@echo "  lucide-font  Install the pinned Lucide icon font into ~/Library/Fonts"
 	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
+	@echo "  rea          REA checkout + npm ci, pinned JDK 21 and Ghidra under ~/Developer/tools"
 	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux)"
 	@echo "  help         Show this help message"

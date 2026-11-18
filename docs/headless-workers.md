@@ -55,7 +55,7 @@ following. `make headless-doctor` and the verification commands below prove
 this contract — not just that the installer exited zero.
 
 - **Commands:** `bash`, `zsh`, `ssh`, `git`, `git-lfs`, `stow`, `tmux`, `jq`,
-  `rsync`, `tar`, `tailscale` (unless provisioned with
+  `rsync`, `tar`, `unzip`, `tailscale` (unless provisioned with
   `INSTALL_TAILSCALE=0`), and a usable UUID source; `node`, `npm`, `pi`,
   `codex`, and `claude` for agent handoff; Neovim `nvim >= 0.10` (required
   by the managed config and remote Treemux) and `ob` as part of the intended
@@ -76,6 +76,31 @@ this contract — not just that the installer exited zero.
   `tmux-remote-workspaces` plugin files exposed through the tmux dotfiles
   link. Live Codex session IDs are recovered from the native process and
   its open rollout file, without installing or trusting a Codex hook.
+- **REA and its tools** (`make rea`, `setup/rea.sh`; the last install step
+  of both headless lanes and of `make setup`):
+  - `~/Developer/rea`: a clone of `git@github.com:morluto/rea.git` with its
+    submodules, `node_modules` from `npm ci` under the Node in REA's
+    `.nvmrc` (fnm), and `dist/` from `npm run build`. Consumers spawn
+    `node dist/main.js` from the checkout. REA's `install.sh`, its global
+    skills and `.mcp.json` rendering are deliberately not run. The clone is
+    over SSH, so the worker's key must already be registered with GitHub.
+  - `~/Developer/tools/jdk-21.0.12.1+1`: Eclipse Temurin JDK 21, and
+    `~/Developer/tools/ghidra_12.1.4_PUBLIC`: Ghidra 12.1.4. Both are
+    pinned sha256 archives from the vendors' GitHub releases (JDK per OS and
+    arch: macOS and Linux, aarch64 and x86_64), the `setup/go.sh` pattern.
+    Ghidra's zip ships the decompiler native only for Linux x86_64, so on
+    macOS and Linux aarch64 the script builds it from the zip's own sources
+    (`make` plus a C++ compiler: Xcode CLT, or the Linux build toolchain).
+  - `zsh/.zshenv` exports `JAVA_HOME` (the JDK's `Contents/Home` on macOS,
+    its root on Linux), puts its `bin` first on `PATH`, and exports
+    `GHIDRA_INSTALL_DIR`, each only when the directory exists, so
+    noninteractive `ssh worker '...'` jobs see them.
+- **Power policy (macOS):** `setup/macos-headless.sh` runs
+  `sudo pmset -a sleep 0 autorestart 1 womp 1` right after priming sudo, so
+  the worker never system-sleeps (`displaysleep 0` alone does not hold it
+  awake), boots again after a power failure, and wakes for network access.
+  Auto-login as the worker user and FileVault off stay manual (see below);
+  the doctor checks all three.
 - **Durability service:** on macOS, a loaded launchd job that can find
   Homebrew tmux; on Linux, an active systemd user timer with linger enabled
   for the target user.
@@ -108,10 +133,11 @@ yourself, in this rough order:
 - **Mac mini-specific manual steps:**
   - Confirm the Mini account identity (the `User` in `~/.ssh/config.local`) before any destructive
     reprovisioning.
-  - Confirm the GUI login/reboot model: the durability timer loads into
-    `gui/$UID`, which requires the Mini to either auto-login or otherwise
-    maintain that GUI user domain across reboots. Decide and configure this
-    deliberately rather than assuming it.
+  - Turn FileVault off and enable auto-login as the worker user (System
+    Settings > Users & Groups > Automatically log in as). The durability
+    timer loads into `gui/$UID`, which exists only after a login, and macOS
+    refuses auto-login while FileVault is on. `make headless-doctor` fails
+    `power:autologin` and `power:filevault` until both are done.
   - Confirm Xcode license acceptance, Simulator/signing/keychain
     requirements, and that Remote Login (SSH) is enabled in System Settings.
   - The `tailscale-app` cask (installed as part of the required contract,
@@ -120,6 +146,38 @@ yourself, in this rough order:
     console or Screen Sharing interaction (or MDM pre-approval of the
     extension) — it is not unattended-safe, and `sudo tailscale up` will
     not surface or satisfy this approval for you.
+
+## Updating a worker (rerun is the contract)
+
+There is no `update` target: rerunning the installer is the update. From the
+focus machine (`W` the worker alias, `REPO` its dotfiles checkout):
+
+```sh
+ssh $W "git -C $REPO fetch origin && git -C $REPO reset --hard origin/main"
+ssh $W "make -C $REPO setup-headless"
+ssh $W "make -C $REPO headless-doctor"
+```
+
+Check `git -C $REPO status --porcelain` first (see "Full validation" step 1);
+`reset --hard` discards whatever dirtied the tree. What a rerun does for each
+piece:
+
+- Homebrew or distro packages, Node globals (`pi`, `codex`), `claude`,
+  dotfile links and timers: brought to what the repo declares.
+- `~/Developer/rea`: `git fetch` and `git submodule update --init
+  --recursive` only. The branch, HEAD and working tree are never reset,
+  merged or rebased; pull it yourself to move REA forward. `npm ci` runs
+  only when `package-lock.json` is newer than `node_modules`, and
+  `npm run build` after any `npm ci` or when `dist/main.js` is missing.
+- JDK and Ghidra: skipped while the pinned directory exists. A new pin in
+  `setup/rea.sh` installs side by side under its own directory name; update
+  the matching names in `zsh/.zshenv` in the same commit (the doctor's
+  `env:jdk-ghidra` check fails until they agree), and remove the old
+  directory by hand.
+- `pmset`: reapplied (idempotent).
+
+Job state that lives outside these paths (Ghidra projects, frozen output) is
+copied by hand.
 
 ## Focus-machine registration
 
@@ -239,11 +297,14 @@ checkout on the worker (`~/Developer/dotfiles` or `~/dotfiles`).
    exits 0 — this also proves the doctor's own toolchain resolves under a
    noninteractive SSH shell.
 4. Full contract probe:
-   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar node npm pi codex claude nvim ob go rw'` —
+   `ssh $W 'command -v zsh git git-lfs stow tmux jq curl rsync tar unzip node npm pi codex claude nvim ob go rw java'` —
    every command must resolve, and the output must be paths only, with no
    shell-init noise. `tailscale` too, unless the worker was provisioned with
    `INSTALL_TAILSCALE=0`.
-   `ssh $W 'nvim --version | sed -n 1p'` must report Neovim 0.10 or newer.
+   `ssh $W 'nvim --version | sed -n 1p'` must report Neovim 0.10 or newer,
+   and `ssh $W 'java -version'` must report the pinned JDK (resolved from
+   `JAVA_HOME`, not a system Java). On macOS, `ssh $W 'pmset -g'` shows
+   `sleep 0`, `autorestart 1` and `womp 1`.
 5. Git LFS: `ssh $W 'git lfs env >/dev/null && echo LFS_OK'` prints
    `LFS_OK`.
 6. Durability timer: the per-platform checks above (`launchctl print` /

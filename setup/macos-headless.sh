@@ -60,12 +60,21 @@ sudo -n true 2>/dev/null || sudo -v
 SUDO_KEEPALIVE_PID=$!
 trap 'kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true' EXIT
 
+# A worker must stay up: never system-sleep (displaysleep alone does not
+# hold it awake), boot again after a power failure, and wake for network
+# access. Idempotent; headless-doctor's power:pmset checks the result.
+# Auto-login and FileVault off stay manual (docs/headless-workers.md).
+echo "Setting worker power policy (pmset -a sleep 0 autorestart 1 womp 1)..."
+sudo pmset -a sleep 0 autorestart 1 womp 1
+
 # Order matters: packages first (TPM's install_plugins needs the tmux
 # binary), then language/tool steps, then install-headless (stow + TPM
 # plugins), then misc-headless (SSH key + launchd save timer) LAST — the
 # launchd timer setup asserts that tmux-resurrect's save.sh already exists,
-# which only install-headless creates. headless-doctor is the final gate:
-# this script only reaches the success banner if it exits 0.
+# which only install-headless creates. rea comes after them: it needs node
+# and the worker's GitHub-registered SSH key, and a missing key should not
+# block the rest of the worker. headless-doctor is the final gate: this
+# script only reaches the success banner if it exits 0.
 run_make_target brew-headless
 run_make_target python
 run_make_target neovim
@@ -73,6 +82,7 @@ run_make_target node
 run_make_target obsidian
 run_make_target install-headless
 run_make_target misc-headless
+run_make_target rea
 run_make_target headless-doctor
 
 echo ""

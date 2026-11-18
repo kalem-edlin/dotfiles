@@ -195,7 +195,9 @@ install_linux_packages() {
   # "Required worker contract" (zsh, git, git-lfs, stow, tmux, jq, rsync,
   # tar, nvim, an ssh client) plus the minimal build toolchain genuinely
   # needed for npm packages with native addons installed by setup/node.sh
-  # (make/gcc/g++/pkg-config or the distro's build-essentials equivalent),
+  # (make/gcc/g++/pkg-config or the distro's build-essentials equivalent;
+  # setup/rea.sh also builds Ghidra's decompiler with it on aarch64), unzip
+  # (setup/rea.sh unpacks the Ghidra release zip),
   # plus gh (GitHub CLI) for parity with Brewfile.headless:27, which already
   # installs it on macOS headless workers (see headless-doctor.sh's cmd:gh
   # check). gh is only REQUIRED here on distros confidently known to ship it
@@ -227,10 +229,10 @@ install_linux_packages() {
     apt)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-client
-        tmux neovim jq rsync tar make gcc g++ pkg-config gh git-delta
+        tmux neovim jq rsync tar make gcc g++ pkg-config gh git-delta unzip
       )
       optional=(
-        cmake ninja-build unzip xz-utils ripgrep fd-find bat fzf tree btop
+        cmake ninja-build xz-utils ripgrep fd-find bat fzf tree btop
         zoxide lsof python3 python3-pip python3-venv pipx universal-ctags
         gnupg libssl-dev zlib1g-dev libbz2-dev libreadline-dev
         libsqlite3-dev llvm libncursesw5-dev tk-dev libxml2-dev
@@ -242,10 +244,10 @@ install_linux_packages() {
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-clients
         tmux neovim jq rsync tar make gcc gcc-c++ pkgconf-pkg-config gh
-        git-delta
+        git-delta unzip
       )
       optional=(
-        cmake ninja-build unzip xz ripgrep fd-find bat fzf tree btop zoxide
+        cmake ninja-build xz ripgrep fd-find bat fzf tree btop zoxide
         lsof python3 python3-pip pipx ctags openssl-devel zlib-devel bzip2
         bzip2-devel readline-devel sqlite sqlite-devel xz-devel tk-devel
         libffi-devel postgresql postgresql-devel eza zsh-autosuggestions
@@ -254,10 +256,10 @@ install_linux_packages() {
     pacman)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh
-        tmux neovim jq rsync tar base-devel pkgconf gh git-delta
+        tmux neovim jq rsync tar base-devel pkgconf gh git-delta unzip
       )
       optional=(
-        cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
+        cmake ninja xz ripgrep fd bat fzf tree btop zoxide lsof
         python python-pip python-pipx ctags openssl zlib bzip2 readline
         sqlite tk libffi postgresql-libs eza zsh-autosuggestions
       )
@@ -265,10 +267,10 @@ install_linux_packages() {
     zypper)
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh
-        tmux neovim jq rsync tar make gcc gcc-c++ pkg-config git-delta
+        tmux neovim jq rsync tar make gcc gcc-c++ pkg-config git-delta unzip
       )
       optional=(
-        cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
+        cmake ninja xz ripgrep fd bat fzf tree btop zoxide lsof
         python3 python3-pip python3-venv pipx ctags libopenssl-devel
         zlib-devel libbz2-devel readline-devel sqlite3-devel xz-devel
         tk-devel libffi-devel postgresql-devel eza zsh-autosuggestions
@@ -285,10 +287,10 @@ install_linux_packages() {
       # be reached on a typical (non-systemd) Alpine host.
       required=(
         bash zsh git git-lfs stow curl ca-certificates openssh-client
-        tmux neovim jq rsync tar make gcc g++ build-base pkgconf
+        tmux neovim jq rsync tar make gcc g++ build-base pkgconf unzip
       )
       optional=(
-        cmake ninja unzip xz ripgrep fd bat fzf tree btop zoxide lsof
+        cmake ninja xz ripgrep fd bat fzf tree btop zoxide lsof
         python3 py3-pip py3-pipx ctags openssl-dev zlib-dev bzip2-dev
         readline-dev sqlite-dev xz-dev tk-dev libffi-dev postgresql-dev
         eza zsh-autosuggestions
@@ -646,7 +648,7 @@ verify_commands() {
   local missing=0
   local nvim_version nvim_major nvim_minor
   local required_commands=(
-    zsh git git-lfs stow tmux nvim jq curl rsync tar
+    zsh git git-lfs stow tmux nvim jq curl rsync tar unzip
     node npm pi codex claude ob go
   )
 
@@ -704,8 +706,9 @@ verify_commands() {
 # has a working, activated fnm) -> python.sh / neovim.sh / obsidian.sh
 # (obsidian.sh activates its own fnm too, so it works standalone) -> go.sh ->
 # dotfiles via lib.sh (stow, TPM, rw, ssh dirs) -> systemd save timer + fatal
-# linger verification -> internal verify_commands -> success banner (only
-# reachable if everything above succeeded).
+# linger verification -> rea.sh (REA, JDK, Ghidra) -> internal
+# verify_commands -> success banner (only reachable if everything above
+# succeeded).
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "Error: setup/linux-headless.sh is only for Linux."
@@ -749,6 +752,11 @@ install_stripe_cli || echo "warn: Stripe CLI installation failed (optional; not 
 
 install_headless_dotfiles
 install_tmux_resurrect_save_timer
+
+# REA checkout plus JDK and Ghidra. Needs node (activated above) and the
+# worker's GitHub-registered SSH key; last, so a missing key leaves the rest
+# of the worker in place.
+"$DOTFILES_DIR/setup/rea.sh"
 
 verify_commands
 

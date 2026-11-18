@@ -103,6 +103,7 @@ Why the laptop copy is frozen rather than deleted (D17): a linked worktree's reg
 - `headless-doctor.sh` gains: `rea:checkout`, `rea:node-modules`, `tool:jdk`, `tool:ghidra`, `power:autologin`, `power:filevault`, `power:pmset`. New commands go in `REQUIRED_CMDS` plus `tool-parity-exceptions.txt`.
 - Mini update (no `update` target exists; rerun is the contract): `git -C ~/Developer/dotfiles reset --hard origin/main` (discarding its dirty `nvim/lazy-lock.json`), `make setup-headless`, `make headless-doctor`.
 - One-off job state (frozen Ghidra output) is copied by hand (D16).
+- Found while building W1 (2026-11-18), folded into `setup/rea.sh`: (a) consumers spawn `node dist/main.js` and `dist/` is gitignored, so `npm ci` alone leaves REA unrunnable; the script also runs `npm run build` (tsc into the checkout, nothing global) after any `npm ci` or when `dist/main.js` is missing; doctor check `rea:build`. (b) Ghidra 12.1.4's public zip ships the decompiler native only for `linux_x86_64` and Windows; the laptop's `mac_arm_64/decompile` was built locally. The script builds it from the zip's sources (`make ghidra_opt` with `ARCH_TYPE` overridden) on macOS and Linux aarch64; `tool:ghidra` checks it. (c) Ghidra is a zip, so `unzip` joins `REQUIRED_CMDS` and the Linux required arrays. (d) Doctor check `env:jdk-ghidra` proves `.zshenv` and the pins agree.
 
 ## Decision log
 

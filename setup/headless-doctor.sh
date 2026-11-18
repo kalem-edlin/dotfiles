@@ -329,7 +329,7 @@ if [ "$QUIET" -eq 0 ]; then
   printf '%s\n' "-- required commands (current environment) --"
 fi
 
-REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar curl node npm pi codex claude nvim ob gh delta go"
+REQUIRED_CMDS="bash zsh ssh git git-lfs stow tmux jq rsync tar unzip curl node npm pi codex claude nvim ob gh delta go"
 for cmd in $REQUIRED_CMDS; do
   if has_cmd "$cmd"; then
     c_pass "cmd:$cmd" "$(command -v "$cmd")"
@@ -816,7 +816,170 @@ elif [ "$PROFILE" = "headless-linux" ]; then
 fi
 
 # ===========================================================================
-# 8. SSH
+# 8. REA and its tools (setup/rea.sh), and worker power policy (macOS)
+# ===========================================================================
+
+if [ "$QUIET" -eq 0 ]; then
+  printf '%s\n' "-- rea and tools --"
+fi
+
+REA_SETUP="$DOTFILES_DIR/setup/rea.sh"
+REA_CHECKOUT="$TARGET_HOME/Developer/rea"
+REA_TOOLS_DIR="$TARGET_HOME/Developer/tools"
+REA_REMEDIATION="run make rea"
+# Read the pins from the installer itself so this check never drifts from it.
+JDK_RELEASE="$(sed -n 's/^JDK_RELEASE=//p' "$REA_SETUP" 2>/dev/null)"
+GHIDRA_VERSION="$(sed -n 's/^GHIDRA_VERSION=//p' "$REA_SETUP" 2>/dev/null)"
+
+if has_cmd git && git -C "$REA_CHECKOUT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  rea_origin="$(git -C "$REA_CHECKOUT" remote get-url origin 2>/dev/null)"
+  case "$rea_origin" in
+    *morluto/rea | *morluto/rea.git)
+      rea_uninit="$(git -C "$REA_CHECKOUT" submodule status --recursive 2>/dev/null | grep -c '^-')"
+      rea_head="$(git -C "$REA_CHECKOUT" rev-parse --short HEAD 2>/dev/null)"
+      rea_branch="$(git -C "$REA_CHECKOUT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+      if [ "$rea_uninit" -eq 0 ]; then
+        c_pass "rea:checkout" "$REA_CHECKOUT at $rea_branch $rea_head, submodules initialized"
+      else
+        c_fail "rea:checkout" "$REA_CHECKOUT has $rea_uninit uninitialized submodule(s)" "$REA_REMEDIATION"
+      fi
+      ;;
+    *)
+      c_fail "rea:checkout" "$REA_CHECKOUT origin is '${rea_origin:-<none>}', expected morluto/rea" "point origin at git@github.com:morluto/rea.git, or move the directory aside and $REA_REMEDIATION"
+      ;;
+  esac
+else
+  c_fail "rea:checkout" "$REA_CHECKOUT is not a git checkout" "$REA_REMEDIATION (needs this machine's SSH key registered with GitHub)"
+fi
+
+# npm records every install in node_modules/.package-lock.json; a lockfile
+# newer than that record means `npm ci` is pending (setup/rea.sh uses the
+# same rule).
+if [ -d "$REA_CHECKOUT/node_modules" ]; then
+  rea_stamp="$REA_CHECKOUT/node_modules/.package-lock.json"
+  [ -f "$rea_stamp" ] || rea_stamp="$REA_CHECKOUT/node_modules"
+  if [ "$REA_CHECKOUT/package-lock.json" -nt "$rea_stamp" ]; then
+    c_fail "rea:node-modules" "$REA_CHECKOUT/package-lock.json is newer than node_modules (npm ci pending)" "$REA_REMEDIATION"
+  else
+    c_pass "rea:node-modules" "$REA_CHECKOUT/node_modules matches package-lock.json"
+  fi
+else
+  c_fail "rea:node-modules" "$REA_CHECKOUT/node_modules does not exist" "$REA_REMEDIATION"
+fi
+
+# Consumers spawn `node dist/main.js` from the checkout; dist/ is gitignored
+# and produced by `npm run build`.
+if [ -f "$REA_CHECKOUT/dist/main.js" ]; then
+  c_pass "rea:build" "$REA_CHECKOUT/dist/main.js present"
+else
+  c_fail "rea:build" "$REA_CHECKOUT/dist/main.js does not exist" "$REA_REMEDIATION"
+fi
+
+REA_JDK_HOME=""
+if [ -z "$JDK_RELEASE" ]; then
+  c_fail "tool:jdk" "could not read JDK_RELEASE from $REA_SETUP" "restore setup/rea.sh from the repository"
+else
+  REA_JDK_HOME="$REA_TOOLS_DIR/jdk-$JDK_RELEASE"
+  [ "$OS_UNAME" = "Darwin" ] && REA_JDK_HOME="$REA_JDK_HOME/Contents/Home"
+  if [ -x "$REA_JDK_HOME/bin/java" ]; then
+    jdk_version="$("$REA_JDK_HOME/bin/java" -version 2>&1 | sed -n '1s/^.*version "\([^"]*\)".*$/\1/p')"
+    if [ "$jdk_version" = "${JDK_RELEASE%%+*}" ]; then
+      c_pass "tool:jdk" "$REA_JDK_HOME/bin/java reports $jdk_version"
+    else
+      c_fail "tool:jdk" "$REA_JDK_HOME/bin/java reports '${jdk_version:-unreadable}', expected ${JDK_RELEASE%%+*}" "remove $REA_TOOLS_DIR/jdk-$JDK_RELEASE and $REA_REMEDIATION"
+    fi
+  else
+    c_fail "tool:jdk" "$REA_JDK_HOME/bin/java does not exist" "$REA_REMEDIATION"
+  fi
+fi
+
+# The release zip ships the decompiler native only for linux_x86_64 (and
+# Windows); setup/rea.sh builds it for other platforms. Without it Ghidra
+# imports and analyzes, but every decompile fails.
+REA_GHIDRA_DIR=""
+case "$OS_UNAME:$(uname -m 2>/dev/null)" in
+  Darwin:arm64) ghidra_os_dir="mac_arm_64" ;;
+  Darwin:x86_64) ghidra_os_dir="mac_x86_64" ;;
+  Linux:aarch64 | Linux:arm64) ghidra_os_dir="linux_arm_64" ;;
+  Linux:x86_64 | Linux:amd64) ghidra_os_dir="linux_x86_64" ;;
+  *) ghidra_os_dir="" ;;
+esac
+if [ -z "$GHIDRA_VERSION" ]; then
+  c_fail "tool:ghidra" "could not read GHIDRA_VERSION from $REA_SETUP" "restore setup/rea.sh from the repository"
+else
+  REA_GHIDRA_DIR="$REA_TOOLS_DIR/ghidra_${GHIDRA_VERSION}_PUBLIC"
+  if [ ! -x "$REA_GHIDRA_DIR/support/analyzeHeadless" ]; then
+    c_fail "tool:ghidra" "$REA_GHIDRA_DIR/support/analyzeHeadless does not exist" "$REA_REMEDIATION"
+  elif ! grep -qx "application.version=$GHIDRA_VERSION" "$REA_GHIDRA_DIR/Ghidra/application.properties" 2>/dev/null; then
+    c_fail "tool:ghidra" "$REA_GHIDRA_DIR/Ghidra/application.properties does not declare version $GHIDRA_VERSION" "remove $REA_GHIDRA_DIR and $REA_REMEDIATION"
+  elif [ -z "$ghidra_os_dir" ]; then
+    c_fail "tool:ghidra" "no Ghidra decompiler platform known for $OS_UNAME $(uname -m 2>/dev/null)" "unsupported platform"
+  elif [ ! -x "$REA_GHIDRA_DIR/Ghidra/Features/Decompiler/os/$ghidra_os_dir/decompile" ]; then
+    c_fail "tool:ghidra" "$REA_GHIDRA_DIR has no $ghidra_os_dir decompiler native" "$REA_REMEDIATION (builds it from the bundled sources)"
+  else
+    c_pass "tool:ghidra" "$REA_GHIDRA_DIR ($GHIDRA_VERSION, $ghidra_os_dir decompiler)"
+  fi
+fi
+
+# zsh/.zshenv exports both for every shell, including the noninteractive
+# ones REA's Ghidra jobs run under on a worker.
+if [ -n "$ZSH_BIN" ] && [ -n "$REA_JDK_HOME" ] && [ -x "$REA_JDK_HOME/bin/java" ] &&
+  [ -n "$REA_GHIDRA_DIR" ] && [ -d "$REA_GHIDRA_DIR" ]; then
+  # shellcheck disable=SC2016 # expanded by the child zsh, not here
+  rea_env="$(env -i HOME="$TARGET_HOME" USER="$TARGET_USER" TERM=dumb "$ZSH_BIN" -c 'printf "%s|%s|%s" "$JAVA_HOME" "$GHIDRA_INSTALL_DIR" "$(command -v java)"' 2>/dev/null)"
+  if [ "$rea_env" = "$REA_JDK_HOME|$REA_GHIDRA_DIR|$REA_JDK_HOME/bin/java" ]; then
+    c_pass "env:jdk-ghidra" "noninteractive zsh exports JAVA_HOME and GHIDRA_INSTALL_DIR, java resolves to the JDK"
+  else
+    c_fail "env:jdk-ghidra" "noninteractive zsh gives JAVA_HOME|GHIDRA_INSTALL_DIR|java = ${rea_env:-<empty>}" "keep zsh/.zshenv's JDK and Ghidra directory names in sync with setup/rea.sh's pins"
+  fi
+else
+  c_info "env:jdk-ghidra" "skipped: needs zsh and the JDK and Ghidra installs above"
+fi
+
+# Worker power policy (D15). A worker must survive power loss and never
+# sleep, and its launchd jobs live in the GUI domain, which only exists after
+# a login: auto-login, which macOS refuses while FileVault is on. Required on
+# headless macOS; a focus machine only gets a WARN.
+if [ "$PLATFORM_FAMILY" = "macos" ]; then
+  if [ "$QUIET" -eq 0 ]; then
+    printf '%s\n' "-- power (macOS worker) --"
+  fi
+
+  if [ "$PROFILE" = "local" ]; then
+    power_ok=c_optpass
+    power_bad=c_warn
+  else
+    power_ok=c_pass
+    power_bad=c_fail
+  fi
+
+  autologin_user="$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)"
+  if [ "$autologin_user" = "$TARGET_USER" ]; then
+    "$power_ok" "power:autologin" "auto-login user is $autologin_user"
+  else
+    "$power_bad" "power:autologin" "auto-login user is ${autologin_user:-<unset>}, expected $TARGET_USER" "manual: System Settings > Users & Groups > Automatically log in as $TARGET_USER (needs FileVault off)"
+  fi
+
+  filevault_status="$(fdesetup status 2>/dev/null | head -1)"
+  case "$filevault_status" in
+    "FileVault is Off."*)
+      "$power_ok" "power:filevault" "$filevault_status"
+      ;;
+    *)
+      "$power_bad" "power:filevault" "fdesetup status: ${filevault_status:-<unreadable>} (expected Off)" "manual: System Settings > Privacy & Security > FileVault > Turn Off (auto-login needs it off)"
+      ;;
+  esac
+
+  pmset_values="$(pmset -g 2>/dev/null | awk '$1 == "sleep" || $1 == "autorestart" || $1 == "womp" { v[$1] = $2 } END { printf "sleep=%s autorestart=%s womp=%s", v["sleep"], v["autorestart"], v["womp"] }')"
+  if [ "$pmset_values" = "sleep=0 autorestart=1 womp=1" ]; then
+    "$power_ok" "power:pmset" "$pmset_values"
+  else
+    "$power_bad" "power:pmset" "pmset -g reports $pmset_values, expected sleep=0 autorestart=1 womp=1" "sudo pmset -a sleep 0 autorestart 1 womp 1 (make setup-headless runs it)"
+  fi
+fi
+
+# ===========================================================================
+# 9. SSH
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
@@ -871,7 +1034,7 @@ c_info "ssh:manual-provider-auth" "claude/codex/pi provider authentication is a 
 c_info "ssh:manual-tailscale-up" "\`tailscale up\` authentication is a MANUAL verification this doctor does not attempt"
 
 # ===========================================================================
-# 9. Locale
+# 10. Locale
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
@@ -904,7 +1067,7 @@ else
 fi
 
 # ===========================================================================
-# 10. git lfs
+# 11. git lfs
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
@@ -918,7 +1081,7 @@ else
 fi
 
 # ===========================================================================
-# 11. Provider settings write-back drift (informational / non-fatal)
+# 12. Provider settings write-back drift (informational / non-fatal)
 # ===========================================================================
 #
 # claudef and pif stow their settings files into isolated profile directories,

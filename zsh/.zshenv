@@ -64,6 +64,22 @@ export PYENV_ROOT="$HOME/.pyenv"
 # directory that actually ships one.
 [[ -f ".claude/envoy/envoy" ]] && export PATH="$PWD/.claude/envoy:$PATH"
 
+# JDK 21 and Ghidra for REA, installed under ~/Developer/tools by
+# setup/rea.sh (keep the directory names in sync with its JDK_RELEASE and
+# GHIDRA_VERSION pins). Exported here, not in .zshrc, because REA and the
+# Ghidra jobs it drives run from noninteractive shells on workers. Set only
+# when the directories exist, so machines without them keep their own Java.
+# macOS JDK archives nest the home under Contents/Home; Linux ones do not.
+if [[ -d "$HOME/Developer/tools/jdk-21.0.12.1+1/Contents/Home" ]]; then
+  export JAVA_HOME="$HOME/Developer/tools/jdk-21.0.12.1+1/Contents/Home"
+  path=("$JAVA_HOME/bin" $path)
+elif [[ -d "$HOME/Developer/tools/jdk-21.0.12.1+1/bin" ]]; then
+  export JAVA_HOME="$HOME/Developer/tools/jdk-21.0.12.1+1"
+  path=("$JAVA_HOME/bin" $path)
+fi
+[[ -d "$HOME/Developer/tools/ghidra_12.1.4_PUBLIC" ]] &&
+  export GHIDRA_INSTALL_DIR="$HOME/Developer/tools/ghidra_12.1.4_PUBLIC"
+
 # Initialize fnm for noninteractive shells only. This is what puts the
 # selected default Node/npm and npm-global CLIs (pi, codex) on PATH for
 # `ssh worker 'command'` invocations, which never source .zshrc. Interactive
