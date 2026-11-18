@@ -22,7 +22,9 @@ New shells, windows, and agents start locally. `prefix e` on a local pane, or
 `rw handoff --worker <alias>`, hands the pane's root to a worker: every pane
 on the laptop server whose cwd is the root or inside it moves, in any session
 and at any depth. The rest of a mixed session stays local. `prefix e` on a
-remote pane hands the root back, behind a confirmation. A split follows the
+remote pane hands the root back, behind a confirmation. `prefix e` runs both
+directions as background transfers (`rw bg`), so its popup closes as soon as
+the choice is made. A split follows the
 pane from which it was requested: a split of a remote pane opens remote in
 the same root, a split of a local pane stays local.
 
@@ -245,6 +247,36 @@ An agent that fails to resume locally leaves its endpoint open and the record
 worker closes it. If no agent is detected, both commands move the workspace
 only.
 
+Background transfers. `rw bg handoff --worker <alias> --pane <pane>` and
+`rw bg handback --pane <pane>` run the same two commands without holding
+the caller. A synchronous check (the pane exists, its root resolves, the
+worker is known or the root is remote, this is not the worker side, no
+other transfer of the root runs) exits 0 at once, and a runner detached
+with `setsid` (own session and process group, output to
+`logs/bg-<root_id>-<YYYYmmdd-HHMMSS>.log` under the state root) does the
+rest. It outlives its caller, the calling agent's turn and the respawn of
+the pane it came from. A handoff first waits, up to `--wait-idle` seconds
+(600 by default), until no pane in the root has `@agent_state` `working`;
+a hand-back passes the remaining time to `rw handback --wait-idle`, which
+waits for the remote agents. While a transfer is in flight the global
+options `@rw-transfer` (`handoff <root_rel>`, several joined with `, `) and
+`@rw-transfer-label` are set, and a chip prepended to `status-right` shows
+the label ("⇄ handing off idol-app…") until they are cleared.
+`display-message` reports the start and the end. Exit 5 opens the same
+conflict dialog the popup uses, in a `display-popup`, and re-runs with the
+chosen `--resolve`; any other failure opens a dismissible dialog with the
+error lines and the log path. `bg/<root_id>/` in the state root is the
+one-transfer-per-root lock.
+
+`rw request handback` is the way back from the worker side. Run in an
+endpoint pane on the worker, it sets the pane option `@rw-request` to
+`handback` there; the laptop's attach loop for that pane clears it and
+runs `rw bg handback --pane <its laptop pane>`. It refuses where the root
+is held on the machine it runs on, and `rw bg handoff` refuses on a
+worker-held copy. The `/remote-handoff` agent skill
+(`agents/skills/remote-handoff/SKILL.md`) uses the two, so an agent can
+move its own directory and continue the conversation on the other side.
+
 Transfer uses two channels over the existing SSH alias:
 
 - The git channel moves unpushed commits, staged and unstaged changes,
@@ -393,7 +425,7 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 
 | Action | Behavior |
 | --- | --- |
-| `prefix e` | On a local pane, choose a worker and hand off the pane's root. On a remote pane, confirm, then hand the root back |
+| `prefix e` | On a local pane, choose a worker and hand off the pane's root. On a remote pane, confirm, then hand the root back. Both run in the background |
 | `prefix \\` / `prefix /` | Split locally, or open a new remote pane in the source pane's root with `rw open` |
 | `prefix q` | Close the focused endpoint through tombstone-first teardown, otherwise kill a plain pane |
 | `prefix &` | Confirm, close all endpoints in the window, then kill the window |
@@ -402,9 +434,19 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 | `prefix Ctrl-s` | Run the verified local save and, when focused remotely, the worker save |
 | `rw status` | Print remote roots (owner, worker, panes, pending), then each endpoint's live pane and latest event |
 | `rw doctor` | Report local, worker, registry, reconciliation, and clipboard health |
+| `rw bg handoff` / `rw bg handback` | Check, return at once, then transfer detached after the root's agents go idle; status-line chip, dialogs on conflict or failure |
+| `rw request handback` | On the worker side of a pane: ask the laptop to hand the root back |
+| `/remote-handoff to [worker]` / `back` | Agent skill: the agent hands off its own directory and continues on the other side |
 
-The CLI forms are `rw handoff`, `rw handback`, `rw open`, `rw forget`,
-`rw reclaim --force`, `rw status [--json]`, `rw close`, and `rw doctor`.
+The CLI forms are `rw handoff`, `rw handback`,
+`rw bg handoff [--worker <alias>] --pane <pane> [--wait-idle <seconds>]`,
+`rw bg handback --pane <pane> [--wait-idle <seconds>]`,
+`rw request handback`, `rw open`, `rw forget`, `rw reclaim --force`,
+`rw status [--json]`, `rw close`, and `rw doctor`. `rw bg` exits 0 once
+started, 1 when a transfer of the root already runs or the pane is
+missing, 7 for an invalid, already remote or not remote root or the
+worker side, and 64 on usage; the transfer's own codes go to its log and
+dialog.
 Exit codes: 0 ok, 1 failure, 2 git history diverged, 3 agent CLI too old,
 5 manifest conflict, 6 worker unreachable, 7 root invalid or not in the
 required state, 64 usage.
@@ -443,12 +485,21 @@ stay local unless they are opened for a root that is already remote.
 - `scripts/resolve-workspace.sh` resolves a root and its `~`-relative worker
   placement without SSH.
 - `scripts/rw-picker.sh` implements the
-  `prefix e` popup: worker chooser and handoff on a local pane, confirmation
-  and hand-back on a remote pane, and the conflict dialog.
+  `prefix e` popup: worker chooser and `rw bg handoff` on a local pane,
+  confirmation and `rw bg handback` on a remote pane, `rw open` on a local
+  pane in a remote root.
+- `libexec/rw-bg` is `rw bg`: the synchronous check, the `setsid` detach
+  and the runner (wait-idle, transfer, conflict re-run, failure dialog).
+  `libexec/rw-bg-dialog` runs the conflict dialog inside the runner's
+  popup, and `libexec/rw-dialogs.sh` holds the conflict dialog and failure
+  wording shared with the picker. `libexec/rw-request` is
+  `rw request handback`.
 - `scripts/rw-status.sh` and `rw-doctor.sh` expose state and health.
 - `scripts/rw-copy-mode.sh` enters copy mode on the correct tmux server.
 - `scripts/rw-refresh-indicators.sh` reconciles display caches with live attach
-  loops.
+  loops and, with `--transfers`, sets `@rw-transfer` and
+  `@rw-transfer-label` from the running background transfers and wires
+  their status-line chip.
 - `scripts/session-created-hook.sh` maintains stable session identities.
 - `scripts/rw-session-renamed.sh` keeps `sessions.jsonl` and the endpoint
   records' session name and indices current across session renames.
@@ -577,6 +628,10 @@ All `scripts/` paths in this section are relative to
   `claudef` and `pif`. Reconciliation stopped closing registered endpoints,
   and laptop restore reattaches by endpoint id, reversing the earlier
   accepted behavior of closing remote endpoints after laptop server loss.
+- **2026-11-18 (`48c7f8e`):** Transfers can run in the background (`rw bg`),
+  so `prefix e` no longer holds the client and an agent can hand off its
+  own directory (`/remote-handoff`). `rw request handback` lets the worker
+  side ask for a hand-back through the `@rw-request` pane option.
 
 The September decision is final for this system. Do not reintroduce slots,
 claims, reflected repository rules, or a global worktree manager as a remote
