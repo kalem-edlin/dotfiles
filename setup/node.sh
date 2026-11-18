@@ -34,13 +34,26 @@ fnm use lts-latest
 npm config set loglevel warn
 npm config set fund false
 
+# Pi moved from @mariozechner/pi-coding-agent (frozen at 0.73.1) to
+# @earendil-works/pi-coding-agent. Both ship a `pi` bin, so npm refuses the
+# new one while the old one is installed; drop the old one first.
+#
+# Pinned, unlike the other globals: the pif extensions are written against
+# this version, and rw's pi adapter compares focus and worker versions.
+# 1.x is a major bump; move the pin deliberately, on every machine at once.
+PI_VERSION=0.85.1
+if npm ls -g --depth=0 @mariozechner/pi-coding-agent >/dev/null 2>&1; then
+    echo "Removing the retired @mariozechner/pi-coding-agent..."
+    npm uninstall -g @mariozechner/pi-coding-agent
+fi
+
 # Install global npm packages
 echo "Installing global npm packages..."
 packages=(
     @burneikis/pi-fzfp
     @burneikis/pi-vim
     @cometix/ccline
-    @mariozechner/pi-coding-agent
+    "@earendil-works/pi-coding-agent@$PI_VERSION"
     @mermaid-js/mermaid-cli
     @openai/codex
     @sasazame/ccresume

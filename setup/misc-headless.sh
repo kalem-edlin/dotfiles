@@ -340,7 +340,15 @@ elif ! command -v claude &> /dev/null; then
     rm -f "$TEMP_SCRIPT"
   fi
 else
-  echo "✓ Claude Code already installed"
+  # Rerun is the update contract (docs/headless-workers.md): a worker whose
+  # claude lags the focus machine trips rw's CLI version gate. The native
+  # install updates itself; never fatal, like the install branch above.
+  echo "Updating Claude Code ($(claude --version 2>/dev/null | head -1))..."
+  if claude update; then
+    echo "✓ Claude Code up to date: $(claude --version 2>/dev/null | head -1)"
+  else
+    echo "⚠ claude update failed; Claude Code stays at $(claude --version 2>/dev/null | head -1)"
+  fi
 fi
 
 
