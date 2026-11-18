@@ -48,13 +48,13 @@ The zsh preexec hook in `zsh/.zsh/tmux-workspace-resurrect.zsh` stores the full 
 
 ## Agent state contract
 
-Pane options are written only by the publishers and the focus hook.
+Pane options are written only by the publishers and the focus hook, and on an rw remote pane by rw's mirror of the worker agent's publisher (D112).
 
 | Option | Written by | Meaning |
 |---|---|---|
 | `@agent_kind` | publisher at session start | `claude` or `pi` |
 | `@agent_pid` | publisher at session start | The agent process. The picker treats a dead pid as no agent |
-| `@agent_state` | publisher, focus hook | `idle`, `working`, `awaiting` or `finished` (shown as Done) |
+| `@agent_state` | publisher, focus hook | `idle`, `working`, `awaiting` or `finished` (shown as Done). On a remote pane also `disconnected`, written by rw's mirror while the worker is out of sight (D112) |
 | `@agent_at` | publisher on every transition except the focus-to-Idle one | Epoch of the last agent event. Fallback for `@agent_state_at` in chip and agent ages, so a visit must not move it. It no longer orders rows or picks the initial card (D79) |
 | `@agent_state_at` | publisher, focus hook | Epoch when the current state began. A repeat of the same state keeps the stamp. Drives the age shown on chips |
 | `@agent_name` | publisher | Session title (see Titles) |
@@ -72,7 +72,7 @@ Rules for the publishers:
 - `@agent_subs` decrement clamps at zero: `set -pF @agent_subs '#{?#{e|>|:#{@agent_subs},0},#{e|-|:#{@agent_subs},1},0}'`.
 - Text values are sanitized (control characters to spaces, runs collapsed, trailing separators stripped) so a name cannot break tmux argv or a picker row. A path is not rewritten: `@agent_cwd` is skipped when the path is empty, holds a control character or ends in `;` (which tmux would read as a command separator), in both publishers. The Claude write rides in the same tmux call as the event's other writes, so it costs no extra spawn.
 - Claude hooks are registered with `async: true` (`CwdChanged` included) except `SessionStart`, `UserPromptSubmit`, `SubagentStart`, `SubagentStop` and `SessionEnd`. `SessionStart` restores state before a new prompt can publish Working, so a delayed startup write cannot replace it with an old Awaiting state. The prompt/subagent hooks stay synchronous so a turn's `Stop` cannot land before them, and `SessionEnd` must finish before Claude exits. The `Notification` hook matches `elicitation_dialog|elicitation_url_dialog|idle_prompt` and `PreToolUse` and `PostToolUse` match `AskUserQuestion` only.
-- Agents inside a worker's tmux server (rw remote panes) are invisible to the laptop picker and carry no agent chip. Rows and cards say `remote` instead (D111); memory counts local panes only.
+- Agents inside a worker's tmux server (rw remote panes) publish into the worker's tmux. rw's attach loop mirrors their options onto the laptop pane (D112), so they carry agent chips like local agents, next to the `remote` marker (D111). Memory counts local panes only.
 
 ## State classification and transitions
 
@@ -309,6 +309,12 @@ One list (D84, replacing the two modes). It holds every worktree of every git re
   - Delete. Whether the root is remote is read at `C-a D` time (`Actions.RootRemote`, the records read fresh), not from the snapshot, so a root handed off after the picker loaded still gets `delete <dir>? it is remote; its remote copy, the only current one, goes too [y/N]`; a missing row that is remote gets it too instead of the instant prune. After the kill the picker runs only `wt rm <root>`, with `--discard-remote` when that confirm was the remote one; wt owns the forget. wt's `remote` reply ends the status line: `, remote copy deleted`, `, remote copy deleted on next contact` or `, rw missing, remote copy kept`. A root that became remote between the confirm and wt comes back as wt's exit 5 `is remote`, shown as `<dir> is remote; nothing deleted. C-a D again to confirm deleting its remote copy too`. `wt rm` gets a 5-minute timeout (a forget can wait out an unreachable worker and delete a large copy) and, like `rw open`, dies with its process group. (As first built the picker ran `rw forget --worker` per holder itself before `wt rm`; review found a holder alias dropped from rw's config made that exit 64 and block the delete forever, and that the snapshot could be stale, so wt owns it now.)
   - `wt rm` (`git/.local/bin/wt`). Before trashing or pruning a root under `~`, it reads the same records with `sed` (one-line JSON, no jq): `owned/<root_id>/record.json` and the `held/<worker>/<root_id>.json` index. A root the worker owns right now (no pending forget) is refused with exit 5 unless confirmed: a `y/N` prompt on a terminal, else `--discard-remote`. Lock and main-checkout refusals come first. When any copy is held without a pending forget, it runs `rw forget <root>` once, with no `--worker` (rw combines the record's worker and `held/`, and skips an alias no longer in its config), with `--force` only when the root was confirmed as remote (or a forget of a remote root is already pending). rw's output goes to stderr so stdout stays one JSON object. Exit 0 sets the reply's `"remote":"deleted"`, exit 6 `"pending"` (the delete goes on), a missing rw `"kept"` with a note; any other rw failure is exit 1 with rw's last `rw:` line and nothing deleted. A failure after the forget says `(its remote copies were already deleted)` or `(... are deleted on next contact)` in the error.
   - Tests. `picker/ui/remote_test.go` (`remote_120` and `remote_120_styled` goldens: a parked worktree row, an all-remote session row, a mixed session's cards; `TestDeleteRemote`: the key-time remote read, `--discard-remote`, the status forms, the exit-5 race, a remote missing row; `TestOpenBusy`). `picker/tmuxio/owned_test.go` against record files in the harness's scratch state dir and a logging `rw` shim first in `PATH` (records, nearest root, pending forget not remote, `@rw-root-id`, `rw open` argv and `TMUX_PANE` unset, the kill on failure, focus-owned records ignored, rw's last line, the process-group kill on timeout). `tests/wt-test.sh` with a fake `rw` on `PATH`: one `rw forget <root>` without `--worker`, the remote refusal and `--discard-remote` passing `--force`, unreachable still deletes (`pending`), another failure keeps the root with rw's line, a pending forget is not repeated, a pending remote forget plus another holder, a failure after the forget, rw missing still deletes (`kept`).
+- D112. Remote agent state (follow-up R1, docs/tasks/mini-remote-sessions.md "Changes recorded by B2", 2026-11-18). A remote pane's agent runs in the worker's tmux server and publishes there. rw's attach loop mirrors its options onto the laptop pane through one ssh side channel per endpoint (`tmux-remote-workspaces/libexec/remote-state`: a worker-side loop polls the pane every 2 s and prints only changes). The picker therefore reads remote agents from the same `list-panes` columns, with no new source and no ssh of its own:
+  - `buildPane` classifies a remote pane's agent like a local one (it used to return first), and `paneState` no longer drops remote panes. The card shows the agent chip before the `remote` marker, the row's status chips and agents count it, and the Working guard (`refuseChange`: repurpose and delete) covers it. Memory stays local only.
+  - Mirrored: `@agent_kind`, `@agent_state`, `@agent_state_at`, `@agent_at`, `@agent_name`, `@agent_subs`, `@agent_empty`, and `@agent_cwd` mapped to the laptop path. `@agent_pid` is not mirrored (a worker pid means nothing here). The worker side checks it, and the mirror unsets a stale local one, so the pid liveness rule still hides stale options from the agent stopped at handoff until the mirror runs.
+  - `disconnected` is a mirrored `@agent_state` written while the worker is out of sight. It is `state.StateDisconnected`, kept only on remote panes (an unknown value elsewhere still reads as Idle). Its card chip is grey (`#45475a`, text `#7f849c`, age `#6e7288`) with Font Awesome chain-broken (U+F127) from Hack Nerd Font, like the lock, so the Lucide font and `font-codepoint-map` are unchanged. It has no row chip, counts as an agent, and does not trigger the Working guard, because its state is unknown.
+  - Done on a remote agent is decided on the laptop. The worker's hidden session always reads as visible, so the mirror turns a worker `working` to `idle` into `finished` when the laptop pane is not in view, using the publishers' own test. The focus hook then turns it into Idle as usual.
+  - Tests. `tmuxio/testdata/list-panes` row `%15` (remote, `disconnected`, no pid) and `%10` (remote with a live pid, now an agent); `TestParsePanes`, `TestParsePathsAndFocus`, `TestMemPIDs`, `TestSnapshotOwnership`; `ui/remote_test.go` `remote_120` goldens (Working on a mixed session's remote card, Awaiting and a disconnected card in an all-remote session) and `TestRefuseRemoteWorking`.
 
 ### Worktree mode (superseded)
 
@@ -318,7 +324,7 @@ Kept for the decisions that still apply: identity and labels (D76), the repo bad
 
 Effective directory (D73):
 
-- An agent pane with a live `@agent_pid` and a non-empty `@agent_cwd` uses `@agent_cwd`. Every other pane, remote panes included, uses `#{pane_current_path}` (`Pane.Dir()`).
+- An agent pane (a live `@agent_pid`, or none published, as with a remote pane's mirrored agent, D112) with a non-empty `@agent_cwd` uses `@agent_cwd`. Every other pane uses `#{pane_current_path}` (`Pane.Dir()`).
 - The reason is that an agent can move. Claude's hook `cwd` follows the Bash tool's `cd` and the worktree root after entering a worktree, while `pane_current_path` of a Claude pane stays at its launch directory. Transcripts showed `cwd` moving within 26 of 43 sampled sessions.
 - A Claude session started before the `CwdChanged` registration still gets `@agent_cwd` from its next prompt or `Stop`, because `scripts/agent-state` changes apply on the next hook run. Only mid-turn moves need the restart that picks up the new hook.
 
@@ -496,7 +502,7 @@ Maintenance cautions:
 
 ## Known gaps and limitations
 
-- Remote (rw) panes have no agent state, since their agents run inside the worker's tmux server. Pulling state over ssh was deliberately not built, and ssh must never be polled from a `#()` (follow-up R1 in `docs/tasks/mini-remote-sessions.md`).
+- A remote (rw) pane's agent state is rw's mirror (D112). It lags the worker by up to one 2 s poll and reads `disconnected` while the worker is out of sight. A pane whose attach loop started before the mirror existed shows no agent until the loop restarts (`rw open --pane <pane>`, a laptop restore). The picker itself still never polls ssh, and ssh must never be polled from a `#()`.
 - A remote plain folder (not a git worktree) with no session has no row: rows are sessions and worktrees only. `rw status` lists it (D111).
 - A reply that asks a question without the marker shows as Done. A "last line ends with ?" fallback was deliberately not added.
 - After an Esc interrupt the pane shows Working until `idle_prompt` arrives, about 60 s later.
