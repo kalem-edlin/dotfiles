@@ -74,14 +74,16 @@ if [ "$interactive" = 1 ]; then
   stock=$(realpath "$(command -v claude)")
   patched="${XDG_CACHE_HOME:-$HOME/.cache}/claudef/bin/$(basename "$stock")"
   patcher="$plugin_dir/patch-startup.py"
-  # Build once per stock binary and patcher version. A failed build leaves a
-  # marker so a release the patch no longer fits costs one warning, then runs
-  # stock.
+  # Build once per stock binary and patcher version. The build takes a few
+  # seconds, so say so first. A failed build leaves a marker so a release the
+  # patch no longer fits costs one warning, then runs stock.
   if { [ ! "$patched" -nt "$stock" ] || [ ! "$patched" -nt "$patcher" ]; } &&
     { [ ! "$patched.failed" -nt "$stock" ] || [ ! "$patched.failed" -nt "$patcher" ]; }; then
+    printf '%s\n' "claudef: building the mascot-free copy of claude $(basename "$stock"), once per release..." >&2
     if ! python3 "$patcher" "$stock" "$patched"; then
       mkdir -p "$(dirname "$patched")"
       : > "$patched.failed"
+      printf '%s\n' 'claudef: build failed; running the stock binary until the next release or patcher change' >&2
     fi
   fi
   if [ -x "$patched" ] && [ "$patched" -nt "$stock" ] && [ "$patched" -nt "$patcher" ]; then

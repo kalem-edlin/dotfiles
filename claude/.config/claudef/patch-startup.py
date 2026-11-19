@@ -50,6 +50,7 @@ NOTICE_LIST = re.compile(
     rb"children:\([\w$]+\?\?null\)\?\.render\([\w$]+\)\}\)\}\))"
 )
 TEXT_ELEMENT = re.compile(rb"[\w$]+\((?P<text>[\w$]+),\{bold:!0,children:")
+MASCOT_ANCHOR = b",{fullscreen:"
 MASCOT_ELEMENT = re.compile(rb"([\w$]+)=[\w$]+\([\w$]+,\{fullscreen:[\w$]+,entrance:[\w$]+,ultra:")
 
 BUN_TRAILER = b"\n---- Bun! ----\n"
@@ -151,14 +152,20 @@ def draw_art(data):
 
 def flush_title(data):
     # Since 2.1.325 the title lives in its own module, apart from the notices.
-    mascots = list(MASCOT_ELEMENT.finditer(data))
-    if len(mascots) != 1:
-        raise ValueError(f"expected one startup mascot, found {len(mascots)}")
-    entry, start, end = module_containing(data, mascots[0].start())
+    # Windowed like draw_art: a whole-file scan of this regex takes ~25 s.
+    found = {}
+    for anchor in find_all(data, MASCOT_ANCHOR):
+        low, high = max(0, anchor - 200), anchor + 200
+        for match in MASCOT_ELEMENT.finditer(bytes(data[low:high])):
+            found[low + match.start()] = match
+    if len(found) != 1:
+        raise ValueError(f"expected one startup mascot, found {len(found)}")
+    (offset, mascot), = found.items()
+    entry, start, end = module_containing(data, offset)
     module = bytes(data[start:end])
     row = re.compile(
         rb'flexDirection:"row",gap:2,alignItems:"center",children:\['
-        + re.escape(mascots[0].group(1))
+        + re.escape(mascot.group(1))
         + rb",(?P<title>[\w$]+)\]"
     )
     matches = list(row.finditer(module))
