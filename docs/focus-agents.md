@@ -145,8 +145,10 @@ in the old widget's shape: dim rules around
 `● Delegate #1 · research · wait · Turn 2  task  (12s) | Tools: 5` and one
 line of the newest activity (last text, or the last tool call when that
 came later; the stderr reason when the child failed), cut to the terminal
-width. The tool rows render without pi's shaded box, one line each, with
-`↳ Delegate #N started` under a background call. The running count reaches
+width. All cards share one widget, so neighbours share a rule. The tool
+rows are a compact block on the gray pending shade, with
+`↳ Delegate #N started` under a background call, and report messages sit
+on green, red or gray by outcome, like the shell cards. The running count reaches
 `agent-state.ts` on `pif:subagents`. Finished cards stay until the user's
 next prompt.
 

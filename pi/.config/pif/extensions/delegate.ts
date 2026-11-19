@@ -213,6 +213,10 @@ export interface ChildPlan {
   sessionFile: string;
   env: Record<string, string>;
   nested: boolean;
+  // What the child runs on, for the tool row: the --model value (unset
+  // means pi's default) and the thinking level.
+  model?: string;
+  thinking: string;
 }
 
 // The random suffix keeps parallel delegations started in the same
@@ -253,11 +257,12 @@ export function buildChildArgs(member: Member, options: ChildOptions): ChildPlan
   if (member.tools.length > 0) args.push("--tools", mapped.join(","));
   const model = options.modelOverride?.trim() || member.piModel;
   if (model) args.push("--model", model);
-  args.push("--thinking", options.thinking ?? MEMBER_THINKING);
+  const thinking = options.thinking ?? MEMBER_THINKING;
+  args.push("--thinking", thinking);
   const communication = join(profile, "communication.md");
   if (existsSync(communication)) args.push("--append-system-prompt", communication);
   if (member.body) args.push("--append-system-prompt", member.body);
-  return { args, unmappedTools, sessionFile, env: { [DEPTH_ENV]: String(depth) }, nested };
+  return { args, unmappedTools, sessionFile, env: { [DEPTH_ENV]: String(depth) }, nested, model, thinking };
 }
 
 // One line per tool call for the progress card and the partial result.
@@ -411,6 +416,7 @@ const STATUS: Record<Status, [color: string, icon: string, verb: string]> = {
   stopped: ["warning", "■", "was stopped"],
 };
 export const COLLAPSED_REPORT_LINES = 8;
+export const CARDS_WIDGET = "delegate-cards";
 
 const flat = (text: string) => text.replace(/\s+/g, " ").trim();
 
@@ -477,40 +483,132 @@ export function cardLines(card: CardState, width: number, theme: any, now = Date
   return ["", rule, ...lines, rule];
 }
 
-// The tool row: tool name, target and as much of the task as fits, on one
-// line with no box (renderShell "self"), so a burst of delegations reads as
-// a short list instead of a stack of shaded blocks.
-function callRow(title: string, target: string, flags: string, task: unknown) {
+// Every visible card in one widget, sharing the rule between neighbours:
+// separate widgets left a blank line and a doubled rule between cards.
+export function cardStack(cards: CardState[], width: number, theme: any, now = Date.now()): string[] {
+  return cards.flatMap((card, index) => cardLines(card, width, theme, now).slice(index ? 2 : 0));
+}
+
+// One row on a background colour, padded to the full width with a space
+// either side, as pi paints a tool row and shells.ts its cards. plain is
+// the unstyled text, for the width count.
+export function paintRow(theme: any, bg: string, width: number, plain = "", styled = plain): string {
+  const text = plain ? ` ${styled}` : "";
+  const used = plain ? Array.from(plain).length + 1 : 0;
+  return theme.bg(bg, text + " ".repeat(Math.max(0, width - used)));
+}
+
+// Report and tool-row backgrounds, matching shells.ts: green for a clean
+// finish, red for a failure, the neutral pending shade otherwise.
+export const REPORT_BG: Record<Status, string> = {
+  running: "toolPendingBg",
+  done: "toolSuccessBg",
+  error: "toolErrorBg",
+  stopped: "toolPendingBg",
+};
+export const ROW_BG = "toolPendingBg";
+
+// line on the gray pending shade with a padding row above (renderShell
+// "self", so pi adds no box of its own and the block stays compact). Until
+// a result arrives the row also closes the block with a padding row; the
+// result rows take over that padding once resultRows marks the row's shared
+// renderer state.
+export function callRow(title: string, target: string, flags: string, task: unknown, context?: any) {
   return (theme: any) => ({
     render(width: number): string[] {
-      const head = theme.fg("toolTitle", theme.bold(title)) + (target ? theme.fg("accent", ` ${target}`) : "") + theme.fg("dim", flags);
-      const room = width - Array.from(`${title} ${target}${flags}  `).length;
+      const inner = Math.max(10, width - 2);
+      const head = `${title}${target ? ` ${target}` : ""}${flags}`;
+      const styledHead = theme.fg("toolTitle", theme.bold(title)) + (target ? theme.fg("accent", ` ${target}`) : "") + theme.fg("dim", flags);
+      const room = inner - Array.from(head).length - 2;
       const text = flat(String(task ?? ""));
-      return [room > 8 && text ? `${head}${theme.fg("dim", `  ${truncate(text, room)}`)}` : truncate(head, width)];
+      const row = room > 8 && text
+        ? paintRow(theme, ROW_BG, width, `${head}  ${truncate(text, room)}`, `${styledHead}${theme.fg("dim", `  ${truncate(text, room)}`)}`)
+        : paintRow(theme, ROW_BG, width, truncate(head, inner), Array.from(head).length <= inner ? styledHead : truncate(head, inner));
+      const closing = context?.state?.hasResult ? [] : [paintRow(theme, ROW_BG, width)];
+      return [paintRow(theme, ROW_BG, width), row, ...closing];
     },
     invalidate() {},
   });
 }
 
-// Under the row: "↳ Delegate #N started" for a background run (its card
-// shows the rest), otherwise the report or error, collapsed like the
-// delegate message.
+// "gpt-6.1-sol (high)": the model id without its provider, as the status
+// line shows it, and the thinking level.
+export function modelLabel(model: string | undefined, thinking: string | undefined): string {
+  const id = model ? model.slice(model.indexOf("/") + 1) : "default model";
+  return thinking ? `${id} (${thinking})` : id;
+}
+
+// Under the call row, still on its gray: "↳ Delegate #N <state> · <model>
+// (<thinking>)" and a padding row. A background run stops there (its card
+// and report message show the rest). A blocking run's report, or any
+// error, follows as its own block after a blank line, on green or red,
+// collapsed like the delegate message. The run's details arrive with the
+// first partial update and are kept in the row's shared renderer state, so
+// an error result, which carries none, still names the run.
 export function resultRows(result: any, options: any, theme: any, context?: any) {
+  const details = result?.details ?? {};
+  if (context?.state) {
+    context.state.hasResult = true;
+    if (details.id) context.state.meta = details;
+  }
+  const meta = details.id ? details : context?.state?.meta ?? {};
   return {
     render(width: number): string[] {
-      const details = result?.details ?? {};
-      if (details.background) return [theme.fg("dim", `  ↳ Delegate #${details.id} started`)];
-      const text = (result?.content ?? []).map((part: any) => part?.text ?? "").join("").trim();
-      if (!text) return [];
-      const body = wrap(text, Math.max(10, width - 2));
+      const inner = Math.max(10, width - 2);
+      const isError = Boolean(context?.isError);
+      const verb = details.background ? "started" : options?.isPartial ? "running" : isError ? "failed" : "finished";
+      const rows: string[] = [];
+      if (meta.id) {
+        const plain = truncate(`  ↳ Delegate #${meta.id} ${verb} · ${modelLabel(meta.model, meta.thinking)}`, inner);
+        rows.push(paintRow(theme, ROW_BG, width, plain, theme.fg("dim", plain)));
+      }
+      rows.push(paintRow(theme, ROW_BG, width));
+      if (details.background || options?.isPartial) return rows;
+      const content = (result?.content ?? []).map((part: any) => part?.text ?? "").join("").trim();
+      // The bracketed notes are for the model; the collapsed view leaves them out.
+      const text = options?.expanded ? content : content.replace(/(\n*\[[^\n]*\])+\s*$/, "");
+      if (!text) return rows;
+      const bg = isError ? REPORT_BG.error : REPORT_BG.done;
+      const body = wrap(text, inner);
       const shown = options?.expanded ? body : body.slice(0, COLLAPSED_REPORT_LINES);
-      const color = context?.isError ? "error" : "toolOutput";
-      const lines = shown.map((line) => `  ${theme.fg(color, line)}`);
-      if (shown.length < body.length) lines.push(theme.fg("dim", `  … ${body.length - shown.length} more lines, expand to read`));
-      return lines;
+      rows.push("", paintRow(theme, bg, width));
+      for (const line of shown) rows.push(paintRow(theme, bg, width, line, theme.fg("toolOutput", line)));
+      if (shown.length < body.length) {
+        const more = `… ${body.length - shown.length} more lines, expand to read`;
+        rows.push(paintRow(theme, bg, width, more, theme.fg("dim", more)));
+      }
+      rows.push(paintRow(theme, bg, width));
+      return rows;
     },
     invalidate() {},
   };
+}
+
+// The report message, painted like a shells.ts card: a padding row, the
+// status header, the report (eight lines collapsed), a padding row.
+export function reportLines(details: any, report: string, expanded: boolean, theme: any, width: number): string[] {
+  const status: Status = STATUS[details.status as Status] ? details.status : "done";
+  const [color, icon] = STATUS[status];
+  const bg = REPORT_BG[status];
+  const inner = Math.max(10, width - 2);
+  const label = `${icon} delegate #${details.id ?? "?"} ${details.name ?? ""}`;
+  const stats = `  ${details.seconds ?? "?"}s · ${details.toolCalls ?? 0} tools${details.turn > 1 ? ` · turn ${details.turn}` : ""}`;
+  const header = Array.from(label + stats).length <= inner
+    ? paintRow(theme, bg, width, label + stats, theme.fg(color, theme.bold(label)) + theme.fg("dim", stats))
+    : paintRow(theme, bg, width, truncate(label, inner), theme.fg(color, theme.bold(truncate(label, inner))));
+  const lines = [paintRow(theme, bg, width), header];
+  // The bracketed notes (delegate number, tool count, session file) are
+  // for the model; the collapsed view leaves them out.
+  const text = expanded ? report : report.replace(/(\n*\[[^\n]*\])+\s*$/, "");
+  const body = wrap(text, inner);
+  const shown = expanded ? body : body.slice(0, COLLAPSED_REPORT_LINES);
+  for (const line of shown) lines.push(paintRow(theme, bg, width, line, theme.fg("toolOutput", line)));
+  if (shown.length < body.length) {
+    const more = `… ${body.length - shown.length} more lines, expand to read`;
+    lines.push(paintRow(theme, bg, width, more, theme.fg("dim", more)));
+  }
+  lines.push(paintRow(theme, bg, width));
+  return lines;
 }
 
 function snippet(members: Member[]): string {
@@ -567,22 +665,27 @@ export default function (pi: ExtensionAPI) {
     }
     tui?.requestRender?.();
   };
-  const cardKey = (id: number) => `delegate-${id}`;
-  const showCard = (run: Run) => {
-    run.hidden = false;
-    if (!uiCtx?.hasUI) return;
-    uiCtx.ui.setWidget(cardKey(run.id), (widgetTui: any, theme: any) => {
-      tui = widgetTui;
-      return { render: (width: number) => cardLines(run, width, theme), invalidate() {} };
-    });
-  };
-  const hideCard = (run: Run) => {
-    run.hidden = true;
+  // One widget holds every visible card, in delegate order.
+  const visibleRuns = () => [...runs.values()].filter((run) => !run.hidden).sort((a, b) => a.id - b.id);
+  const syncCards = () => {
     try {
-      if (uiCtx?.hasUI) uiCtx.ui.setWidget(cardKey(run.id), undefined);
+      if (!uiCtx?.hasUI) return;
+      if (!visibleRuns().length) return uiCtx.ui.setWidget(CARDS_WIDGET, undefined);
+      uiCtx.ui.setWidget(CARDS_WIDGET, (widgetTui: any, theme: any) => {
+        tui = widgetTui;
+        return { render: (width: number) => cardStack(visibleRuns(), width, theme), invalidate() {} };
+      });
     } catch {
       // The UI is gone at shutdown.
     }
+  };
+  const showCard = (run: Run) => {
+    run.hidden = false;
+    syncCards();
+  };
+  const hideCard = (run: Run) => {
+    run.hidden = true;
+    syncCards();
   };
 
   // Turns a finished child into the report text, and marks the card.
@@ -646,7 +749,8 @@ export default function (pi: ExtensionAPI) {
     );
   };
 
-  const start = async (run: Run, plan: ChildPlan, task: string, wait: boolean, signal?: AbortSignal) => {
+  const start = async (run: Run, plan: ChildPlan, task: string, wait: boolean, signal?: AbortSignal, onUpdate?: (partial: any) => void) => {
+    const meta = { id: run.id, model: plan.model, thinking: plan.thinking };
     mkdirSync(join(plan.sessionFile, ".."), { recursive: true });
     run.status = "running";
     run.task = task;
@@ -681,9 +785,11 @@ export default function (pi: ExtensionAPI) {
       },
     }).then((result) => settle(run, result, plan.unmappedTools));
     if (wait) {
+      // Names the run and its model on the row while the call blocks.
+      onUpdate?.({ content: [{ type: "text", text: "" }], details: meta });
       const outcome = await run.pending;
       if (!outcome.ok) throw new Error(outcome.text);
-      return { content: [{ type: "text", text: outcome.text }] };
+      return { content: [{ type: "text", text: outcome.text }], details: meta };
     }
     run.pending.then((outcome) => deliver(run, outcome));
     return {
@@ -693,7 +799,7 @@ export default function (pi: ExtensionAPI) {
           text: `Delegate #${run.id} (${run.member.name}) started in the background. Its report arrives as a "Delegate #${run.id}" message when it finishes; carry on meanwhile.`,
         },
       ],
-      details: { id: run.id, background: true },
+      details: { ...meta, background: true },
     };
   };
 
@@ -701,8 +807,9 @@ export default function (pi: ExtensionAPI) {
     for (const run of runs.values()) {
       run.dropped = true;
       run.controller?.abort();
-      hideCard(run);
+      run.hidden = true;
     }
+    syncCards();
     runs.clear();
     nextId = 1;
     redraw();
@@ -715,30 +822,17 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("input", (event: any, ctx: any) => {
     if (event?.source === "extension") return;
     if (ctx?.hasUI) uiCtx = ctx;
-    for (const run of runs.values()) if (run.status !== "running" && !run.hidden) hideCard(run);
+    for (const run of runs.values()) if (run.status !== "running") run.hidden = true;
+    syncCards();
   });
 
   pi.registerMessageRenderer?.("delegate", (message: any, options: any, theme: any) => ({
     render(width: number): string[] {
-      const details = message.details ?? {};
-      const [color, icon] = STATUS[details.status as Status] ?? STATUS.done;
-      const pad = " ".repeat(Math.max(0, options?.outputPad ?? 1));
-      const inner = Math.max(10, width - pad.length * 2);
       const content = typeof message.content === "string"
         ? message.content
         : (message.content ?? []).map((part: any) => part?.text ?? "").join("");
       const report = content.split("\n").slice(2).join("\n").trim();
-      const stats = `  ${details.seconds ?? "?"}s · ${details.toolCalls ?? 0} tools${details.turn > 1 ? ` · turn ${details.turn}` : ""}`;
-      const label = `${icon} delegate #${details.id ?? "?"} ${details.name ?? ""}`;
-      const lines = [pad + theme.fg(color, theme.bold(label)) + theme.fg("dim", stats)];
-      // The bracketed notes (delegate number, tool count, session file) are
-      // for the model; the collapsed view leaves them out.
-      const text = options?.expanded ? report : report.replace(/(\n*\[[^\n]*\])+\s*$/, "");
-      const body = wrap(text, inner);
-      const shown = options?.expanded ? body : body.slice(0, COLLAPSED_REPORT_LINES);
-      for (const line of shown) lines.push(pad + line);
-      if (shown.length < body.length) lines.push(pad + theme.fg("dim", `… ${body.length - shown.length} more lines, expand to read`));
-      return lines;
+      return reportLines(message.details ?? {}, report, Boolean(options?.expanded), theme, width);
     },
     invalidate() {},
   }));
@@ -778,9 +872,9 @@ export default function (pi: ExtensionAPI) {
     renderShell: "self",
     // While the arguments stream, an absent agent may still be on its way.
     renderCall: (args: any, theme: any, context?: any) =>
-      callRow("delegate", args?.agent?.trim() || (context?.argsComplete === false ? "" : GENERALIST_NAME), args?.wait ? " · wait" : "", args?.task)(theme),
+      callRow("delegate", args?.agent?.trim() || (context?.argsComplete === false ? "" : GENERALIST_NAME), args?.wait ? " · wait" : "", args?.task, context)(theme),
     renderResult: resultRows,
-    async execute(_toolCallId, params: { task: string; agent?: string; model?: string; wait?: boolean }, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: { task: string; agent?: string; model?: string; wait?: boolean }, signal, onUpdate, ctx) {
       const cwd = ctx.cwd ?? process.cwd();
       if (ctx?.hasUI) uiCtx = ctx;
       let member: Member;
@@ -812,7 +906,7 @@ export default function (pi: ExtensionAPI) {
       };
       runs.set(run.id, run);
       // Without a UI (pif -p) nothing would receive a background report.
-      return start(run, plan, params.task, Boolean(params.wait) || !ctx?.hasUI, signal);
+      return start(run, plan, params.task, Boolean(params.wait) || !ctx?.hasUI, signal, onUpdate);
     },
   });
 
@@ -832,9 +926,9 @@ export default function (pi: ExtensionAPI) {
       required: ["id", "task"],
     } as any,
     renderShell: "self",
-    renderCall: (args: any, theme: any) => callRow("delegate_continue", `#${args?.id ?? "?"}`, args?.wait ? " · wait" : "", args?.task)(theme),
+    renderCall: (args: any, theme: any, context?: any) => callRow("delegate_continue", `#${args?.id ?? "?"}`, args?.wait ? " · wait" : "", args?.task, context)(theme),
     renderResult: resultRows,
-    async execute(_toolCallId, params: { id: number; task: string; model?: string; wait?: boolean }, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params: { id: number; task: string; model?: string; wait?: boolean }, signal, onUpdate, ctx) {
       if (ctx?.hasUI) uiCtx = ctx;
       const run = runs.get(Number(params.id));
       if (!run) throw new Error(`No delegate #${params.id} in this session.`);
@@ -846,7 +940,7 @@ export default function (pi: ExtensionAPI) {
         sessionFile: run.sessionFile,
       });
       run.turn += 1;
-      return start(run, plan, params.task, Boolean(params.wait) || !ctx?.hasUI, signal);
+      return start(run, plan, params.task, Boolean(params.wait) || !ctx?.hasUI, signal, onUpdate);
     },
   });
 
@@ -860,7 +954,7 @@ export default function (pi: ExtensionAPI) {
       required: ["id"],
     } as any,
     renderShell: "self",
-    renderCall: (args: any, theme: any) => callRow("delegate_stop", `#${args?.id ?? "?"}`, "", "")(theme),
+    renderCall: (args: any, theme: any, context?: any) => callRow("delegate_stop", `#${args?.id ?? "?"}`, "", "", context)(theme),
     renderResult: resultRows,
     async execute(_toolCallId, params: { id: number }) {
       const run = runs.get(Number(params.id));

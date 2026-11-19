@@ -87,8 +87,8 @@ driver (depth 0)
 
 ### What you see
 
-- **Card above the editor**, one per delegate, in the old subagent widget's
-  shape:
+- **Cards above the editor**, one per delegate in the old subagent widget's
+  shape, stacked in one widget so neighbouring cards share a rule:
 
   ```text
   ────────────────────────────────────────────────────────────────
@@ -105,12 +105,21 @@ driver (depth 0)
   call, whichever came later, or the child's last stderr line when it
   failed. Finished cards stay until the user's next prompt.
 - **Tool rows**: `delegate`, `delegate_continue` and `delegate_stop` render
-  as one unshaded line each (`delegate research  <task>`), with
-  `↳ Delegate #N started` under a background call. A blocking call shows
-  the report or error, collapsed to eight lines.
-- **Report message**: a status header and the first eight lines. Expanding
+  as a compact block on the gray pending shade: a padding row,
+  `delegate research  <task>`,
+  `↳ Delegate #N started · gpt-6.1-sol (low)`, a padding row. The model is
+  the id without its provider, with the thinking level, as the status line
+  shows it. A blocking call says `running`, then `finished` or `failed`,
+  and its report follows as a separate block after a blank line, on green
+  or (for an error) red, collapsed to eight lines without the notes for
+  the model.
+- **Report message**: painted like a `shells.ts` card, on green when the
+  run finished, red when it failed and gray when it was stopped: a padding
+  row, the status header, the first eight lines, a padding row. Expanding
   it shows the rest and the notes for the model (delegate number, tool
   count, session file).
+- Only the model's own prose sits in the thread without a background.
+  Every tool row and extension report has one.
 - The running count reaches `agent-state.ts` on `pif:subagents`, which
   keeps the pane marked Working while children run.
 
@@ -127,6 +136,18 @@ tier-1 child loads the repo's copy. The harness's copy has to honour
 Current decisions, newest first. Earlier wording that a later decision
 replaced is kept in `tasks/pif-web-research.md`.
 
+- **D15** (2026-11-18, Kalem: cards closer together; everything but the
+  model's prose gets a background, like the shell cards). Revises D13's
+  unshaded rows. Cards render in one widget (`delegate-cards`), so a stack
+  of them has one rule between neighbours instead of a rule, a blank line
+  and a second rule. Tool rows keep `renderShell: "self"` for a compact
+  block but paint it on `toolPendingBg`; a blocking result uses
+  `toolSuccessBg` or `toolErrorBg`. Report messages use the same three
+  shades by status as `shells.ts` uses for its cards. The row names the
+  run's model and thinking level (`↳ Delegate #4 started · z-ai/glm-5.3
+  (high)`), so a `model` override is visible. A blocking call's report is a
+  separate block after a blank line instead of continuing the gray one,
+  which read as the call and the report run together.
 - **D14** (2026-11-18, Kalem). Delegation nests two tiers at most: the
   driver delegates to a worker or specialist, which may delegate to
   generalists, scouts or research. Nesting is a capability for directives
@@ -148,7 +169,7 @@ replaced is kept in `tasks/pif-web-research.md`.
 - **D13** (2026-11-18, Kalem: look like the subagent widget, plus the
   member name). The card takes the widget's header and one activity line
   between dim rules, as shown above. Tool rows use `renderShell: "self"`
-  instead of pi's padded, shaded box. Session files gain a random suffix:
+  instead of pi's padded, shaded box (shading restored by D15). Session files gain a random suffix:
   six parallel generalists started in one millisecond shared a file name
   and all but one failed with EEXIST. The widget had avoided this by
   putting its subagent number in the name.

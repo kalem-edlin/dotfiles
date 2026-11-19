@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""Augment ccline with model effort and the five-hour reset countdown."""
+"""Augment ccline with model effort and a live subscription-usage segment.
+
+ccline 1.1.2 cannot parse the usage API while no five-hour window is open
+(five_hour is null), so it keeps printing its last cache (seen 2026-11-18:
+a 3% from 2026-10-31). This wrapper redraws that segment from the live API:
+the percent is the five-hour window's, or the weekly one's when no five-hour
+window is open, then the five-hour countdown, then the weekly reset
+(month-day-hour, local time).
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -15,7 +25,14 @@ import urllib.request
 CACHE_SECONDS = 180
 CACHE_PATH = Path.home() / ".claude/ccline/.api_usage_resets_cache.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-USAGE_ICON = "󰪞".encode()
+# The pie glyphs pif's status line uses (empty, then eighths).
+PIE_EMPTY = "\U000f0766"
+PIE_SLICES = [chr(code) for code in range(0xF0A9E, 0xF0AA6)]
+# ccline's usage segment: icon, "N%", "· reset", each in its own color span.
+USAGE_SEGMENT = re.compile(
+    rb"(\x1b\[[0-9;]*m)[^\x1b]*(\x1b\[0m )(\x1b\[[0-9;]*m)\d+(?:\.\d+)?%"
+    rb"(\x1b\[0m )(\x1b\[[0-9;]*m)\xc2\xb7 [^\x1b]*(\x1b\[0m)"
+)
 
 
 def read_credentials() -> dict | None:
@@ -69,31 +86,56 @@ def read_usage() -> dict | None:
         return cached
 
 
-def reset_countdown(usage: dict | None) -> str | None:
-    # five_hour is null while no five-hour window is open.
-    resets_at = usage and (usage.get("five_hour") or {}).get("resets_at")
-    if not resets_at:
-        return None
+def parse_time(value: str | None) -> datetime | None:
     try:
-        reset = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
-        minutes = max(
-            0,
-            int((reset - datetime.now(timezone.utc)).total_seconds() // 60),
-        )
-        return f"{minutes // 60}h" if minutes >= 60 else f"{minutes}m"
-    except (TypeError, ValueError):
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+    except (AttributeError, ValueError):
         return None
 
 
-def add_reset_countdown(output: bytes, countdown: str | None) -> bytes:
-    if not countdown:
+def pie_icon(percent: float) -> str:
+    if percent <= 0:
+        return PIE_EMPTY
+    index = max(1, min(8, math.ceil(percent / 100 * 8)))
+    return PIE_SLICES[index - 1]
+
+
+def usage_text(usage: dict | None) -> tuple[str, str] | None:
+    """The segment's icon and text, or None when the API gave no window."""
+    if not isinstance(usage, dict):
+        return None
+    five_hour = usage.get("five_hour") or {}
+    seven_day = usage.get("seven_day") or {}
+    window = five_hour if five_hour.get("utilization") is not None else seven_day
+    percent = window.get("utilization")
+    if percent is None:
+        return None
+    parts = []
+    five_hour_reset = parse_time(five_hour.get("resets_at"))
+    if five_hour_reset:
+        minutes = max(0, int((five_hour_reset - datetime.now(timezone.utc)).total_seconds() // 60))
+        parts.append(f"{minutes // 60}h" if minutes >= 60 else f"{minutes}m")
+    weekly_reset = parse_time(seven_day.get("resets_at"))
+    if weekly_reset:
+        local = weekly_reset.astimezone()
+        parts.append(f"{local.month}-{local.day}-{local.hour}")
+    text = f"{round(percent)}%"
+    if parts:
+        text += f" · {' '.join(parts)}"
+    return pie_icon(percent), text
+
+
+def replace_usage(output: bytes, usage: dict | None) -> bytes:
+    rendered = usage_text(usage)
+    match = USAGE_SEGMENT.search(output)
+    if not rendered or not match:
         return output
-    icon_at = output.find(USAGE_ICON)
-    dot_at = output.find("· ".encode(), icon_at)
-    if icon_at < 0 or dot_at < 0:
-        return output
-    insert_at = dot_at + len("· ".encode())
-    return output[:insert_at] + f"{countdown} ".encode() + output[insert_at:]
+    icon, text = rendered
+    percent, _, rest = text.partition(" ")
+    icon_color, gap, text_color, gap2, rest_color, close = match.groups()
+    segment = icon_color + icon.encode() + gap + text_color + percent.encode()
+    segment += (gap2 + rest_color + rest.encode() + close) if rest else close
+    return output[: match.start()] + segment + output[match.end():]
 
 
 def main() -> int:
@@ -118,10 +160,10 @@ def main() -> int:
                 )
         except (AttributeError, json.JSONDecodeError):
             pass
-        # The countdown is optional. A surprise in the usage API must not blank
-        # the status line, because nothing has been printed yet.
+        # The usage segment is optional. A surprise in the usage API must not
+        # blank the status line, because nothing has been printed yet.
         try:
-            output = add_reset_countdown(output, reset_countdown(read_usage()))
+            output = replace_usage(output, read_usage())
         except Exception as error:
             print(f"statusline: {error!r}", file=sys.stderr)
 

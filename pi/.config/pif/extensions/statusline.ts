@@ -5,14 +5,13 @@
  * Layout:
  *    Model (thinking) | git branch ●/○ | ctx% · tokens | codex usage | $cost
  *
- * Codex subscription usage is queried via `codex app-server` (JSONRPC
- * account/rateLimits/read) when the active provider is openai-codex.
+ * Codex subscription usage (5-hour and weekly windows) is read from ChatGPT's
+ * usage endpoint with pi's openai-codex login when that provider is active.
  *
  * Colors are emitted as raw 256-color ANSI escapes so the status line matches
  * ccline exactly without hijacking shared theme tokens.
  */
 
-import { spawn } from "node:child_process";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth } from "@mariozechner/pi-tui";
@@ -31,6 +30,7 @@ const COLOR = {
   usage: 14,
   cost: 214,
   sep: 240,
+  shells: 73,
 } as const;
 
 const ICON = {
@@ -64,7 +64,8 @@ const SEP = ` ${fg(COLOR.sep, "|")} `;
 const DIRTY_POLL_MS = 4000;
 const CODEX_POLL_MS = 5 * 60 * 1000;
 const COUNTDOWN_RENDER_MS = 60 * 1000;
-const CODEX_RPC_TIMEOUT_MS = 5000;
+const CODEX_FETCH_TIMEOUT_MS = 5000;
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
 type UsageWindow = {
   usedPct: number;
@@ -78,10 +79,12 @@ type CodexUsage = {
   planType: string;
 };
 
-function parseUsageWindow(value: any): UsageWindow | undefined {
-  const usedPct = Number(value?.usedPercent);
-  const durationMins = Number(value?.windowDurationMins);
-  const resetsAt = Number(value?.resetsAt);
+// One window from ChatGPT's usage endpoint: used_percent,
+// limit_window_seconds and reset_at (epoch seconds).
+export function parseUsageWindow(value: any): UsageWindow | undefined {
+  const usedPct = Number(value?.used_percent);
+  const durationMins = Number(value?.limit_window_seconds) / 60;
+  const resetsAt = Number(value?.reset_at);
   if (![usedPct, durationMins, resetsAt].every(Number.isFinite)) return undefined;
   return { usedPct, durationMins, resetsAt };
 }
@@ -101,84 +104,61 @@ function normalizeModelName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function fetchCodexUsage(modelId?: string): Promise<CodexUsage | undefined> {
-  return new Promise((resolve) => {
-    let proc: ReturnType<typeof spawn>;
-    try {
-      proc = spawn("codex", ["app-server"], { stdio: ["pipe", "pipe", "ignore"] });
-    } catch {
-      resolve(undefined);
-      return;
-    }
+// The ChatGPT account id sits in the access token's claims, as pi's own
+// openai-codex provider reads it.
+function accountIdFromToken(token: string): string | undefined {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
+    return payload?.["https://api.openai.com/auth"]?.chatgpt_account_id || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
-    let buffer = "";
-    let done = false;
-    const finish = (value: CodexUsage | undefined) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      try {
-        proc.kill("SIGTERM");
-      } catch {}
-      resolve(value);
-    };
-    const timer = setTimeout(() => finish(undefined), CODEX_RPC_TIMEOUT_MS);
+// Picks the 5-hour and weekly windows from a usage response. A per-model
+// limit (additional_rate_limits, matched on limit_name) wins over the
+// account-wide one.
+export function codexUsageFrom(body: any, modelId?: string): CodexUsage | undefined {
+  const modelName = normalizeModelName(modelId ?? "");
+  const extra = Array.isArray(body?.additional_rate_limits) ? body.additional_rate_limits : [];
+  const modelLimit = extra.find(
+    (candidate: any) =>
+      candidate?.limit_name && normalizeModelName(candidate.limit_name) === modelName,
+  )?.rate_limit;
+  const rl = modelLimit ?? body?.rate_limit;
+  if (!rl) return undefined;
+  const windows = [parseUsageWindow(rl.primary_window), parseUsageWindow(rl.secondary_window)]
+    .filter((window): window is UsageWindow => !!window);
+  const short = windows.find((window) => window.durationMins <= 24 * 60);
+  const weekly = windows
+    .filter((window) => window.durationMins > 24 * 60)
+    .sort((a, b) => b.durationMins - a.durationMins)[0];
+  if (!short && !weekly) return undefined;
+  return { short, weekly, planType: String(body?.plan_type ?? "") };
+}
 
-    proc.on("error", () => finish(undefined));
-    proc.on("exit", () => finish(undefined));
-
-    proc.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString("utf8");
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const msg = JSON.parse(trimmed) as { id?: number; result?: any };
-          if (msg.id === 1 && msg.result) {
-            proc.stdin?.write(
-              `${JSON.stringify({
-                jsonrpc: "2.0",
-                id: 2,
-                method: "account/rateLimits/read",
-                params: {},
-              })}\n`,
-            );
-          } else if (msg.id === 2 && msg.result?.rateLimits) {
-            const modelName = normalizeModelName(modelId ?? "");
-            const modelLimit = Object.values(msg.result.rateLimitsByLimitId ?? {}).find(
-              (candidate: any) =>
-                candidate?.limitName && normalizeModelName(candidate.limitName) === modelName,
-            ) as any;
-            const rl = modelLimit ?? msg.result.rateLimits;
-            const windows = [parseUsageWindow(rl.primary), parseUsageWindow(rl.secondary)]
-              .filter((window): window is UsageWindow => !!window);
-            const short = windows.find((window) => window.durationMins <= 24 * 60);
-            const weekly = windows
-              .filter((window) => window.durationMins > 24 * 60)
-              .sort((a, b) => b.durationMins - a.durationMins)[0];
-            finish({ short, weekly, planType: String(rl.planType ?? "") });
-            return;
-          }
-        } catch {
-          /* ignore parse errors */
-        }
-      }
+// Reads subscription usage with pi's own openai-codex login (the registry
+// refreshes an expired token), so no codex CLI is needed.
+async function fetchCodexUsage(
+  registry: { getApiKeyForProvider(provider: string): Promise<string | undefined> } | undefined,
+  modelId?: string,
+): Promise<CodexUsage | undefined> {
+  try {
+    const token = await registry?.getApiKeyForProvider("openai-codex");
+    if (!token) return undefined;
+    const accountId = accountIdFromToken(token);
+    const res = await fetch(CODEX_USAGE_URL, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(accountId ? { "ChatGPT-Account-Id": accountId } : {}),
+      },
+      signal: AbortSignal.timeout(CODEX_FETCH_TIMEOUT_MS),
     });
-
-    proc.stdin?.write(
-      `${JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          capabilities: {},
-          clientInfo: { name: "pi-statusline", version: "0.1.0" },
-        },
-      })}\n`,
-    );
-  });
+    if (!res.ok) return undefined;
+    return codexUsageFrom(await res.json(), modelId);
+  } catch {
+    return undefined;
+  }
 }
 
 function prettyModel(id: string | undefined): string {
@@ -214,12 +194,36 @@ function totalCost(branch: ReadonlyArray<BranchEntry>): number {
   return cost;
 }
 
+// The background-shells tag (shells.ts): "1 shell" / "N shells", shown
+// inverted while Down has focused it.
+export function shellsTag(count: number, focused = false): string {
+  const label = `${count} shell${count === 1 ? "" : "s"}`;
+  if (!focused) return fg(COLOR.shells, label, true);
+  return `${ESC}7m${fg(COLOR.shells, ` ${label} `, true)}`;
+}
+
 function isCodexProvider(provider: string | undefined): boolean {
   if (!provider) return false;
   return provider === "openai-codex" || provider === "codex";
 }
 
 export default function (pi: ExtensionAPI) {
+  // Running background shells (shells.ts), shown as "N shells", and
+  // whether Down has focused that tag.
+  let shells = 0;
+  let shellsFocused = false;
+  let shellsTui: { requestRender: () => void } | undefined;
+  pi.events?.on("pif:shells", (data) => {
+    const active = (data as { active?: number } | undefined)?.active;
+    if (typeof active !== "number") return;
+    shells = active;
+    shellsTui?.requestRender();
+  });
+  pi.events?.on("pif:shells-focus", (data) => {
+    shellsFocused = Boolean((data as { focused?: boolean } | undefined)?.focused);
+    shellsTui?.requestRender();
+  });
+
   pi.on("session_start", (_event, ctx) => {
     let dirty = false;
     let codexUsage: CodexUsage | undefined;
@@ -239,15 +243,15 @@ export default function (pi: ExtensionAPI) {
       }
     };
 
-    const refreshCodexUsage = async () => {
-      if (!isCodexProvider(ctx.model?.provider)) {
+    const refreshCodexUsage = async (model = ctx.model) => {
+      if (!isCodexProvider(model?.provider)) {
         if (codexUsage) {
           codexUsage = undefined;
           activeTui?.requestRender();
         }
         return;
       }
-      const next = await fetchCodexUsage(ctx.model?.id);
+      const next = await fetchCodexUsage(ctx.modelRegistry, model?.id);
       if (next) {
         codexUsage = next;
         activeTui?.requestRender();
@@ -257,9 +261,13 @@ export default function (pi: ExtensionAPI) {
     pi.on("agent_end", () => {
       void refreshCodexUsage();
     });
+    pi.on("model_select", (event) => {
+      void refreshCodexUsage(event.model);
+    });
 
     ctx.ui.setFooter((tui, _theme, footerData) => {
       activeTui = tui;
+      shellsTui = tui;
       const unsub = footerData.onBranchChange(() => {
         void refreshDirty();
         tui.requestRender();
@@ -322,6 +330,8 @@ export default function (pi: ExtensionAPI) {
           }
 
           segments.push(fg(COLOR.cost, `${ICON.cost} $${cost.toFixed(2)}`, true));
+
+          if (shells > 0) segments.push(shellsTag(shells, shellsFocused));
 
           const line = segments.join(SEP);
           return [truncateToWidth(line, width)];

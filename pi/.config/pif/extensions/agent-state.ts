@@ -18,6 +18,8 @@
 // the first prompt. @agent_subs counts running /sub subagents
 // (delegate.ts, D61); a settle with subagents running stays Working.
 // @agent_cwd is ctx.cwd, fixed per process, so it is published at start only.
+// Running non-service background shells (shells.ts) hold Working the same
+// way, without a pane option of their own.
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -272,6 +274,7 @@ export default function (pi: ExtensionAPI) {
   // Running /sub subagents, whether a turn is running, and whether the last
   // settle stayed Working because subagents were running.
   let subs = 0;
+  let shells = 0;
   let turnActive = false;
   let heldWorking = false;
 
@@ -305,6 +308,7 @@ export default function (pi: ExtensionAPI) {
     named = Boolean(sessionName && sanitize(sessionName, 60));
     pendingName = "";
     subs = 0;
+    shells = 0;
     turnActive = false;
     heldWorking = false;
     let prompt = "";
@@ -337,7 +341,7 @@ export default function (pi: ExtensionAPI) {
     const pane = paneTarget();
     if (!pane) return;
     const awaiting = awaitingInput(ctx);
-    heldWorking = !awaiting && !turnActive && subs > 0;
+    heldWorking = !awaiting && !turnActive && subs + shells > 0;
     let prompt = " ";
     try {
       prompt = firstPrompt(ctx);
@@ -345,7 +349,7 @@ export default function (pi: ExtensionAPI) {
       // Do not mark an unreadable branch as empty.
     }
     void publish([
-      ...setState(pane, awaiting ? "awaiting" : turnActive || subs > 0 ? "working" : "idle", now()),
+      ...setState(pane, awaiting ? "awaiting" : turnActive || subs + shells > 0 ? "working" : "idle", now()),
       prompt ? unset(pane, "@agent_empty") : set(pane, "@agent_empty", "1"),
     ]);
   });
@@ -387,7 +391,7 @@ export default function (pi: ExtensionAPI) {
     if (!pane) return;
     const awaiting = awaitingInput(ctx);
     const at = now();
-    heldWorking = !awaiting && subs > 0;
+    heldWorking = !awaiting && subs + shells > 0;
     void publish(
       awaiting ? setState(pane, "awaiting", at) : heldWorking ? setState(pane, "working", at) : [settleCommand(pane, at)],
     );
@@ -396,6 +400,14 @@ export default function (pi: ExtensionAPI) {
   // The last subagent finishing normally starts a parent turn, which settles
   // as usual. A child that ends without a parent turn (the parent was interrupted) may not, so a held
   // Working settles here when no turn has started.
+  const releaseHold = (pane: string) => {
+    if (subs + shells > 0 || !heldWorking) return;
+    setTimeout(() => {
+      if (!heldWorking || turnActive || subs + shells > 0) return;
+      heldWorking = false;
+      void publish([settleCommand(pane, now())]);
+    }, SUBS_SETTLE_MS);
+  };
   pi.events.on("pif:subagents", (data) => {
     const running = (data as { running?: number } | undefined)?.running;
     if (typeof running !== "number") return;
@@ -403,12 +415,17 @@ export default function (pi: ExtensionAPI) {
     const pane = paneTarget();
     if (!pane) return;
     void publish([set(pane, "@agent_subs", String(running))]);
-    if (running > 0 || !heldWorking) return;
-    setTimeout(() => {
-      if (!heldWorking || turnActive || subs > 0) return;
-      heldWorking = false;
-      void publish([settleCommand(pane, now())]);
-    }, SUBS_SETTLE_MS);
+    releaseHold(pane);
+  });
+  // A shell started while idle (a test, or a user-run turn already ended)
+  // does not hold Working on its own; only a settle with shells running does.
+  pi.events.on("pif:shells", (data) => {
+    const running = (data as { running?: number } | undefined)?.running;
+    if (typeof running !== "number") return;
+    shells = running;
+    const pane = paneTarget();
+    if (!pane) return;
+    releaseHold(pane);
   });
 
   pi.on("session_info_changed", (event) => {

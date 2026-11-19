@@ -116,7 +116,9 @@ function fakePi(tools, { model, thinking = "high" } = {}) {
 }
 
 // A theme that adds no escape codes, so rendered widths are character counts.
-const plainTheme = { fg: (_color, text) => text, bold: (text) => text };
+const plainTheme = { fg: (_color, text) => text, bold: (text) => text, bg: (_color, text) => text };
+// Marks each background run so a test can read which colour a row got.
+const bgTheme = { ...plainTheme, bg: (color, text) => `<${color}>${text}` };
 const tick = () => new Promise((done) => setImmediate(done));
 
 function register(cwd, options) {
@@ -260,7 +262,9 @@ test("delegate runs the child in the caller's cwd, feeds the task on stdin, stre
   const updates = [];
   const result = await tool.execute("c1", { agent: "research", task: "Is it?" }, undefined, (u) => updates.push(u), fake.ctx(cwd));
   assert.match(result.content[0].text, /^Answer: yes\.\nEvidence:\n- https:\/\/a\.test\n\n\[delegate #1; 1 tool calls; session .*\/delegate\/research-\d+-[0-9a-f]{6}\.jsonl\.\]$/);
-  assert.deepEqual(updates, [], "progress goes to the card only, not a second copy in the tool row");
+  // One update names the run and its model on the row; progress goes to the card only.
+  assert.deepEqual(updates, [{ content: [{ type: "text", text: "" }], details: { id: 1, model: "openai-codex/gpt-6.1-sol", thinking: "low" } }]);
+  assert.deepEqual(result.details, { id: 1, model: "openai-codex/gpt-6.1-sol", thinking: "low" });
   const spawn = spawns.at(-1);
   assert.equal(spawn.file, "pi");
   assert.equal(spawn.options.cwd, cwd);
@@ -366,8 +370,9 @@ test("in the interactive UI delegate returns at once and steers the report back 
   nextChild = child;
   const result = await tool.execute("c1", { agent: "research", task: "Is it?" }, undefined, undefined, ctx);
   assert.match(result.content[0].text, /^Delegate #1 \(research\) started in the background\./);
+  assert.deepEqual(result.details, { id: 1, model: "openai-codex/gpt-6.1-sol", thinking: "low", background: true });
   assert.equal(fake.messages.length, 0);
-  const card = fake.widgets.get("delegate-1");
+  const card = fake.widgets.get("delegate-cards");
   assert(card, "a card is shown while the child runs");
   assert.match(card.render(80)[2], /^ ● Delegate #1 · research  Is it\?  \(0s\) \| Tools: 0$/);
 
@@ -385,9 +390,9 @@ test("in the interactive UI delegate returns at once and steers the report back 
 
   // A report arriving as a message keeps the card; the user's next prompt clears it.
   fake.fire("input", { source: "extension" }, ctx);
-  assert(fake.widgets.has("delegate-1"));
+  assert(fake.widgets.has("delegate-cards"));
   fake.fire("input", { source: "interactive" }, ctx);
-  assert(!fake.widgets.has("delegate-1"));
+  assert(!fake.widgets.has("delegate-cards"));
 });
 
 test("delegate_continue resumes the finished child's session and delegate_stop ends a running one without a message", async () => {
@@ -409,7 +414,7 @@ test("delegate_continue resumes the finished child's session and delegate_stop e
   assert.deepEqual(child.stdin.chunks, ["Now b."]);
   await assert.rejects(tools.get("delegate_continue").execute("c4", { id: 1, task: "t" }, undefined, undefined, ctx), /still running/);
   await tick();
-  assert.match(fake.widgets.get("delegate-1").render(80)[2], /^ ● Delegate #1 · generalist · Turn 2  Now b\./);
+  assert.match(fake.widgets.get("delegate-cards").render(80)[2], /^ ● Delegate #1 · generalist · Turn 2  Now b\./);
 
   const stopped = await tools.get("delegate_stop").execute("c5", { id: 1 });
   assert.equal(child.killed, "SIGTERM");
@@ -428,7 +433,7 @@ test("a new session stops running children and clears their cards", async () => 
   await tool.execute("c1", { task: "t" }, undefined, undefined, ctx);
   fake.fire("session_shutdown", { reason: "new" }, ctx);
   assert.equal(child.killed, "SIGTERM");
-  assert(!fake.widgets.has("delegate-1"));
+  assert(!fake.widgets.has("delegate-cards"));
   await tick();
   assert.equal(fake.messages.length, 0);
 });
@@ -457,10 +462,44 @@ test("cards and the report message fit the terminal width", () => {
   assert.match(fanning[2], /^ ● Delegate #12 · generalist · 2 subagents  /);
   assert.match(toolLines[3], /^   bash: x+…$/);
 
-  const started = helpers.resultRows({ content: [{ type: "text", text: "Delegate #4 started in the background." }], details: { id: 4, background: true } }, {}, plainTheme);
-  assert.deepEqual(started.render(80), ["  ↳ Delegate #4 started"]);
-  const failed = helpers.resultRows({ content: [{ type: "text", text: "generalist exited with code 1.\n\nEEXIST" }] }, {}, plainTheme, { isError: true });
-  assert.deepEqual(failed.render(80), ["  generalist exited with code 1.", "  ", "  EEXIST"]);
+  // Stacked cards share the rule between them: no blank line, no doubled rule.
+  const stack = helpers.cardStack([card, { ...card, id: 13 }], 80, plainTheme, 48_000);
+  assert.deepEqual(stack.map((line) => line.startsWith("─") ? "rule" : line.slice(0, 15)), [
+    "", "rule", " ● Delegate #12", "   finished bat", "rule", " ● Delegate #13", "   finished bat", "rule",
+  ]);
+
+  // Tool rows and their results sit on a background, padded to the width.
+  const pad = (text, width = 40) => text + " ".repeat(width - Array.from(text).length);
+  // Before a result the call row closes its own block; once resultRows has
+  // run for the same tool row, the result rows close it instead.
+  const context = { state: {} };
+  const callRow = helpers.callRow("delegate", "generalist", "", "Run the tests", context)(bgTheme);
+  const callLine = `<toolPendingBg>${pad(" delegate generalist  Run the tests")}`;
+  assert.deepEqual(callRow.render(40), [`<toolPendingBg>${pad("")}`, callLine, `<toolPendingBg>${pad("")}`]);
+  const meta = { id: 4, model: "openrouter/z-ai/glm-5.3", thinking: "high" };
+  const started = helpers.resultRows({ content: [{ type: "text", text: "Delegate #4 started in the background." }], details: { ...meta, background: true } }, {}, bgTheme, context);
+  assert.deepEqual(callRow.render(40), [`<toolPendingBg>${pad("")}`, callLine]);
+  assert.deepEqual(started.render(60), [`<toolPendingBg>${pad("   ↳ Delegate #4 started · z-ai/glm-5.3 (high)", 60)}`, `<toolPendingBg>${pad("", 60)}`]);
+  assert.equal(helpers.modelLabel(undefined, "low"), "default model (low)");
+
+  // A blocking call: the row names the run while it runs, then the report
+  // follows as its own green block after a blank line, notes left out.
+  const waitState = { state: {} };
+  const running = helpers.resultRows({ content: [{ type: "text", text: "" }], details: meta }, { isPartial: true }, bgTheme, waitState);
+  assert.deepEqual(running.render(60), [`<toolPendingBg>${pad("   ↳ Delegate #4 running · z-ai/glm-5.3 (high)", 60)}`, `<toolPendingBg>${pad("", 60)}`]);
+  const waited = helpers.resultRows({ content: [{ type: "text", text: "All good.\n\n[delegate #4; 1 tool calls; session /s.jsonl.]" }], details: meta }, {}, bgTheme, { ...waitState, isError: false });
+  assert.deepEqual(waited.render(60), [
+    `<toolPendingBg>${pad("   ↳ Delegate #4 finished · z-ai/glm-5.3 (high)", 60)}`, `<toolPendingBg>${pad("", 60)}`,
+    "", `<toolSuccessBg>${pad("", 60)}`, `<toolSuccessBg>${pad(" All good.", 60)}`, `<toolSuccessBg>${pad("", 60)}`,
+  ]);
+  // An error carries no details; the row keeps the name from the partial update.
+  const failed = helpers.resultRows({ content: [{ type: "text", text: "generalist exited with code 1.\n\nEEXIST" }] }, {}, bgTheme, { ...waitState, isError: true });
+  const failedRows = failed.render(60);
+  assert.match(failedRows[0], /↳ Delegate #4 failed · z-ai\/glm-5\.3 \(high\)/);
+  assert.deepEqual(failedRows.slice(2), ["", "", " generalist exited with code 1.", "", " EEXIST", ""].map((t, i) => i ? `<toolErrorBg>${pad(t, 60)}` : t));
+  for (const width of [30, 80]) {
+    for (const line of helpers.callRow("delegate", "generalist", " · wait", "x".repeat(200))(plainTheme).render(width)) assert.equal(Array.from(line).length, width);
+  }
 
   assert.deepEqual(helpers.wrap("one two three four", 9), ["one two", "three", "four"]);
   assert.deepEqual(helpers.wrap("abcdefghij\n\nx", 4), ["abcd", "efgh", "ij", "", "x"]);
@@ -469,15 +508,24 @@ test("cards and the report message fit the terminal width", () => {
   const render = fake.renderers.get("delegate");
   const report = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
   const message = { content: `Delegate #3 (research) finished after 9s.\n\n${report}\n\n[delegate #3; 4 tool calls; session /s/r.jsonl.]`, details: { id: 3, name: "research", status: "done", seconds: 9, toolCalls: 4, turn: 1 } };
-  const collapsed = render(message, { expanded: false, outputPad: 1 }, plainTheme).render(60);
-  assert.equal(collapsed[0], " ✓ delegate #3 research  9s · 4 tools");
-  assert.equal(collapsed[1], " line 0");
-  assert.equal(collapsed.length, 1 + helpers.COLLAPSED_REPORT_LINES + 1);
-  assert.match(collapsed.at(-1), /12 more lines/);
+  // Painted like a shell card: padding row, header, report, padding row, on
+  // green for a finished run, red for a failed one, gray for a stopped one.
+  const collapsed = render(message, { expanded: false }, plainTheme).render(60).map((line) => line.trimEnd());
+  assert.equal(collapsed[0], "");
+  assert.equal(collapsed[1], " ✓ delegate #3 research  9s · 4 tools");
+  assert.equal(collapsed[2], " line 0");
+  assert.equal(collapsed.length, 2 + helpers.COLLAPSED_REPORT_LINES + 2);
+  assert.match(collapsed.at(-2), /12 more lines/);
+  assert.equal(collapsed.at(-1), "");
   assert(!collapsed.some((line) => line.includes("session")), "notes stay out of the collapsed view");
-  const expanded = render(message, { expanded: true, outputPad: 1 }, plainTheme).render(60);
-  assert.equal(expanded.length, 23);
-  assert.equal(expanded.at(-1), " [delegate #3; 4 tool calls; session /s/r.jsonl.]");
+  const expanded = render(message, { expanded: true }, plainTheme).render(60);
+  assert.equal(expanded.length, 25);
+  assert.equal(expanded.at(-2).trimEnd(), " [delegate #3; 4 tool calls; session /s/r.jsonl.]");
+  for (const line of expanded) assert.equal(Array.from(line).length, 60);
+  for (const [status, bg] of [["done", "toolSuccessBg"], ["error", "toolErrorBg"], ["stopped", "toolPendingBg"]]) {
+    const lines = render({ ...message, details: { ...message.details, status } }, { expanded: false }, bgTheme).render(60);
+    assert(lines.every((line) => line.startsWith(`<${bg}>`)), status);
+  }
 });
 
 test("every run stops at the one hour cap and says how to resume it", async () => {

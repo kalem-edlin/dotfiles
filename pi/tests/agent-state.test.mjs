@@ -105,6 +105,7 @@ function harness(initialBranch = [], { name = "Existing title", entries = initia
       for (const handler of handlers.get(type) ?? []) await handler({ type, ...event }, ctx);
     },
     subagents: (running) => bus.get("pif:subagents")({ running }),
+    shells: (running, active = running) => bus.get("pif:shells")({ running, active }),
   };
 }
 
@@ -319,6 +320,23 @@ test("subagents still hold working at settle and survive branch navigation", asy
   await h.emit("agent_settled");
   await drain();
   assertState("awaiting");
+});
+
+test("running shells hold working at settle; services alone do not", async () => {
+  const h = harness([user(), assistant("Done.")]);
+  await start(h);
+  h.shells(1, 2);
+  await h.emit("agent_settled");
+  await drain();
+  assertState("working");
+  assert.ok(!calls.at(-1).includes("@agent_subs"), "shells must not publish a subagent count");
+  h.shells(0, 1);
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  await drain();
+  assert.equal(calls.at(-1)[0], "if", "the last non-service shell ending settles the held Working");
+  await h.emit("agent_settled");
+  await drain();
+  assert.equal(calls.at(-1)[0], "if", "a service alone must not hold working");
 });
 
 test("branch read errors fall back to nonempty idle without breaking startup", async () => {
