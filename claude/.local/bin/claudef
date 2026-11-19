@@ -100,10 +100,16 @@ if [ "$interactive" = 1 ]; then
   printf '\n'
 fi
 
-# Bypass mode still stops on `rm -r "$(...)"` (target is command-substitution
-# output, so the built-in rm check can't resolve it). This turns off only that
-# prompt. The rest of the built-in rm checks still apply.
+# Bypass mode keeps one prompt: the "dangerous removal" breaker. It fires on
+# `rm -r "$(...)"` (the substitution target can't be resolved) and on any
+# command the built-in bash parser can't read, zsh-only expansions such as
+# `${(f)...}` and `${a:#b}` included, even when nothing is deleted. The first
+# variable turns off the substitution case; the second waives the breaker in
+# bypass mode as a whole, so a parse failure no longer blocks the turn. The
+# waiver is silently void when a Bash deny or ask rule, a PermissionRequest
+# hook, or a child session is present; claude prints its status at startup.
 export CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1
+export CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1
 
 # The dotfiles root .env (gitignored, hand-copied per machine) holds the keys
 # the research subagent's deeper tools need. Exported here only, so bare
