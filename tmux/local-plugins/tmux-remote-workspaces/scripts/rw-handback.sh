@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `rw handback` -- bring a remote root, and every pane working in it, back
-# to this machine (docs/tasks/mini-remote-sessions.md, P1 and contract C2).
+# to this machine (docs/tasks/remote-owned-directories.md, P1 and contract C2).
 #
 # All or nothing. Order:
 #   1. Find the root's ownership record (--root, the pane's @rw-root-id or

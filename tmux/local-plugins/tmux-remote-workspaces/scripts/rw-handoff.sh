@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `rw handoff` -- hand a directory root, and every pane working inside it,
-# to a worker (docs/tasks/mini-remote-sessions.md, P1 and contract C2).
+# to a worker (docs/tasks/remote-owned-directories.md, P1 and contract C2).
 #
 # The unit is a directory: the git toplevel of a worktree, or a plain
 # folder. Every pane on this tmux server whose cwd is the root or inside it

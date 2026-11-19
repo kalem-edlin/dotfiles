@@ -4,7 +4,7 @@
 # Usage: rw <handoff|handback|bg|request|open|forget|reclaim|status|close|doctor> [args...]
 #
 # The unit of handoff is a directory root (a worktree or a plain folder);
-# see docs/tasks/mini-remote-sessions.md for the model and contracts.
+# see docs/tasks/remote-owned-directories.md for the model and contracts.
 
 set -uo pipefail
 

@@ -2,7 +2,7 @@
 
 Status: reopened September 17, 2026. The earlier fixes did not establish reliable operation under load.
 
-## November 18, remote endpoint panes (W4 of docs/tasks/mini-remote-sessions.md)
+## November 18, remote endpoint panes (W4 of docs/tasks/remote-owned-directories.md)
 
 A pane handed to a worker by tmux-remote-workspaces is a local window onto a
 worker tmux session. Until now the laptop restore never reattached such a

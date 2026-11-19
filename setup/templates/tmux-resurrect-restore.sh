@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Boot-time tmux restore for a headless worker (contract C6 in
-# docs/tasks/mini-remote-sessions.md; runbook in docs/headless-workers.md,
+# docs/tasks/remote-owned-directories.md; runbook in docs/headless-workers.md,
 # "Boot-time restore").
 #
 # Callers:

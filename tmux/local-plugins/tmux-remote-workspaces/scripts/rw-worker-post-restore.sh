@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Worker-side post-restore (contract C6, docs/tasks/mini-remote-sessions.md).
+# Worker-side post-restore (contract C6, docs/tasks/remote-owned-directories.md).
 # Runs ON THE WORKER after its tmux server has been restored:
 #
 #   - from the boot restore wrapper (setup/templates/tmux-resurrect-restore.sh),

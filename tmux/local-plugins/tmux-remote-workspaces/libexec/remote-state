@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remote agent state mirror (follow-up R1, contract CX1/CX2 in
-# docs/tasks/mini-remote-sessions.md, "Changes recorded by B2").
+# docs/tasks/remote-owned-directories.md, "Changes recorded by B2").
 #
 # The agent in a remote pane publishes its @agent_* options into the WORKER's
 # tmux server (scripts/agent-state, pif's agent-state.ts, run by claudef/pif

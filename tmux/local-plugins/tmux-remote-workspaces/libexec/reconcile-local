@@ -3,7 +3,7 @@
 # local pane carries (@rw-endpoint) -- typically a pane killed without
 # `prefix q`, or a laptop restore that has not reattached yet.
 #
-# REPORT ONLY (decision D14, docs/tasks/mini-remote-sessions.md): a worker
+# REPORT ONLY (decision D14, docs/tasks/remote-owned-directories.md): a worker
 # session is killed only by an explicit hand-back, `rw forget`, or
 # `rw close`. A registered endpoint whose pane is not found is logged and
 # left alone -- its worker session (and any agent in it) keeps running, and

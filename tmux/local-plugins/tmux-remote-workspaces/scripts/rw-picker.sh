@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Backs the `prefix e` binding (tmux.reset.conf): ONE display-popup whose
 # direction is decided by the focused (origin) pane's @remote-host
-# (docs/tasks/mini-remote-sessions.md, D12). The unit is a directory root
+# (docs/tasks/remote-owned-directories.md, D12). The unit is a directory root
 # (P1): a worktree's git toplevel, or a plain folder, and every pane working
 # inside it moves together.
 #

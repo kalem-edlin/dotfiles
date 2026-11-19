@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `rw request handback` -- ask for the root this pane works in to come back
-# (contract CX2, docs/tasks/mini-remote-sessions.md).
+# (contract CX2, docs/tasks/remote-owned-directories.md).
 #
 # Runs ON THE WORKER, inside a hidden endpoint session pane ($TMUX_PANE):
 # sets the pane option @rw-request=handback on that pane and prints one

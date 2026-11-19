@@ -14,7 +14,7 @@
 # Git only: never runs tmux, installs, or touches DerivedData or remote
 # endpoints (the picker owns those), with one exception: rm runs
 # `rw forget <root>` once when any worker holds a copy of the root
-# (tmux-remote-workspaces, docs/tasks/mini-remote-sessions.md D11) before
+# (tmux-remote-workspaces, docs/tasks/remote-owned-directories.md D11) before
 # deleting it here, and refuses a root that is remote right now unless
 # confirmed (a prompt on a terminal, else --discard-remote, which also
 # passes rw --force). The rm reply's "remote" is deleted, pending, kept or

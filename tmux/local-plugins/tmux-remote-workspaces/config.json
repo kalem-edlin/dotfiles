@@ -4,11 +4,6 @@
       "alias": "mini",
       "platform": "darwin",
       "notes": "Always-on macOS Mini worker; terminal, Xcode, and Simulator duties."
-    },
-    {
-      "alias": "agents-roll",
-      "platform": "linux",
-      "notes": "Linux VPS worker reached through the agents-roll OpenSSH alias."
     }
   ],
   "ssh": {

@@ -2,7 +2,7 @@
 
 Moves one directory root -- a git worktree or a plain folder -- between the
 focus machine and a worker, for `rw handoff` / `rw handback`
-(`docs/tasks/mini-remote-sessions.md`, Q4 and contracts C1/C2). Two
+(`docs/tasks/remote-owned-directories.md`, Q4 and contracts C1/C2). Two
 channels:
 
 - **git channel** (git roots): unpushed commits, staged changes, unstaged

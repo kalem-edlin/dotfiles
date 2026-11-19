@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// Remote-owned roots (docs/tasks/mini-remote-sessions.md, P1, D10, D11):
+// Remote-owned roots (docs/tasks/remote-owned-directories.md, P1, D10, D11):
 // tmux-remote-workspaces keeps one ownership record per handed-off
 // directory root at <state dir>/owned/<root_id>/record.json (contract C1).
 // The picker reads them as plain files: one directory read per snapshot,

@@ -10,7 +10,7 @@ without the plugin treating those paths as different workers.
 
 The model ("the unit is a directory, and whoever holds the directory owns
 it"), its decisions and the binding contracts live in
-[`docs/tasks/mini-remote-sessions.md`](../../../docs/tasks/mini-remote-sessions.md).
+[`docs/tasks/remote-owned-directories.md`](../../../docs/tasks/remote-owned-directories.md).
 
 The maintained system design and decision record live in
 [`docs/tmux-remote-workspaces.md`](../../../docs/tmux-remote-workspaces.md).
@@ -323,8 +323,7 @@ fake-ssh harness sets both; a real-worker smoke test sets only the first.
 ```json
 {
   "workers": [
-    { "alias": "mini", "platform": "darwin", "notes": "..." },
-    { "alias": "agents-roll", "platform": "linux", "notes": "..." }
+    { "alias": "mini", "platform": "darwin", "notes": "..." }
   ],
   "ssh": { "connect_timeout_seconds": 8, "preflight_timeout_seconds": 10, "status_timeout_seconds": 3 }
 }

@@ -3,7 +3,7 @@
 # reclaim. Sourced only; never executed directly. Builds on common.sh
 # (ownership records, ssh transport, endpoint registry, per-root locks) --
 # see the ownership section there for the record layout, and
-# docs/tasks/mini-remote-sessions.md for the contracts.
+# docs/tasks/remote-owned-directories.md for the contracts.
 
 RW_ROOTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR

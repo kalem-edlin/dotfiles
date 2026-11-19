@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # `rw bg handoff|handback` -- a background transfer (contract CX3,
-# docs/tasks/mini-remote-sessions.md).
+# docs/tasks/remote-owned-directories.md).
 #
 #   rw bg handoff  [--worker <alias>] --pane <pane-id> [--wait-idle <seconds>]
 #   rw bg handback --pane <pane-id> [--wait-idle <seconds>]

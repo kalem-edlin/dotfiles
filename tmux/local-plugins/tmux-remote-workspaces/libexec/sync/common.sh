@@ -206,7 +206,7 @@ rw_sync_gen_write_statefile() {
 }
 
 # ---------------------------------------------------------------------------
-# rsync channel and manifests (docs/tasks/mini-remote-sessions.md, Q4/C1).
+# rsync channel and manifests (docs/tasks/remote-owned-directories.md, Q4/C1).
 #
 # The rsync channel carries everything the git channel ignores: for a `git`
 # root, exactly the gitignored set (`.env*`, node_modules, build output);

@@ -8,7 +8,7 @@ While a root is remote, the worker copy is the single source of truth and each
 of its laptop panes attaches to its own durable tmux session on the worker.
 Remote execution is opt-in. This document records the current system and the
 decisions needed to maintain it. It is not an implementation plan or backlog;
-the plan that produced the directory model is `docs/tasks/mini-remote-sessions.md`.
+the plan that produced the directory model is `docs/tasks/remote-owned-directories.md`.
 
 The colocated plugin README at
 [`tmux/local-plugins/tmux-remote-workspaces/README.md`](../tmux/local-plugins/tmux-remote-workspaces/README.md)
@@ -389,7 +389,7 @@ anything else that reads `@agent_*` see a remote agent like a local one.
   `tmux run-shell -b`, detached from the loop that the hand-back replaces.
 
 The contract, including the line format and the rejected alternatives, is
-"Changes recorded by B2" in `docs/tasks/mini-remote-sessions.md`.
+"Changes recorded by B2" in `docs/tasks/remote-owned-directories.md`.
 
 ## Persistence and reconciliation
 

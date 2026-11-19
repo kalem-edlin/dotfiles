@@ -19,7 +19,7 @@ const (
 	// StateDisconnected: a remote pane's agent while the laptop cannot see
 	// the worker. rw's side channel mirrors a remote agent's @agent_*
 	// onto its laptop pane and writes this value when the channel is lost
-	// (follow-up R1, docs/tasks/mini-remote-sessions.md), so a stale
+	// (follow-up R1, docs/tasks/remote-owned-directories.md), so a stale
 	// Working never stays up. Only remote panes carry it.
 	StateDisconnected State = "disconnected"
 )

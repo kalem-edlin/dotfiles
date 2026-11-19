@@ -1,6 +1,6 @@
 # Remote-owned directories: handing worktrees and folders to always-on workers
 
-Status: built, reviewed and smoke-tested against the worker on 2026-11-18 (W0-W6 done; the real UC-A/UC-B handoffs are the user's own next step, followed by the manual idol-app path fixes and Ghidra output copy, D16). Opened 2026-11-17 as an investigation; design P1 accepted 2026-11-18. Contracts and the per-wave change notes below are the binding interface description.
+Status: built, reviewed and smoke-tested against the worker on 2026-11-18 (W0-W6 done; pane host switching planned and in build, section "Pane host switching"; the real UC-A/UC-B handoffs are the user's own next step, followed by the manual idol-app path fixes and Ghidra output copy, D16). Opened 2026-11-17 as an investigation; design P1 accepted 2026-11-18. Contracts and the per-wave change notes below are the binding interface description.
 
 Related system docs (current behaviour, not plans):
 
@@ -322,6 +322,86 @@ Additive unless stated. Builders of W3-W6 read these as part of C1-C8.
 - C2 `rw doctor` reads the wrapper's `--state` for each reachable worker. It fails on `incomplete` (naming the marker and the remedy) and lists markers of servers that have exited (`rw_worker_restore_report_sh`, read only). The headless doctor's existing `tmux:restore-complete` check already fails while the live server has a marker, so it is unchanged.
 - C6 `rw_worker_request_save` is fire and forget at both ends. The worker side is `nohup sh -c '<trigger>' </dev/null >/dev/null 2>&1 &`, so its shell returns at once. This machine runs the ssh in a detached subshell, so no caller or pane holds it. The cause was measured on this laptop with a throwaway LaunchAgent (`StartInterval 300`, no `ThrottleInterval`): `launchctl kickstart` returns in 0.01 s the first time, and a second kickstart 1 s later blocks 9.03 s. The exit status (0 or 1) makes no difference. launchd's default throttle is one spawn per 10 s, and kickstart waits out the rest of that window. This is the 5.28 s measured in a split made seconds after a `prefix+q` close. `RW_WORKER_SAVE_TRIGGER` stays the test hook.
 - Tests: `tests/test_worker_server.sh`. It covers a 5 s trigger with request_save, handoff, open and close all returning before it ends, and the remote shell returning first. It covers server start through the wrapper (a stateful fake worker tmux, fake guarded restore and Continuum; the guarded restore runs before the session exists, and the session is never the server's first) and the refusals for an incomplete or failed restore, including the handoff and open messages. It also covers no snapshot, old and missing wrappers, the stale-marker sweep and the doctor report. `lib.sh` gains `wait_for` and sets `TMUX_RESURRECT_MARKER_DIRS` to the sandbox. Also checked once on a throwaway server (`-L rw-b3`, `-f /dev/null`, scratch `TMUX_TMPDIR`): `--state`, `--start` with no snapshot, and `rw_worker_server_sh` against a live server and against no server.
+
+## Pane host switching (plan, 2026-11-18)
+
+Status: planned 2026-11-18, build delegated the same day (waves X1-X4 below). Extends the directory model above; nothing in P1 or C1-C8 is withdrawn unless a line below says so.
+
+### User intent (verbatim)
+
+2026-11-18, on `prefix e`:
+
+> prefix+e takes a PANE's current focus directory and presents a menu for a FULL handoff (backward to local if remote owned dir/subdirectory of owned dir (no matter what remote command is fired from) OR if local owned dir handoffable to a selected remote) OR a simple switch of the pane (no handoff of directory) to the remote or back to local. If a remote owns a dir and prefix e is done from the local machine - the handoff option is to handback (since that is the only way a handoff can go) ( still providing the option for a soft handoff of just the pane's host (to same dir remember).
+
+> This means that since we can switch back and forth easily like this that prefix + c (creating a new window) does so from the same REMOTE of the pane where the command was fired. SAME goes for split pane commands too
+
+On the status line:
+
+> If this is ever the case and a dir / sub dir of a remote owned dir is in focus (or a local owned dir is somehow focused in remote) ... I think that the host chip in the tmux status line should show a RED background instead of blue behind the host icon - make sense? that'll make it clear we are not on the right owner host of said directory system.
+
+On restore and agents:
+
+> Yes panes that are connected to remote shoudl restore as such on BOTH machines via our ressuraction workflows in a way that makes the most sense please.
+
+> soft handoffs can move coding agent sessions `claudef` and `pif` between hosts without the full handoff.
+
+On hosts:
+
+> Why are we making it specific to "mini" here? It should be a system that handles any numebr of remote hosts we have managed within our tmux remote session management system??
+
+### Terms
+
+- Owner host of a path: the worker named in the worker-owned record whose root contains the path (`rw_owned_root_for_path`), else this machine (the laptop). Every path that has not been handed off is owned by this machine.
+- Pane host: the worker a pane's attach loop runs on (`@remote-host`), else this machine.
+- Full handoff: the existing root transfer (`rw bg handoff` / `rw bg handback`): files move, ownership changes, every pane in the root moves.
+- Soft switch: only the focused pane changes host, in the same directory. No files move and ownership does not change. An agent or editor in the pane moves with it.
+- Off-owner pane: a pane whose host is not the owner host of its directory. Every soft switch away from the owner produces one. The frozen-copy panes in D17 are the local case.
+
+### Design
+
+- S1 `prefix e` menu. The pane's directory is resolved first: a local pane uses `pane_current_path`; a remote pane uses its live worker cwd from `pane_title` when that is an absolute path (the directory chip's existing source), mapped back to this machine through the endpoint's worker root and `$HOME` mapping, else the endpoint's focus path. The root is the enclosing worker-owned root, else `rw_default_root_for_path`. One fzf menu, the same look as today's worker chooser, its header naming the directory, the root, the pane host and the owner host:
+  - Soft switch rows first (enter picks the first row). The destinations are every host except the pane's own: this machine, and each configured worker. When the root is worker-owned, its owner is listed first.
+  - Full-handoff row last. Worker-owned root: "hand back <root> to this machine" (the only direction a handoff can go, whatever pane it is pressed from, local or remote). Root owned by this machine: "hand off <root> to remote", then the worker chooser.
+  - Choosing a row is the confirmation; the separate y/n for hand-back goes. Transfers stay background (`rw bg`).
+  - The worker chooser is skipped when exactly one worker is configured.
+- S2 New windows and splits follow the pane host. `prefix c` on a remote pane (owned or off-owner) opens a new window on the same worker in the pane's live directory; on a local pane, a local window as today. `prefix \` and `prefix /` already follow the pane (`rw-split.sh`) and must keep doing so for off-owner remote panes. The picker's new-window action (`prefix o`, then `w`) keeps following the owner.
+- S3 Soft switch to a worker. Worker-owned root, destination is its owner: the existing `rw open` path (owned endpoint, listed in the record's `endpoints`). Any other case (a root this machine owns, or a worker that does not own it): a visit endpoint, the same hidden worker session and attach loop with no ownership record behind it. Its worker directory is the mapped path, or the nearest existing parent when the path does not exist there, with one printed line saying so.
+- S4 Soft switch to this machine from a remote pane: the attach loop is replaced by a local shell in the same pane, window and layout, in the mapped local directory (nearest existing parent if missing). The worker session for that endpoint is closed and the endpoint unregistered (removed from the record's `endpoints` when it was owned). A foreground program that is not a shell, a supported agent or an editor is refused with a notice (quit it first).
+- S5 Agents and editors move in a soft switch. `claudef` and `pif` agents move with the adapters' detect / export / install / resume, minus the directory sync: never two writers, never zero (the source agent stops only after the destination resume is confirmed). Refused when the directory does not exist on the destination (Claude finds its transcript by path). The menu row warns when the destination is off-owner ("the agent will work on a copy that does not own this directory"). Editors reopen through the editor adapter, best effort, unsaved buffers never travel (warned, as in the full handoff).
+- S6 Red host chip. A pane option `@rw-off-owner` (`1` or unset) marks off-owner panes. The host chip's background reads it: Catppuccin red when set, the host's normal color otherwise. It is recomputed when a local shell changes directory (the zsh `chpwd` hook that already warns on frozen roots), when an endpoint attaches, after every handoff, hand-back and soft switch (for every pane in the root), and after restore (`rw-refresh-indicators.sh`). A remote pane's flag follows its endpoint's directory, not later `cd`s on the worker.
+- S7 Resurrection on both machines. Laptop: visit endpoints reattach by endpoint id through `rw-post-restore.sh` exactly like owned ones; the sidecar treats them as captured. Worker: their hidden sessions are saved by the worker's save timer and restored by the boot restore like owned ones, with hidden-session options re-applied. Reconcile never closes a visit endpoint for lacking a record (D14 applies). After restore, `@rw-off-owner` is recomputed, never restored from the save.
+- S8 Interplay with full transfers. A full handoff of root R to worker W adopts visit panes already on W inside R as owned panes (added to the record, no second session) and leaves visit panes on other workers as they are. A hand-back of R moves the record's endpoints as today; visit panes on other workers stay where they are and stay off-owner. Local panes in R move on handoff as today.
+- S9 Any number of workers. Nothing is specific to one worker. UI strings say `remote` and `this machine` (C7); worker aliases appear only as chooser rows taken from `config.json`.
+
+### Decision log (pane host switching)
+
+- D19 `prefix e` is one menu with soft-switch rows and one full-transfer row; the full transfer's direction is decided by the owner, the soft switch's by the pane host.
+- D20 Choosing the hand-back row is the confirmation; the y/n prompt is removed.
+- D21 `prefix c` and splits follow the pane host; the picker's new window follows the owner.
+- D22 Soft switch to a non-owner worker uses a visit endpoint with no ownership record.
+- D23 Soft switch moves `claudef`/`pif` agents and editors without the directory sync; refused when the directory is missing on the destination.
+- D24 Off-owner panes show a red host chip, from a recomputed pane flag.
+- D25 Visit panes restore on both machines like owned panes.
+- D26 The worker chooser is skipped with exactly one worker configured.
+- 2026-11-18: the `agents-roll` worker was removed from `config.json` (the host no longer exists).
+
+### Contracts (pane host switching)
+
+- CS1 Command: `rw switch --pane <pane-id> --to <worker-alias|local> [--dir <abs-path>]`. Soft switch of one pane, synchronous (no sync channel, quick). `--dir` defaults to the pane's resolved directory (S1). Exit codes: 0 done; 6 destination worker unreachable; 7 refused (pane already on that host, unsupported foreground program, agent move with the directory missing on the destination), with one `rw: <reason>` line; 1 failure after which the pane is left as it was.
+- CS2 Endpoint JSON gains `kind`: `owned` (default when absent, so existing endpoints read as owned) or `visit`. A visit endpoint carries `root_id`/`root_rel` of the enclosing root when there is one, and never appears in a record's `endpoints`.
+- CS3 `@rw-off-owner` is set or unset only by `scripts/rw-refresh-indicators.sh`. New modes: `--pane <id>` and `--root <path>` (every pane in that root) recompute it; the existing no-argument run recomputes it for every pane. `rw handoff`, `rw handback`, `rw switch`, `rw open` and the attach loop call it best effort when they change a pane's host or a root's owner. The zsh `chpwd` hook calls `--pane "$TMUX_PANE"`.
+- CS4 `prefix c` runs a script (`scripts/rw-new-window.sh`, owned by X1) in the shape of `rw-split.sh`: remote pane, new window on the same worker through `rw open` (owned) or a visit endpoint; local pane, `new-window -c "#{pane_current_path}"`.
+- CS5 `scripts/rw-picker.sh` (owned by X2) calls only `rw switch`, `rw bg handoff` and `rw bg handback`. It never creates endpoints itself.
+- CS6 Each wave records its interface changes under its own "Changes recorded by X<n>" heading below, in the same commit.
+
+### Build order (pane host switching)
+
+C8 testing rules apply to every wave, and the builder works in its own git worktree, never on the live checkout: the live tmux server runs these scripts straight from `~/.config/tmux`, so a half-built script there breaks the user's keys.
+
+- X1 rw core (CS1, CS2, CS4, S2-S5, S7, S8): `scripts/rw`, new `scripts/rw-switch.sh`, new `scripts/rw-new-window.sh`, `scripts/rw-open.sh`, `scripts/rw-split.sh`, `scripts/common.sh`, `scripts/roots.sh`, `scripts/attach-loop.sh`, `scripts/rw-handoff.sh`, `scripts/rw-handback.sh`, `scripts/rw-post-restore.sh`, `scripts/rw-worker-post-restore.sh`, `libexec/*` as needed, `tmux/tmux.reset.conf` (`prefix c`, and the `prefix e` comment), tests. Done when: new tests cover switch in both directions (shell, claude, pi, editor, refused program), visit endpoint restore on both sides, handoff adopting a visit pane, `prefix c` following the pane; the full existing suite (`tests/run.sh`) passes.
+- X2 menu and chip (S1, S6, S9, CS3, CS5): `scripts/rw-picker.sh`, `scripts/rw-refresh-indicators.sh`, `tmux-remote-workspaces.tmux`, `tmux/scripts/host_indicator.sh` if needed, the `chpwd` hook in `zsh/.zshrc`, tests. Done when: menu rows match S1 for each pane-host and owner combination (one and two workers), the chip format renders red for an off-owner pane on a throwaway server, and the existing suite passes.
+- X3 independent review of X1 and X2 merged, by reviewers who read the code without the builders' conclusions; findings fixed.
+- X4 smoke test against the configured worker after it is updated to the merged code (C8: throwaway laptop server, isolated state dir, everything created removed on both machines), then `docs/tmux-remote-workspaces.md` describes soft switching, the menu, the chip and `prefix c`.
 
 ## Follow-ups (not in this plan)
 

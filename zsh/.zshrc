@@ -329,7 +329,7 @@ take() {
 }
 
 
-# Remote roots (tmux-remote-workspaces, docs/tasks/mini-remote-sessions.md
+# Remote roots (tmux-remote-workspaces, docs/tasks/remote-owned-directories.md
 # D17): while a worker owns a directory root, the local copy is frozen. On
 # entering one from outside it (and once at startup) print one line. Reads
 # rw's ownership records directly: a glob, then $(<file) per record (no

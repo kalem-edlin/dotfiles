@@ -853,7 +853,7 @@ rw_git_toplevel() {
 }
 
 # ---------------------------------------------------------------------------
-# Directory roots and ownership records (docs/tasks/mini-remote-sessions.md,
+# Directory roots and ownership records (docs/tasks/remote-owned-directories.md,
 # contract C1). The unit of handoff is a directory root: the git toplevel of
 # a worktree, or a plain folder. Paths travel relative to $HOME (`root_rel`)
 # so the two machines never need the same user name.

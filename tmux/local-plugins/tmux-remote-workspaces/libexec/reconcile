@@ -30,7 +30,7 @@
 #     `rw doctor`, or for real after fixing a worker's reachability).
 #
 # HARD SAFETY RULES (docs/tmux-remote-workspaces.md, and decision D14 in
-# docs/tasks/mini-remote-sessions.md):
+# docs/tasks/remote-owned-directories.md):
 #   - A REGISTERED endpoint is never closed here, whether or not a local pane
 #     was found for it: a worker session dies only by explicit hand-back,
 #     `rw forget`, or `rw close`. Only worker sessions with no registry
