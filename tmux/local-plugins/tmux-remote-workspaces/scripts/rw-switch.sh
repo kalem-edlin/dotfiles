@@ -31,16 +31,32 @@
 # rw-new-window.sh do for a fresh pane), nothing is moved and the pane
 # becomes the attach loop by exec.
 #
-# Usage: rw-switch.sh [--pane <pane-id>] --to <worker-alias|local> [--dir <abs-path>]
+# Usage: rw-switch.sh [--pane <pane-id>] --to <worker-alias|local>
+#                     [--dir <abs-path> | --dir-of <pane-id>] [--force]
 #   --pane defaults to $TMUX_PANE; --dir (a path on THIS machine) defaults to
-#   the pane's directory (rw_pane_dir: a remote pane's live remote cwd,
-#   mapped back).
+#   the pane's directory (rw_pane_dir --live: a remote pane's live remote
+#   cwd, mapped back). --dir-of takes that live directory from another pane
+#   instead: a split or prefix c creates its pane at once and the `rw
+#   switch` running in it asks the source pane's remote (no key binding
+#   ever waits on ssh).
+#   --force (only with --to local): a remote pane whose remote cannot be
+#   reached, or is no longer in config.json, is released to a local shell
+#   anyway; its endpoint stays registered with a pending close that the next
+#   contact with that remote performs (rw_reconcile_pending).
 #
-# Exit: 0 done; 1 failure, the pane left as it was; 3 agent CLI version
-#       gate; 6 the destination remote (or, for a remote pane, its own
-#       remote) is unreachable; 7 refused (already there, an unsupported
-#       program, an agent that is working or whose directory is missing on
-#       the destination), one `rw: <reason>` line; 64 usage.
+# The roots involved are locked (rw_root_lock) for the whole switch, and a
+# root with a background transfer in flight (rw bg) is refused. Whether the
+# destination owns the directory is decided under the lock, after pending
+# actions for that remote ran.
+#
+# Exit: 0 done; 1 failure, the pane left as it was (also: the pane's remote
+#       is restoring its sessions, or its session there is missing while
+#       the endpoint records an agent); 3 agent CLI version gate; 6 the
+#       destination remote (or, for a remote pane, its own remote) is
+#       unreachable; 7 refused (already there, an unsupported program, an
+#       agent that is working or whose directory is missing on the
+#       destination, a background transfer of the root), one `rw: <reason>`
+#       line; 64 usage.
 
 set -uo pipefail
 
@@ -55,7 +71,7 @@ rw_need_jq
 rw_config_valid || rw_die "config.json ($RW_CONFIG_FILE) is invalid"
 
 usage() {
-  printf 'usage: rw switch [--pane <pane-id>] --to <remote-alias|local> [--dir <abs-path>]\n'
+  printf 'usage: rw switch [--pane <pane-id>] --to <remote-alias|local> [--dir <abs-path> | --dir-of <pane-id>] [--force]\n'
 }
 
 # Worker-side guard: an rw endpoint session is named rw-<8hex>-<8hex>; a
@@ -71,11 +87,15 @@ fi
 pane_id="${TMUX_PANE:-}"
 dest=""
 dir_arg=""
+dir_of=""
+force="false"
 while [ $# -gt 0 ]; do
   case "$1" in
     --pane) pane_id="${2:?}"; shift 2 ;;
     --to) dest="${2:?}"; shift 2 ;;
     --dir) dir_arg="${2:?}"; shift 2 ;;
+    --dir-of) dir_of="${2:?}"; shift 2 ;;
+    --force) force="true"; shift ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; exit 64 ;;
   esac
@@ -83,6 +103,8 @@ done
 [ -n "$pane_id" ] || { usage >&2; exit 64; }
 [ -n "$dest" ] || { usage >&2; exit 64; }
 case "$dir_arg" in '' | /*) : ;; *) rw_die "switch: --dir takes an absolute path" 64 ;; esac
+[ -z "$dir_arg" ] || [ -z "$dir_of" ] || rw_die "switch: --dir and --dir-of exclude each other" 64
+[ "$force" != "true" ] || [ "$dest" = "local" ] || rw_die "switch: --force only releases a pane to this machine (--to local)" 64
 if [ "$dest" != "local" ] && ! rw_worker_known "$dest"; then
   rw_die "switch: '$dest' is not a configured remote (config.json)" 64
 fi
@@ -137,39 +159,60 @@ case "$(printf '%s' "$src_json" | jq -r '.role // empty' 2>/dev/null)" in
 esac
 
 # --- Directory and its owner ---------------------------------------------------
-if [ -n "$dir_arg" ]; then dir="$dir_arg"; else dir="$(rw_pane_dir "$pane_id" --live)"; fi
+# A source remote that is gone from config.json is never asked.
+src_known="true"
+[ "$src_kind" = "local" ] || rw_worker_known "$src_worker" || src_known="false"
+if [ -n "$dir_arg" ]; then
+  dir="$dir_arg"
+elif [ -n "$dir_of" ]; then
+  # A pane made by a split or prefix c: the source pane's live directory,
+  # else (the source pane is gone) this pane's own starting directory.
+  dir="$(rw_pane_dir "$dir_of" --live)"
+  [ -n "$dir" ] || dir="$(rw_pane_dir "$pane_id")"
+elif [ "$src_known" = "false" ]; then
+  dir="$(rw_pane_dir "$pane_id")"
+else
+  dir="$(rw_pane_dir "$pane_id" --live)"
+fi
 [ -n "$dir" ] || dir="$HOME_LOCAL"
 dir="$(rw_physical_path "$dir")"
 
-owned_id="" owner_worker="" root_local="" root_rel="" root_id="" root_kind="plain" rec_worker_root=""
-if owned_id="$(rw_owned_root_for_path "$dir")"; then
-  record="$(rw_owned_record_read "$owned_id")"
-  owner_worker="$(printf '%s' "$record" | jq -r '.worker')"
-  root_local="$(printf '%s' "$record" | jq -r '.root_local')"
-  root_rel="$(printf '%s' "$record" | jq -r '.root_rel')"
-  root_kind="$(printf '%s' "$record" | jq -r '.kind // "plain"')"
-  rec_worker_root="$(printf '%s' "$record" | jq -r '.worker_root // empty')"
-  root_id="$owned_id"
-else
-  owned_id=""
-  root_local="$(rw_default_root_for_path "$dir")"
-  if root_rel="$(rw_root_rel "$root_local" 2>/dev/null)"; then
-    root_id="$(rw_root_id "$root_rel")"
-    [ -d "$root_local" ] && root_kind="$(rw_root_kind "$root_local")"
-    [ "$root_kind" = "git" ] || root_kind="plain"
+# resolve_owner -- the directory's owner and root, from the records as they
+# are NOW (fix wave A, finding 4): run again under the lock and after the
+# destination's pending actions, so `owned` is never decided from a record
+# that changed meanwhile. A record with a pending forget, or a worker's own
+# mirror, does not make a remote the owner (rw_owner_for_path, I2).
+resolve_owner() {
+  local line record
+  owned_id="" owner_worker="" root_local="" root_rel="" root_id="" root_kind="plain" rec_worker_root=""
+  if line="$(rw_owner_for_path "$dir")"; then
+    IFS="$RW_TAB" read -r owned_id owner_worker root_local <<<"$line"
+    record="$(rw_owned_record_read "$owned_id" 2>/dev/null)"
+    root_rel="$(printf '%s' "$record" | jq -r '.root_rel // empty')"
+    root_kind="$(printf '%s' "$record" | jq -r '.kind // "plain"')"
+    rec_worker_root="$(printf '%s' "$record" | jq -r '.worker_root // empty')"
+    root_id="$owned_id"
   else
-    root_rel="" root_local=""
+    root_local="$(rw_default_root_for_path "$dir")"
+    if root_rel="$(rw_root_rel "$root_local" 2>/dev/null)"; then
+      root_id="$(rw_root_id "$root_rel")"
+      [ -d "$root_local" ] && root_kind="$(rw_root_kind "$root_local")"
+      [ "$root_kind" = "git" ] || root_kind="plain"
+    else
+      root_rel="" root_local=""
+    fi
   fi
-fi
-
-# The pane's own endpoint's root, when that endpoint is listed in a record.
-src_root_id=""
-if [ -n "$src_json" ]; then
-  v="$(printf '%s' "$src_json" | jq -r '.root_id // empty')"
-  if [ -n "$v" ] && rw_owned_record_read "$v" 2>/dev/null | jq -e --arg e "$src_ep" '(.endpoints // []) | index($e)' >/dev/null 2>&1; then
-    src_root_id="$v"
+  # The pane's own endpoint's root, when that endpoint is listed in a record.
+  src_root_id=""
+  if [ -n "$src_json" ]; then
+    local v
+    v="$(printf '%s' "$src_json" | jq -r '.root_id // empty')"
+    if [ -n "$v" ] && rw_owned_record_read "$v" 2>/dev/null | jq -e --arg e "$src_ep" '(.endpoints // []) | index($e)' >/dev/null 2>&1; then
+      src_root_id="$v"
+    fi
   fi
-fi
+}
+resolve_owner
 
 # --- What the pane runs ---------------------------------------------------------
 # prog: self | shell | agent | editor. For an agent: provider, a_session,
@@ -210,11 +253,22 @@ elif [ "$src_kind" = "local" ]; then
   fi
 else
   probe_status=0
-  rw_worker_agent_probe "$src_worker" "$src_session" >"$work/probe" || probe_status=$?
-  if [ "$probe_status" -ne 0 ]; then
-    log_fail "source_unreachable"
-    rw_die "the remote this pane runs on cannot be reached, so nothing in it can move; nothing changed." 6
+  if [ "$src_known" = "true" ]; then
+    rw_worker_agent_probe "$src_worker" "$src_session" >"$work/probe" || probe_status=$?
+  else
+    probe_status=6
   fi
+  if [ "$probe_status" -ne 0 ]; then
+    # I4: only a release to this machine with --force goes on (below,
+    # under the lock); nothing in the pane can move.
+    if [ "$force" != "true" ]; then
+      log_fail "source_unreachable"
+      rw_die "the remote this pane runs on cannot be reached, so nothing in it can move; nothing changed ('rw switch --to local --force' releases the pane anyway)." 6
+    fi
+    prog="forced"
+  fi
+fi
+if [ "$src_kind" = "remote" ] && [ "$prog" != "forced" ] && [ "$self" != "true" ]; then
   sed '1,/^---$/d' "$work/probe" >"$work/probe.ps"
   pline="$(sed '/^---$/,$d' "$work/probe" | head -n 1)"
   rpane="$(printf '%s' "$pline" | cut -f2)"
@@ -222,6 +276,34 @@ else
   rastate="$(printf '%s' "$pline" | cut -f4)"
   rrec="$(printf '%s' "$pline" | cut -f5)"
   rpcmd="$(printf '%s' "$pline" | cut -f6)"
+  if [ -z "$rpane" ]; then
+    # Fix wave A, finding 2: the endpoint's session is not on its remote.
+    # During that remote's boot restore it is simply not back yet, and
+    # whatever ran in it (an agent the restore brings back) must not be
+    # mistaken for a bare shell and have its endpoint closed under it.
+    src_provider="$(printf '%s' "$src_json" | jq -r 'if .agent.state == "handed-off" then (.agent.provider // "coding") else (.agent.provider // empty) end' 2>/dev/null)"
+    if [ -n "$src_provider" ]; then
+      log_fail "source_session_missing_agent"
+      rw_die "this pane's session is missing on its remote, but it ran a $src_provider agent there; nothing changed. Wait for that remote to restore it and try again, or close the pane (prefix q) once its work is rescued." 1
+    fi
+    rstate_status=0
+    rstate="$(rw_worker_restore_state "$src_worker")" || rstate_status=$?
+    if [ "$rstate_status" -ne 0 ]; then
+      log_fail "source_unreachable"
+      rw_die "the remote this pane runs on cannot be reached, so nothing in it can move; nothing changed ('rw switch --to local --force' releases the pane anyway)." 6
+    fi
+    case "$rstate" in
+      ready) : ;;
+      "incomplete "*)
+        log_fail "source_restore_incomplete"
+        rw_die "this pane's session is missing on its remote, and $(rw_worker_server_explain "$src_worker" "$rstate"); nothing changed." 1
+        ;;
+      *)
+        log_fail "source_restoring"
+        rw_die "the remote this pane runs on is restoring its sessions (this pane's is not back yet); try again when it finishes. Nothing changed." 1
+        ;;
+    esac
+  fi
   live="$(rw_live_provider "$work/probe.ps" "$rppid")"
   if [ -n "$live" ]; then
     tool="$(printf '%s' "$rrec" | jq -r '.tool // empty' 2>/dev/null)"
@@ -303,6 +385,37 @@ gate_from() { # <worker>
     rw_warn "$provider version check failed (exit $status); continuing. $(cat "$work/versions.err")"
   fi
 }
+# Remote to another remote (fix wave A, finding 8): the session moves from
+# <src> to <dest>, so <dest>'s CLI is compared with <src>'s, not with this
+# machine's: it must not be older than the one that wrote the session. Each
+# `versions --worker` reports that remote's CLI (exit 3 only means it is
+# older than this machine's, which does not matter here).
+cli_of() { # <versions JSON> -- the remote CLI version in it
+  printf '%s' "$1" | jq -r 'if (.worker | type) == "object" then .worker.cli // empty else .worker // empty end' 2>/dev/null
+}
+gate_between() { # <src> <dest>
+  local out status=0 scli dcli
+  out="$("$ADAPTERS_DIR/$provider" versions --worker "$2" 2>"$work/versions.err" </dev/null)" || status=$?
+  if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    log_fail "agent_version_check_failed:$provider"
+    rw_die "the $provider version check on the destination remote failed (exit $status): $(cat "$work/versions.err"); nothing changed." 1
+  fi
+  dcli="$(cli_of "$out")"
+  status=0
+  out="$("$ADAPTERS_DIR/$provider" versions --worker "$1" 2>"$work/versions.err" </dev/null)" || status=$?
+  scli=""
+  [ "$status" -ne 0 ] && [ "$status" -ne 3 ] || scli="$(cli_of "$out")"
+  if [ -z "$dcli" ] || [ -z "$scli" ]; then
+    rw_warn "could not read the $provider CLI version on both remotes; continuing."
+    return 0
+  fi
+  if [ "$dcli" != "$scli" ] && [ "$(printf '%s\n%s\n' "$dcli" "$scli" | sort -V | tail -n 1)" = "$scli" ]; then
+    log_fail "agent_version_blocked:$provider"
+    rw_warn "the destination remote's $provider CLI ($dcli) is older than the one ($scli) on the remote that wrote this session; update it there and retry. Nothing changed."
+    exit 3
+  fi
+  [ "$dcli" = "$scli" ] || rw_warn "notice: the destination remote's $provider CLI ($dcli) is newer than the source's ($scli); proceeding."
+}
 
 local_agent_alive() { # <pane>
   local ppid
@@ -321,13 +434,53 @@ close_source_endpoint() {
   rw_worker_request_save "$src_worker"
 }
 
-# Owned roots this switch changes are locked (rw open, handoff and hand-back
-# take the same lock).
-[ -z "$owned_id" ] || [ "$dest" != "$owner_worker" ] || rw_root_lock_or_die "$owned_id" "rw switch"
-[ -z "$src_root_id" ] || rw_root_lock_or_die "$src_root_id" "rw switch"
+# lock_roots -- every root this switch touches is locked for the rest of
+# the run (rw open, handoff, hand-back, forget and reclaim take the same
+# lock), visit switches included, and a root with a background transfer in
+# flight is refused: the transfer's runner waits for idle agents WITHOUT the
+# lock, and a switch then could put a second writer on the same transcript
+# or leave an endpoint the transfer never sees (fix wave A, finding 3).
+lock_roots() {
+  local id
+  for id in "$root_id" "$src_root_id"; do
+    [ -n "$id" ] || continue
+    rw_root_lock_or_die "$id" "rw switch"
+    if rw_bg_job_live "$id"; then
+      refuse "a background transfer of $(tilde "$(jq -r '.root_local // empty' "$(rw_bg_dir)/$id/job.json" 2>/dev/null || true)" "$HOME_LOCAL") is running; switch this pane when it has finished."
+    fi
+  done
+}
+lock_roots
+# Under the lock: the records as they are now.
+resolve_owner
+lock_roots
 
 prog_label="$prog"
 [ "$prog" != "agent" ] || prog_label="agent:$provider"
+
+# =============================================================================
+# Release to this machine while the pane's remote is unreachable (I4)
+# =============================================================================
+if [ "$prog" = "forced" ]; then
+  local_dir="$(rw_local_existing_dir "$dir")"
+  if ! rw_release_pane "$pane_id" "$local_dir"; then
+    log_fail "release_failed"
+    rw_die "could not give this pane a local shell; nothing changed." 1
+  fi
+  # The endpoint stays registered with a pending close: the next contact
+  # with that remote (rw_reconcile_pending) closes its session and whatever
+  # still runs in it. It leaves its record now, so a hand-back or reclaim
+  # never looks for it.
+  rw_write_json_atomic "$(rw_endpoint_file "$src_ep")" "$(printf '%s' "$src_json" | jq -c --arg now "$(rw_now_iso)" '
+    .pending = {action: "close", reason: "released to this machine while the remote was unreachable", at: $now}
+    | .updated_at = $now')"
+  [ -z "$src_root_id" ] || rw_record_remove_endpoint "$src_root_id" "$src_ep"
+  rw_refresh_indicators --pane "$pane_id"
+  rw_log_event "switch" "$src_ep" "" "$(rw_elapsed_ms "$start_ts")" "success" "from=remote to=local program=forced dir=$dir pending_close=1"
+  printf 'rw: this pane runs on this machine again, in %s; its remote could not be reached, so anything still running there is stopped when that remote is next reached.\n' \
+    "$(tilde "$local_dir" "$HOME_LOCAL")"
+  exit 0
+fi
 
 # =============================================================================
 # To this machine
@@ -427,6 +580,13 @@ worker_home="$(printf '%s' "$preflight_json" | jq -r '.home')"
 identity="$(printf '%s' "$preflight_json" | jq -r '.hostname // empty')"
 [ -n "$worker_home" ] && [ "$worker_home" != "null" ] || rw_die "preflight did not report the remote home directory; nothing changed." 1
 
+# Pending actions for that remote run first (a forget or reclaim recorded
+# while it was unreachable may remove the very record that would make this
+# pane owned); then the owner is decided from what is left (finding 4).
+rw_reconcile_pending "$dest" "$worker_home"
+resolve_owner
+lock_roots
+
 if [ -n "$owned_id" ] && [ "$owner_worker" = "$dest" ]; then
   kind="owned"
   worker_root="${rec_worker_root:-${worker_home%/}/$root_rel}"
@@ -456,8 +616,6 @@ dest_path() {
   rw_map_home_path "$1" "$HOME_LOCAL" "$worker_home"
 }
 
-rw_reconcile_pending "$dest" "$worker_home"
-
 unreachable() {
   log_fail "unreachable"
   rw_die "that remote cannot be reached; nothing changed." 6
@@ -467,8 +625,7 @@ if [ "$prog" = "agent" ]; then
   a_exist="$(rw_worker_existing_dir "$dest" "$a_dest")" || unreachable
   [ "$a_exist" = "$a_dest" ] ||
     refuse "the agent's directory $(tilde "$a_dest" "$worker_home") does not exist on that remote; nothing changed."
-  gate_to "$dest"
-  [ "$src_kind" = "local" ] || gate_from "$src_worker"
+  if [ "$src_kind" = "local" ]; then gate_to "$dest"; else gate_between "$src_worker" "$dest"; fi
 fi
 existing="$(rw_worker_existing_dir "$dest" "$remote_path")" || unreachable
 if [ "$existing" != "$remote_path" ]; then
@@ -587,7 +744,13 @@ fi
 printf -v loop_cmd '%q %q --fresh' "$SCRIPT_DIR/attach-loop.sh" "$new_ep"
 if ! tmux respawn-pane -k -t "$pane_id" -c "$(rw_local_existing_dir "$dir")" "$loop_cmd" 2>/dev/null; then
   if [ "$prog" = "agent" ]; then
-    # The agent already runs on the remote; the endpoint stays registered.
+    # The agent already runs on the remote and the source copy is stopped:
+    # the new endpoint stays registered and the pane stays bound to it (rw
+    # open --pane attaches it). A remote source endpoint is closed now --
+    # nothing runs in it any more, and nothing else would ever close it
+    # (fix wave A, finding 7); its old attach loop sees the pane rebound and
+    # gives way to a local shell.
+    [ "$src_kind" = "local" ] || close_source_endpoint
     log_fail "respawn_failed_after_move"
     rw_die "the $provider agent now runs on the remote, but the attach loop did not start in pane $pane_id; 'rw open --pane $pane_id' attaches it." 1
   fi

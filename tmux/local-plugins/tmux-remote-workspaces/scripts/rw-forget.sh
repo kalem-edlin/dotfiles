@@ -57,6 +57,10 @@ trap 'rw_root_unlock_all' EXIT
 record="$(rw_owned_record_read "$root_id" 2>/dev/null || true)"
 rec_worker=""
 [ -n "$record" ] && rec_worker="$(printf '%s' "$record" | jq -r '.worker')"
+# For the off-owner flags (CS3): a pending forget or a removed record changes
+# who owns the root's panes.
+root_local="$(printf '%s' "$record" | jq -r '.root_local // empty' 2>/dev/null)"
+[ -n "$root_local" ] || root_local="$(rw_physical_path "$HOME")/$root_rel"
 
 workers=()
 if [ -n "$only_worker" ]; then
@@ -105,6 +109,7 @@ for w in "${workers[@]}"; do
       rw_write_json_atomic "$held" "$(jq -nc --arg w "$w" --arg id "$root_id" --arg rel "$root_rel" --argjson p "$pending" \
         '{worker: $w, root_id: $id, root_rel: $rel, worker_root: "", pending: $p}')"
     fi
+    rw_refresh_indicators --root "$root_local"
     rw_warn "rw forget: '$w' is unreachable; its copy of '$root_rel' will be deleted on the next contact."
     rw_log_event "forget" "" "$w" "$(rw_elapsed_ms "$start_ts")" "pending" "root=$root_rel"
     continue
@@ -126,6 +131,7 @@ for w in "${workers[@]}"; do
     eps=($(rw_owned_record_read "$root_id" 2>/dev/null | jq -r '.endpoints[]?'))
     rw_close_root_endpoints "$root_id" "forget" ${eps[@]+"${eps[@]}"}
     rw_owned_record_remove "$root_id"
+    rw_refresh_indicators --root "$root_local"
   fi
   rw_held_unmark "$w" "$root_id"
   rw_forget_local_backups "$root_id"

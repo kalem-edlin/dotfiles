@@ -3,11 +3,14 @@
 # the host of the pane it was invoked from, like rw-split.sh does for splits:
 #
 #   remote pane (its attach loop runs: @remote-host, owned or off-owner)
-#       -> a new window in the same session whose pane runs `rw switch` to the
-#          same remote, in the source pane's live directory (rw_pane_dir): an
-#          owned endpoint when that remote owns the directory (the `rw open`
-#          path), a visit endpoint otherwise. If the remote cannot be reached
-#          the window keeps a local shell.
+#       -> a new window in the same session, created AT ONCE, whose pane runs
+#          `rw switch --dir-of <source pane>` to the same remote: that switch
+#          asks the remote for the source pane's live directory (one bounded
+#          ssh, inside the new pane) and makes an owned endpoint when that
+#          remote owns the directory (the `rw open` path), a visit endpoint
+#          otherwise. The window starts locally in the title-based directory
+#          (no ssh), and keeps a local shell if the remote cannot be reached.
+#          The key binding never waits on ssh (fix wave A, finding 9).
 #   local pane
 #       -> `new-window -c "#{pane_current_path}"`, as the binding did before.
 #
@@ -35,8 +38,8 @@ endpoint="$(rw_pane_get "$pane_id" @rw-endpoint)"
 worker="$(rw_pane_get "$pane_id" @remote-host)"
 
 if [ -n "$endpoint" ] && [ -n "$worker" ]; then
-  dir="$(rw_pane_dir "$pane_id" --live)"
-  cmd="$(printf '%q switch --to %q --dir %q' "$SCRIPT_DIR/rw" "$worker" "$dir")"
+  dir="$(rw_pane_dir "$pane_id")"
+  cmd="$(printf '%q switch --to %q --dir-of %q' "$SCRIPT_DIR/rw" "$worker" "$pane_id")"
   tmux new-window ${target[@]+"${target[@]}"} -c "$(rw_local_existing_dir "$dir")" \
     "$cmd; exec \${SHELL:-/bin/sh} -l"
   exit 0

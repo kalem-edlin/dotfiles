@@ -2,9 +2,12 @@
 # `rw bg handoff|handback` -- a background transfer (contract CX3,
 # docs/tasks/remote-owned-directories.md).
 #
-#   rw bg handoff  [--worker <alias>] --pane <pane-id> [--wait-idle <seconds>]
-#   rw bg handback --pane <pane-id> [--wait-idle <seconds>]
+#   rw bg handoff  [--worker <alias>] --pane <pane-id> [--root <path>] [--wait-idle <seconds>]
+#   rw bg handback --pane <pane-id> [--root <path>] [--wait-idle <seconds>]
 #
+# --root (fix wave A, I1): that root, validated the same way, instead of the
+# one resolved from the pane (the picker passes the root of a remote pane's
+# live directory); the runner passes it on to `rw handoff/handback --root`.
 # A cheap synchronous preflight (the pane exists, its root resolves, the
 # worker is known or the root is worker-owned, this is not the worker side,
 # nothing else is transferring that root), then exit 0 at once. The transfer
@@ -111,18 +114,20 @@ bg_spawn() {
 # ---------------------------------------------------------------------------
 
 front() {
-  local verb="$1" worker="" pane="" wait_idle=600
+  local verb="$1" worker="" pane="" wait_idle=600 root_arg=""
   shift
   while [ $# -gt 0 ]; do
     case "$1" in
       --worker) worker="${2:-}"; shift 2 || usage ;;
       --pane) pane="${2:-}"; shift 2 || usage ;;
+      --root) root_arg="${2:-}"; shift 2 || usage ;;
       --wait-idle) wait_idle="${2:-}"; shift 2 || usage ;;
       -h | --help) usage ;;
       *) rw_die "rw bg $verb: unknown argument: $1" 64 ;;
     esac
   done
   [ -n "$pane" ] || rw_die "rw bg $verb: --pane is required" 64
+  case "$root_arg" in '' | /*) : ;; *) rw_die "rw bg $verb: --root takes an absolute path" 64 ;; esac
   case "$wait_idle" in '' | *[!0-9]*) rw_die "rw bg $verb: --wait-idle takes a number of seconds" 64 ;; esac
   [ "$verb" = handoff ] || [ -z "$worker" ] || rw_die "rw bg handback: --worker is not taken (the ownership record names the worker)" 64
   rw_need_jq
@@ -139,14 +144,26 @@ front() {
 
   local root_id="" root_rel root_local record
   if [ "$verb" = handoff ]; then
-    [ -n "$cwd" ] || rw_die "rw bg handoff: cannot read the directory of pane $pane." 1
-    if root_id="$(rw_owned_root_for_path "$cwd")"; then
+    # --root (I1): that directory is the root, validated as one resolved
+    # from the pane would be (a remote pane's own cwd here is only where its
+    # attach loop started).
+    local from="$cwd"
+    if [ -n "$root_arg" ]; then
+      [ -d "$root_arg" ] || rw_die "rw bg handoff: '$root_arg' is not a directory on this machine." 7
+      from="$(rw_physical_path "$root_arg")"
+    fi
+    [ -n "$from" ] || rw_die "rw bg handoff: cannot read the directory of pane $pane." 1
+    if root_id="$(rw_owned_root_for_path "$from")"; then
       record="$(rw_owned_record_read "$root_id")"
       rw_die "rw bg handoff: $(tilde "$(printf '%s' "$record" | jq -r .root_local)") is already remote on '$(printf '%s' "$record" | jq -r .worker)'; 'rw bg handback --pane <its pane>' (or prefix e there) brings it back." 7
     fi
     local top kind nested
-    top="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)"
-    root_local="$(rw_physical_path "${top:-$cwd}")"
+    if [ -n "$root_arg" ]; then
+      top=""
+    else
+      top="$(git -C "$from" rev-parse --show-toplevel 2>/dev/null || true)"
+    fi
+    root_local="$(rw_physical_path "${top:-$from}")"
     root_rel="$(rw_root_rel "$root_local")" ||
       rw_die "rw bg handoff: '$root_local' is not inside your home directory (or is the home directory itself); only directories under ~ can be handed off." 7
     root_id="$(rw_root_id "$root_rel")"
@@ -170,13 +187,21 @@ front() {
     fi
     rw_worker_known "$worker" || rw_die "rw bg handoff: worker '$worker' is not declared in config.json" 64
   else
-    root_id="$(rw_pane_get "$pane" @rw-root-id)"
-    if [ -z "$root_id" ]; then
-      local ep
-      ep="$(rw_pane_get "$pane" @rw-endpoint)"
-      [ -n "$ep" ] && root_id="$(rw_read_endpoint "$ep" 2>/dev/null | jq -r '.root_id // empty')"
+    if [ -n "$root_arg" ]; then
+      # --root (I1): that root's record, whatever pane asks.
+      local rel
+      rel="$(rw_root_rel "$(rw_physical_path "$root_arg")")" ||
+        rw_die "rw bg handback: '$root_arg' is not inside your home directory." 7
+      root_id="$(rw_root_id "$rel")"
+    else
+      root_id="$(rw_pane_get "$pane" @rw-root-id)"
+      if [ -z "$root_id" ]; then
+        local ep
+        ep="$(rw_pane_get "$pane" @rw-endpoint)"
+        [ -n "$ep" ] && root_id="$(rw_read_endpoint "$ep" 2>/dev/null | jq -r '.root_id // empty')"
+      fi
+      [ -n "$root_id" ] || { [ -n "$cwd" ] && root_id="$(rw_owned_root_for_path "$cwd" || true)"; }
     fi
-    [ -n "$root_id" ] || { [ -n "$cwd" ] && root_id="$(rw_owned_root_for_path "$cwd" || true)"; }
     record=""
     [ -n "$root_id" ] && record="$(rw_owned_record_read "$root_id" 2>/dev/null || true)"
     if [ -z "$record" ] || [ "$(printf '%s' "$record" | jq -r .owner)" != worker ]; then

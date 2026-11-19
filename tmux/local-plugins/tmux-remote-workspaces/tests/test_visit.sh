@@ -71,17 +71,22 @@ mkdir -p "$W/Developer/vproj/data/sub"
 
 # --- K: prefix c and splits follow the pane host ------------------------------------------
 : >"$FAKE_TMUX_LOG"
+: >"$FAKE_SSH_LOG"
 "$RW_PLUGIN/scripts/rw-new-window.sh" %1
 nw="$(grep '^new-window' "$FAKE_TMUX_LOG")"
 check "K: prefix c on a visit pane: a new window in the pane's session" grep -q '^new-window -t \$1: ' <<<"$nw"
-check "K: ... whose pane switches to the same remote, in the live directory" \
-  grep -qF "$RW_PLUGIN/scripts/rw switch --to fakeworker --dir $proj/data/sub; exec \${SHELL:-/bin/sh} -l" <<<"$nw"
-check "K: ... starting from the nearest local directory" grep -qF -- "-c $proj/data " <<<"$nw"
+check "K: ... whose pane switches to the same remote, in the source pane's live directory" \
+  grep -qF "$RW_PLUGIN/scripts/rw switch --to fakeworker --dir-of %1; exec \${SHELL:-/bin/sh} -l" <<<"$nw"
+check "K: ... starting from the nearest local directory of its title" grep -qF -- "-c $proj/data " <<<"$nw"
+check "K: ... and the key never waited on ssh (fix wave A, finding 9)" test ! -s "$FAKE_SSH_LOG"
 : >"$FAKE_TMUX_LOG"
 "$RW_PLUGIN/scripts/rw-split.sh" v %1
 sp="$(grep '^split-window' "$FAKE_TMUX_LOG")"
 check "K: a split of a visit pane switches to the same remote too" \
-  grep -qF "split-window -v -c $proj/data -t %1 $RW_PLUGIN/scripts/rw switch --to fakeworker --dir $proj/data/sub; exec" <<<"$sp"
+  grep -qF "split-window -v -c $proj/data -t %1 $RW_PLUGIN/scripts/rw switch --to fakeworker --dir-of %1; exec" <<<"$sp"
+check "K: ... with no ssh before the pane exists" test ! -s "$FAKE_SSH_LOG"
+check "K: prefix e acts on the pane the key was pressed in" \
+  grep -q "^bind e run-shell -b \"tmux display-popup -c '#{client_name}' .*rw-picker.sh pick '#{pane_id}'" "$RW_PLUGIN/../../tmux.reset.conf"
 : >"$FAKE_TMUX_LOG"
 "$RW_PLUGIN/scripts/rw-split.sh" h %3
 check "K: a split of a local pane stays local" grep -qx "split-window -h -l 60 -c $proj -t %3" "$FAKE_TMUX_LOG"

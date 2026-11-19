@@ -63,6 +63,8 @@ fi
 endpoints=($(printf '%s' "$record" | jq -r '.endpoints[]?'))
 
 released=0
+# Only the panes of the record's own endpoints: a visit pane of this root on
+# another remote is not the owner's and stays where it is (fix wave A).
 bound="$(rw_root_bound_panes "$root_id" ${endpoints[@]+"${endpoints[@]}"})"
 agents=""
 while IFS="$RW_TAB" read -r pid ep; do
@@ -83,6 +85,8 @@ now="$(rw_now_iso)"
 rw_owned_record_write "$root_id" "$(printf '%s' "$record" | jq -c --arg now "$now" '
   .owner = "focus" | .since = $now | .stale_worker = true
   | .pending = {action: "reconcile", reason: "reclaimed while the remote was unreachable", at: $now}')"
+# The root's owner changed (CS3). Best effort.
+rw_refresh_indicators --root "$root_local"
 rw_log_event "reclaim" "" "$worker" "" "success" "root=$root_rel panes=$released"
 
 printf 'rw: %s is local again from its frozen copy (%d pane(s) released). Remote work since the handoff stays on the remote copy, which is now stale.\n' "$root_rel" "$released"

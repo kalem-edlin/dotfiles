@@ -144,6 +144,8 @@ target="${target#=}"
 case "$cmd" in
   list-panes)
     if [ -n "$target" ] && [ "${target#rw-}" != "$target" ]; then
+      # $FAKE_REMOTE_ABSENT=1: the endpoint session is not on the remote.
+      [ "${FAKE_REMOTE_ABSENT:-0}" = 1 ] && exit 1
       case "$fmt" in *pane_pid*) [ -n "${FAKE_REMOTE_LASTWRITE:-}" ] && echo "last remote write" >>"$FAKE_REMOTE_LASTWRITE" ;; esac
       expand "$fmt" "pane_id=%90	pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}	pane_pid=999999"
     elif [ "$all" = 1 ] && [ -n "$table" ]; then
@@ -163,7 +165,10 @@ case "$cmd" in
     fi
     # A remote endpoint session's pane: its cwd is $FAKE_REMOTE_CWD.
     if [ "${target#rw-}" != "$target" ]; then
-      [ -n "${FAKE_REMOTE_CWD:-}" ] && expand "$fmt" "pane_current_path=$FAKE_REMOTE_CWD"
+      # $FAKE_REMOTE_HANG: the remote does not answer for that long (a dead
+      # ControlMaster).
+      [ -n "${FAKE_REMOTE_HANG:-}" ] && sleep "$FAKE_REMOTE_HANG"
+      [ -n "${FAKE_REMOTE_CWD:-}" ] && expand "$fmt" "pane_current_path=$FAKE_REMOTE_CWD	pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}"
       exit 0
     fi
     l="$(line_of "$target")"
@@ -200,6 +205,8 @@ case "$cmd" in
   respawn-pane)
     # $FAKE_ON_RESPAWN: a command run at each respawn (tests observe state then).
     [ -n "${FAKE_ON_RESPAWN:-}" ] && bash -c "$FAKE_ON_RESPAWN" >/dev/null 2>&1
+    # $FAKE_RESPAWN_FAIL=1: respawn-pane fails (the pane is left as it was).
+    [ "${FAKE_RESPAWN_FAIL:-0}" = 1 ] && exit 1
     [ -n "$(line_of "$target")" ] && put "$target" pane_current_command bash
     ;;
   list-sessions)
