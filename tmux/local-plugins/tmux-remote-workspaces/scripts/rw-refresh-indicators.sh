@@ -34,6 +34,15 @@
 # It never touches ssh and reads the records with at most one jq, so the
 # chpwd hook can call it on every cd.
 #
+# Runs that compute it are serialized by one mkdir lock (rw_with_lock
+# "rw-indicators", ~5 s stale guard), and each reads the panes and the
+# records only once it holds the lock. Every change that can flip the flag
+# (a cd, a switch, a hand-off) starts a run after the change, so the last
+# run to take the lock reads the newest state and writes last: concurrent
+# chpwd / attach-loop / handoff runs can no longer leave a stale value
+# (last write wins, but from a read made before another run's write).
+# Uncontended, the lock costs one mkdir and one rmdir.
+#
 # Transfers: every bg/<root_id>/ job whose runner is alive sets the global
 # options
 #   @rw-transfer        "handoff <root_rel>" / "handback <root_rel>", several
@@ -204,6 +213,36 @@ rw_ind_refresh_root() {
   done < <(tmux list-panes -a -F "$RW_IND_FMT" 2>/dev/null || true)
 }
 
+# rw_ind_refresh_all -- every pane: @remote-host from the process tree,
+# then @rw-off-owner.
+rw_ind_refresh_all() {
+  local line processes pane_id cwd endpoint pane_pid worker host
+  rw_ind_load_roots
+  processes="$(ps axo pid=,ppid=,command= 2>/dev/null || true)"
+  while IFS= read -r line; do
+    rw_ind_split "$line"
+    pane_id="$RW_F_PANE" cwd="$RW_F_CWD" endpoint="$RW_F_EP"
+    [ -n "$pane_id" ] || continue
+    pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
+    worker="$(rw_pane_get "$pane_id" @rw-worker)"
+    if [ -n "$pane_pid" ] && [ -n "$worker" ] &&
+      printf '%s\n' "$processes" |
+        rw_ps_tree_matches '(^|/)attach-loop\.sh([[:space:]]|$)' "$pane_pid"; then
+      rw_pane_set "$pane_id" @remote-host "$worker"
+      rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
+      host="$worker"
+    else
+      rw_pane_unset "$pane_id" @remote-host
+      rw_pane_unset "$pane_id" @workspace-resurrect-skip
+      host=""
+    fi
+    rw_ind_set_off_owner "$pane_id" "$host" "$(rw_ind_pane_dir "$cwd" "$host" "$endpoint")"
+  done < <(tmux list-panes -a -F "$RW_IND_FMT" 2>/dev/null || true)
+}
+
+# The lock every off-owner computation runs under (see the header).
+RW_IND_LOCK=rw-indicators
+
 case "${1:-}" in
   --transfers)
     refresh_transfers
@@ -211,38 +250,17 @@ case "${1:-}" in
     ;;
   --pane)
     [ -n "${2:-}" ] || rw_die "rw-refresh-indicators: --pane needs a pane id" 64
-    rw_ind_refresh_pane "$2"
+    rw_with_lock "$RW_IND_LOCK" rw_ind_refresh_pane "$2"
     exit 0
     ;;
   --root)
     [ -n "${2:-}" ] || rw_die "rw-refresh-indicators: --root needs a path" 64
-    rw_ind_refresh_root "$2"
+    rw_with_lock "$RW_IND_LOCK" rw_ind_refresh_root "$2"
     exit 0
     ;;
   "") ;;
   *) rw_die "rw-refresh-indicators: unknown argument: $1" 64 ;;
 esac
 
-rw_ind_load_roots
-processes="$(ps axo pid=,ppid=,command= 2>/dev/null || true)"
-while IFS= read -r line; do
-  rw_ind_split "$line"
-  pane_id="$RW_F_PANE" cwd="$RW_F_CWD" endpoint="$RW_F_EP"
-  [ -n "$pane_id" ] || continue
-  pane_pid="$(tmux display-message -pt "$pane_id" -F '#{pane_pid}' 2>/dev/null || true)"
-  worker="$(rw_pane_get "$pane_id" @rw-worker)"
-  if [ -n "$pane_pid" ] && [ -n "$worker" ] &&
-    printf '%s\n' "$processes" |
-      rw_ps_tree_matches '(^|/)attach-loop\.sh([[:space:]]|$)' "$pane_pid"; then
-    rw_pane_set "$pane_id" @remote-host "$worker"
-    rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
-    host="$worker"
-  else
-    rw_pane_unset "$pane_id" @remote-host
-    rw_pane_unset "$pane_id" @workspace-resurrect-skip
-    host=""
-  fi
-  rw_ind_set_off_owner "$pane_id" "$host" "$(rw_ind_pane_dir "$cwd" "$host" "$endpoint")"
-done < <(tmux list-panes -a -F "$RW_IND_FMT" 2>/dev/null || true)
-
+rw_with_lock "$RW_IND_LOCK" rw_ind_refresh_all
 refresh_transfers

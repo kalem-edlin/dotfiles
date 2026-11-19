@@ -3,13 +3,19 @@
 # menu for the focused (origin) pane (docs/tasks/remote-owned-directories.md,
 # "Pane host switching", S1, D19-D20, D26, CS5).
 #
-# The pane's directory is resolved first (rw_pick_pane_dir): a local pane's
-# pane_current_path; a remote pane's live worker cwd (its pane_title, when
-# that is an absolute path) mapped back to this machine through the
-# endpoint's worker root / home, else the endpoint's focus path. Its root is
-# the enclosing worker-owned root, else rw_default_root_for_path. The owner
-# host is that record's worker, else this machine; the pane host is
-# @remote-host, else this machine.
+# The pane's directory is resolved first (rw_pick_context): a local pane's
+# pane_current_path; a remote pane's live worker cwd and foreground command
+# from rw_pane_remote_probe (one ssh with a HARD deadline, the status
+# timeout), mapped back to this machine; when the remote does not answer in
+# time, the title-based directory (rw_pane_dir without --live) and the pane
+# is marked "remote unreachable". Owner and root: rw_owner_for_path (the
+# chip's rules: the longest enclosing worker-owned root, a pending forget
+# and another machine's mirror not counting), else rw_default_root_for_path
+# of the directory, or of its nearest existing parent when the directory
+# exists only on the remote (then only a root that encloses it: a
+# worker-owned record or a git toplevel; otherwise no root, and no hand-off
+# row). The owner host is that record's worker, else this machine; the pane
+# host is @remote-host, else this machine.
 #
 # The menu (fzf, the worker chooser's look), its header naming the directory,
 # the root, the pane host and the owner host:
@@ -20,10 +26,18 @@
 #     whose destination is not the owner warns that the agent would work on
 #     a copy that does not own the directory.
 #   - the full-transfer row last. A worker-owned root: "hand back <root> to
-#     this machine" (`rw bg handback --pane <origin>`), from any pane, local
-#     or remote. A root this machine owns: "hand off <root> to remote", then
-#     the worker chooser, skipped when exactly one worker is configured
-#     (`rw bg handoff --worker <alias> --pane <origin>`).
+#     this machine" (`rw bg handback --pane <origin> --root <root>`), from
+#     any pane, local or remote. A root this machine owns: "hand off <root>
+#     to remote", then the worker chooser, skipped when exactly one worker
+#     is configured (`rw bg handoff --worker <alias> --pane <origin> --root
+#     <root>`). --root is always the root the label names, so a pane that
+#     cd'd out of the root it was opened in moves the root it is in now.
+#   - a remote pane whose remote is unreachable (or no longer in
+#     config.json) gets no soft-switch row (each needs that remote) but
+#     "release this pane to this machine (remote unreachable)" first: `rw
+#     switch --pane <origin> --to local --force`. A transfer row that needs
+#     that remote (a hand-back to it, a hand-off with no other worker) is
+#     left out too.
 # Choosing a row is the confirmation; there is no y/n. Esc moves nothing.
 #
 # The picker runs only `rw switch`, `rw bg handoff` and `rw bg handback`
@@ -46,7 +60,8 @@
 # client), so rw_dialog cannot be used here.
 #
 # Modes (self-invocations; the binding only ever calls `pick`):
-#   pick [pane]        act on the focused pane (or <pane>)
+#   pick [pane]        act on <pane> (the binding passes #{pane_id}); with
+#                      no pane, the popup client's active pane
 #   rows <pane>        print the menu rows (key<TAB>label<TAB>status<TAB>note)
 #   header <pane>      print the menu header
 #   probe-rows <file>  the rows in <file> with live reachability filled in
@@ -61,7 +76,8 @@
 # chooser, typed text that matches no listed worker is passed through as an
 # alias on enter (--print-query); rw rejects aliases not in config.json.
 #
-# Test seams: RW_PICKER_RW_BIN (the rw to run), RW_PICKER_FZF (the fzf).
+# Test seams: RW_PICKER_RW_BIN (the rw to run), RW_PICKER_FZF (the fzf),
+# RW_PICKER_STUBS (a file sourced after roots.sh: stand-ins for its helpers).
 
 set -uo pipefail
 
@@ -71,6 +87,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/roots.sh"
 # shellcheck source=../libexec/rw-dialogs.sh
 source "$SCRIPT_DIR/../libexec/rw-dialogs.sh"
+if [ -n "${RW_PICKER_STUBS:-}" ]; then
+  # shellcheck source=/dev/null
+  source "$RW_PICKER_STUBS"
+fi
 
 mode="${1:-pick}"
 RW_BIN="${RW_PICKER_RW_BIN:-$SCRIPT_DIR/rw}"
@@ -201,38 +221,71 @@ rw_pick_failure_dialog() {
 
 # --- The pane: directory, root, hosts ---------------------------------------------
 
-# rw_pick_pane_dir <pane> -- the pane's directory on this machine (S1).
-# The shared resolver (rw_pane_dir in roots.sh, X1) with --live: a remote
-# pane's pane_title can lag a worker-side cd by more than a minute (hidden
-# sessions have status off), so its current directory is asked of the
-# worker first (one ssh over the ControlMaster, bounded by the status
-# timeout), then the title, then the endpoint's focus path. The menu and
-# `rw switch --dir` therefore act on the same directory.
-rw_pick_pane_dir() { rw_pane_dir "$1" --live; }
-
 # rw_pick_context <pane> -- resolves the pane once into:
-#   P_PANE P_HOST (alias, or "" for this machine) P_DIR P_ROOT P_ROOT_ID
-#   (worker-owned record, or "") P_OWNER (alias, or "") P_AGENT (claude|pi
-#   or "") P_EDITOR (nvim|vim|vi or "") P_ROOT_OK (1 when the root may be
-#   handed off: under ~, not ~) P_ROOT_PANES (panes that move with a
-#   transfer) P_ROOT_EDITORS (editors among them)
+#   P_PANE P_HOST (alias, or "" for this machine) P_DIR P_ROOT (may be ""
+#   when the directory exists only on the remote) P_ROOT_ID (worker-owned
+#   record, or "") P_OWNER (alias, or "") P_AGENT (claude|pi or "")
+#   P_EDITOR (nvim|vim|vi or "", local or remote) P_ROOT_OK (1 when the root
+#   may be handed off: under ~, not ~) P_ROOT_PANES (panes that move with a
+#   transfer) P_ROOT_EDITORS (editors among them) P_UNREACHABLE ("",
+#   "unreachable", or "unconfigured" when @remote-host is not in
+#   config.json) P_REMOTE_ONLY (1 when neither the directory nor a root
+#   enclosing it exists on this machine)
 rw_pick_context() {
-  local pane="$1" record kind pid cmd panes
+  local pane="$1" line="" rc kind pid cmd="" panes eps base
   P_PANE="$pane"
   P_HOST="$(rw_pane_get "$pane" @remote-host)"
-  P_DIR="$(rw_pick_pane_dir "$pane")"
-  P_ROOT_ID="" P_OWNER="" P_ROOT="" P_ROOT_OK=0 P_ROOT_PANES=0 P_ROOT_EDITORS=0
-  if [ -n "$P_DIR" ] && P_ROOT_ID="$(rw_owned_root_for_path "$P_DIR")"; then
-    record="$(rw_owned_record_read "$P_ROOT_ID" 2>/dev/null || true)"
-    P_ROOT="$(printf '%s' "$record" | jq -r '.root_local // empty' 2>/dev/null)"
-    P_OWNER="$(printf '%s' "$record" | jq -r '.worker // empty' 2>/dev/null)"
-    # shellcheck disable=SC2046 # endpoint ids are fixed-format hex
-    P_ROOT_PANES="$(rw_root_bound_panes "$P_ROOT_ID" $(printf '%s' "$record" | jq -r '.endpoints[]?' 2>/dev/null) | grep -c . || true)"
+  P_DIR="" P_UNREACHABLE="" P_REMOTE_ONLY=0
+  if [ -n "$P_HOST" ]; then
+    if ! rw_pick_worker_aliases | grep -qxF -- "$P_HOST"; then
+      P_UNREACHABLE=unconfigured # never ssh to an alias config.json dropped
+    else
+      # One ssh with a hard deadline (I3): the live cwd (a pane_title can
+      # lag a worker-side cd by over a minute) and the foreground command.
+      line="$(rw_pane_remote_probe "$pane" 2>/dev/null)"
+      rc=$?
+      case "$rc" in
+        0)
+          P_DIR="${line%%$'\t'*}"
+          case "$line" in *$'\t'*) cmd="${line#*$'\t'}" ;; esac
+          ;;
+        6) P_UNREACHABLE=unreachable ;;
+      esac
+    fi
   else
-    P_ROOT_ID=""
+    cmd="$(tmux display-message -pt "$pane" -F '#{pane_current_command}' 2>/dev/null || true)"
+  fi
+  # The title, else the endpoint's focus path, else pane_current_path.
+  [ -n "$P_DIR" ] || P_DIR="$(rw_pane_dir "$pane")"
+
+  P_ROOT_ID="" P_OWNER="" P_ROOT="" P_ROOT_OK=0 P_ROOT_PANES=0 P_ROOT_EDITORS=0
+  if [ -n "$P_DIR" ] && line="$(rw_owner_for_path "$P_DIR" 2>/dev/null)" && [ -n "$line" ]; then
+    IFS=$'\t' read -r P_ROOT_ID P_OWNER P_ROOT <<<"$line"
+    # The panes a hand-back moves: those bound to one of the record's
+    # endpoints. Not @rw-root-id alone: a visit pane on another worker
+    # carries it too, and stays where it is.
+    eps="$(rw_owned_record_read "$P_ROOT_ID" 2>/dev/null | jq -r '.endpoints[]?' 2>/dev/null | tr '\n' ' ')"
+    P_ROOT_PANES="$(tmux list-panes -a -F '#{@rw-endpoint}' 2>/dev/null |
+      awk -v eps="$eps" 'BEGIN { n = split(eps, e, " "); for (i = 1; i <= n; i++) want[e[i]] = 1 }
+        $1 != "" && ($1 in want) { c++ } END { print c + 0 }')"
   fi
   if [ -z "$P_ROOT" ] && [ -n "$P_DIR" ]; then
-    P_ROOT="$(rw_default_root_for_path "$P_DIR")"
+    if [ -d "$P_DIR" ]; then
+      P_ROOT="$(rw_default_root_for_path "$P_DIR")"
+    else
+      # Only on the remote (a remote pane cd'd into something this machine
+      # lacks): the root is one that exists here AND encloses it, a record
+      # or a git toplevel above the nearest existing parent. Never that
+      # parent itself (a hand-off of ~/Developer for ~/Developer/new) nor the
+      # missing directory.
+      base="$(rw_local_existing_dir "$P_DIR")"
+      if rw_owned_root_for_path "$base" >/dev/null 2>&1 ||
+        git -C "$base" rev-parse --show-toplevel >/dev/null 2>&1; then
+        P_ROOT="$(rw_default_root_for_path "$base")"
+      else
+        P_REMOTE_ONLY=1
+      fi
+    fi
   fi
   if [ -z "$P_OWNER" ] && [ -n "$P_ROOT" ] && rw_root_rel "$P_ROOT" >/dev/null 2>&1; then
     P_ROOT_OK=1
@@ -256,10 +309,15 @@ rw_pick_context() {
       [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && P_AGENT="$kind"
     fi
   fi
-  if [ -z "$P_HOST" ]; then
-    cmd="$(tmux display-message -pt "$pane" -F '#{pane_current_command}' 2>/dev/null || true)"
-    case "$cmd" in nvim | vim | vi) P_EDITOR="$cmd" ;; esac
-  fi
+  # A local pane's pane_current_command, a remote pane's from the probe.
+  case "$cmd" in nvim | vim | vi) P_EDITOR="$cmd" ;; esac
+  return 0
+}
+
+# rw_pick_other_worker -- true when a worker other than the pane's own is
+# configured (a hand-off that need not go to an unreachable pane host).
+rw_pick_other_worker() {
+  rw_pick_worker_aliases | grep -qvxF -- "$P_HOST"
 }
 
 # --- The menu -----------------------------------------------------------------
@@ -272,12 +330,20 @@ rw_pick_context() {
 rw_pick_rows() {
   local -a keys=() labels=() notes=() dests=()
   local d w i width=0 label note status
-  # Destinations: every host but the pane's own, the owner first.
-  [ "${P_OWNER:-local}" != "${P_HOST:-local}" ] && dests+=("${P_OWNER:-local}")
-  [ -n "$P_HOST" ] && [ -n "$P_OWNER" ] && dests+=(local)
-  while IFS= read -r w; do
-    [ -n "$w" ] && [ "$w" != "$P_HOST" ] && [ "$w" != "$P_OWNER" ] && dests+=("$w")
-  done < <(rw_pick_worker_aliases)
+  if [ -n "$P_UNREACHABLE" ]; then
+    # Every soft switch needs the pane's own remote (rw switch exits 6);
+    # releasing the pane to a local shell does not (I4).
+    label="release this pane to this machine (remote unreachable)"
+    [ "$P_UNREACHABLE" = unconfigured ] && label="release this pane to this machine (remote not in config.json)"
+    keys+=(release) labels+=("$label") notes+=("")
+  else
+    # Destinations: every host but the pane's own, the owner first.
+    [ "${P_OWNER:-local}" != "${P_HOST:-local}" ] && dests+=("${P_OWNER:-local}")
+    [ -n "$P_HOST" ] && [ -n "$P_OWNER" ] && dests+=(local)
+    while IFS= read -r w; do
+      [ -n "$w" ] && [ "$w" != "$P_HOST" ] && [ "$w" != "$P_OWNER" ] && dests+=("$w")
+    done < <(rw_pick_worker_aliases)
+  fi
 
   for d in "${dests[@]+"${dests[@]}"}"; do
     if [ "$d" = local ]; then label="switch this pane to this machine"; else label="switch this pane to $d"; fi
@@ -288,10 +354,14 @@ rw_pick_rows() {
   done
 
   if [ -n "$P_OWNER" ]; then
-    label="hand back $(rw_pick_tilde "$P_ROOT") to this machine"
-    [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label ($(rw_pick_plural "$P_ROOT_PANES" pane) come back)"
-    keys+=(handback) labels+=("$label") notes+=("")
-  elif [ "$P_ROOT_OK" = 1 ] && [ -n "$(rw_pick_worker_aliases)" ]; then
+    # A hand-back to an unreachable pane host cannot run: no row.
+    if [ -z "$P_UNREACHABLE" ] || [ "$P_OWNER" != "$P_HOST" ]; then
+      label="hand back $(rw_pick_tilde "$P_ROOT") to this machine"
+      [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label ($(rw_pick_plural "$P_ROOT_PANES" pane) come back)"
+      keys+=(handback) labels+=("$label") notes+=("")
+    fi
+  elif [ "$P_ROOT_OK" = 1 ] && [ -n "$(rw_pick_worker_aliases)" ] &&
+    { [ -z "$P_UNREACHABLE" ] || rw_pick_other_worker; }; then
     label="hand off $(rw_pick_tilde "$P_ROOT") to remote"
     [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label ($(rw_pick_plural "$P_ROOT_PANES" pane) move)"
     keys+=(handoff) labels+=("$label") notes+=("")
@@ -302,7 +372,7 @@ rw_pick_rows() {
   done
   for i in "${!keys[@]}"; do
     status=""
-    case "${keys[$i]}" in switch:local | handback | handoff) ;; switch:*) status="…" ;; esac
+    case "${keys[$i]}" in switch:local | handback | handoff | release) ;; switch:*) status="…" ;; esac
     printf '%s\t%-*s\t%s\t%s\n' "${keys[$i]}" "$width" "${labels[$i]}" "$status" "${notes[$i]}"
   done
 }
@@ -310,20 +380,33 @@ rw_pick_rows() {
 # rw_pick_header -- names the directory, the root, the pane host and the
 # owner host; then what a choice would cost.
 rw_pick_header() {
-  local dir root
+  local dir root host
   dir="$(rw_pick_tilde "$P_DIR")"
   root="$(rw_pick_tilde "$P_ROOT")"
-  if [ "$P_DIR" = "$P_ROOT" ]; then
+  if [ -z "$P_ROOT" ]; then
+    printf '%s  ·  no root on this machine\n' "$dir"
+  elif [ "$P_DIR" = "$P_ROOT" ]; then
     printf '%s (root)\n' "$dir"
   else
     printf '%s  ·  root %s\n' "$dir" "$root"
   fi
-  printf 'pane on %s  ·  owned by %s\n' "$(rw_pick_host_name "$P_HOST")" "$(rw_pick_host_name "$P_OWNER")"
+  host="$(rw_pick_host_name "$P_HOST")"
+  case "$P_UNREACHABLE" in
+    unreachable) host="$host, remote unreachable" ;;
+    unconfigured) host="$host, not in config.json" ;;
+  esac
+  printf 'pane on %s  ·  owned by %s\n' "$host" "$(rw_pick_host_name "$P_OWNER")"
+  if [ -n "$P_UNREACHABLE" ]; then
+    printf 'the directory is the last one it reported; switching needs the remote, releasing does not\n'
+  fi
+  if [ "$P_REMOTE_ONLY" = 1 ]; then
+    printf '%s exists only on %s: nothing on this machine to hand off\n' "$dir" "$(rw_pick_host_name "$P_HOST")"
+  fi
   [ -n "$P_EDITOR" ] && printf '%s reopens on the destination, but unsaved buffers do not travel: save first\n' "$P_EDITOR"
   if [ -z "$P_OWNER" ] && [ "${P_ROOT_EDITORS:-0}" -gt 0 ] && [ -z "$P_EDITOR" ]; then
     printf 'a hand-off moves editors too, but unsaved buffers do not: save first\n'
   fi
-  if [ -z "$P_OWNER" ] && [ "$P_ROOT_OK" != 1 ]; then
+  if [ -z "$P_OWNER" ] && [ -n "$P_ROOT" ] && [ "$P_ROOT_OK" != 1 ]; then
     printf '%s cannot be handed off: only directories under ~ (not ~ itself) can\n' "$root"
   fi
   return 0
@@ -343,7 +426,7 @@ probe_rows() {
     key="${line%%$'\t'*}"
     n=$((n + 1))
     case "$key" in
-      switch:local | handback | handoff | '') ;;
+      switch:local | handback | handoff | release | '') ;;
       switch:*)
         alias="${key#switch:}"
         (
@@ -392,12 +475,16 @@ rw_pick_bg() {
   exit "$status"
 }
 
-# rw_pick_switch <dest> -- `rw switch` for the origin pane, output live in
-# the popup; any failure held open as a dialog.
+# rw_pick_switch <dest> [rw switch args...] -- `rw switch` for the origin
+# pane (by default with --dir <the resolved directory>), output live in the
+# popup; any failure held open as a dialog.
 rw_pick_switch() {
   local dest="$1" out status refusal where
+  local -a extra=(--dir "$P_DIR")
+  shift
+  [ "$#" -eq 0 ] || extra=("$@")
   out="$(mktemp "${TMPDIR:-/tmp}/rw-picker-run.XXXXXX")"
-  env -u TMUX_PANE "$RW_BIN" switch --pane "$P_PANE" --to "$dest" --dir "$P_DIR" </dev/null 2>&1 | tee "$out"
+  env -u TMUX_PANE "$RW_BIN" switch --pane "$P_PANE" --to "$dest" "${extra[@]}" </dev/null 2>&1 | tee "$out"
   status=${PIPESTATUS[0]}
   refusal="$(grep '^rw: ' "$out" | tail -n 1 | sed 's/^rw: //')"
   rm -f "$out"
@@ -421,7 +508,7 @@ rw_pick_switch() {
 # rw_pick_handoff -- the worker chooser (skipped with exactly one worker,
 # D26), then `rw bg handoff`.
 rw_pick_handoff() {
-  local workers n alias header note
+  local workers n alias header note first="$P_HOST"
   workers="$(rw_pick_worker_aliases)"
   n="$(printf '%s\n' "$workers" | grep -c . || true)"
   if [ "$n" -eq 1 ]; then
@@ -431,9 +518,11 @@ rw_pick_handoff() {
     [ "$P_ROOT_PANES" -le 1 ] && note="this pane moves to the chosen worker; nothing else works in it"
     header="hand off $(rw_pick_tilde "$P_ROOT")"$'\n'"$note"
     [ "$P_ROOT_EDITORS" -gt 0 ] && header="$header"$'\n'"editors move too, but unsaved buffers do not: save first"
-    alias="$(RW_PICK_FIRST="$P_HOST" rw_pick_worker_menu 'rw handoff ⇒ ' "$header")" || exit 0
+    # An unreachable pane host is not offered first.
+    [ -z "$P_UNREACHABLE" ] || first=""
+    alias="$(RW_PICK_FIRST="$first" rw_pick_worker_menu 'rw handoff ⇒ ' "$header")" || exit 0
   fi
-  rw_pick_bg handoff --worker "$alias" --pane "$P_PANE"
+  rw_pick_bg handoff --worker "$alias" --pane "$P_PANE" --root "$P_ROOT"
 }
 
 # rw_pick_menu -- the S1 menu; prints the chosen key, nothing on abort.
@@ -471,9 +560,11 @@ pick() {
     exit 0
   fi
 
-  # Resolve the invoking pane BEFORE fzf: inside a popup, display-message
-  # with no target resolves against the client's active pane, which is
-  # exactly the pane the popup was opened over.
+  # The binding passes #{pane_id}, and everything below acts on that pane
+  # alone (P_PANE; every tmux call is targeted). Without one (an older
+  # binding), resolve it BEFORE fzf: inside a popup, display-message with no
+  # target resolves against the client's active pane, the pane the popup
+  # was opened over.
   [ -n "$origin_pane" ] || origin_pane="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
   [ -n "$origin_pane" ] || exit 0
   rw_pick_context "$origin_pane"
@@ -485,8 +576,9 @@ pick() {
   key="$(rw_pick_menu)" || exit 0
   case "$key" in
     switch:*) rw_pick_switch "${key#switch:}" ;;
-    handback) rw_pick_bg handback --pane "$P_PANE" ;;
+    handback) rw_pick_bg handback --pane "$P_PANE" --root "$P_ROOT" ;;
     handoff) rw_pick_handoff ;;
+    release) rw_pick_switch local --force ;;
   esac
   exit 0
 }

@@ -139,6 +139,36 @@ unset FAKE_PS_EXTRA
 
 check "unknown argument is a usage error" bash -c "! bash '$REFRESH' --nope 2>/dev/null"
 
+# --- concurrent runs (fix wave B, finding 6) ---------------------------------------
+# Runs are serialized, and a run reads the pane only once it holds the lock:
+# one that started while another held it computes from the state after
+# that one, so it can never write back a value read before a later change.
+LOCK="$TMUX_REMOTE_WORKSPACES_STATE_DIR/locks/rw-indicators"
+mkdir -p "$(dirname "$LOCK")"
+tmux set-option -pqt %9 @rw-off-owner stale
+mkdir "$LOCK" # another run holds it
+bash "$REFRESH" --pane %9 &
+waiter=$!
+sleep 0.5
+eq "lock: a run waits while another holds the lock (nothing written yet)" "$(flag_of %9)" "stale"
+# The state changes while it waits (a cd out of the frozen root), then the
+# other run finishes.
+sed -i.bak "s|^pane_id=%9${T}pane_current_path=[^${T}]*|pane_id=%9${T}pane_current_path=$app|" "$FAKE_TMUX_PANES"
+rmdir "$LOCK"
+wait "$waiter"
+eq "lock: the waiting run computed from the state after the change" "$(flag_of %9)" ""
+check "lock: released after the run" test ! -e "$LOCK"
+sed -i.bak "s|^pane_id=%9${T}pane_current_path=[^${T}]*|pane_id=%9${T}pane_current_path=$owned|" "$FAKE_TMUX_PANES"
+# A lock left by a killed run does not wedge the flag: the stale guard
+# (~5 s) lets the next run through, and that run clears it.
+mkdir "$LOCK"
+t0=$(date +%s)
+bash "$REFRESH" --pane %9
+t1=$(date +%s)
+eq "lock: a stale lock is passed after its guard" "$(flag_of %9)" "1"
+check "lock: ... within the guard (took $((t1 - t0)) s)" test $((t1 - t0)) -le 7
+check "lock: ... and is gone afterwards" test ! -e "$LOCK"
+
 # --- zsh chpwd hook ----------------------------------------------------------------
 ZSHRC="$RW_PLUGIN/../../../zsh/.zshrc"
 if command -v zsh >/dev/null 2>&1 && [ -f "$ZSHRC" ]; then
@@ -200,7 +230,7 @@ if [ -z "$REAL_TMUX" ]; then
 fi
 # A short TMUX_TMPDIR: the socket path must fit in sun_path (104 bytes).
 TT="$(mktemp -d /tmp/rwt.XXXXXX)"
-SOCK="rw-x2-test-$$"
+SOCK="rw-fb-offowner-$$"
 mkdir -p "$SANDBOX/realbin"
 cat >"$SANDBOX/realbin/tmux" <<EOF
 #!/bin/sh
