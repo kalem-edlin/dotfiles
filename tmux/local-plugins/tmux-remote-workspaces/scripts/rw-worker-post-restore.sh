@@ -19,7 +19,9 @@
 #      ever capture the bootstrap session.
 #   2. Kills every RESTORED rw-* session (one named in the snapshot it was
 #      restored from) whose endpoint is not listed in a mirror record with
-#      owner=worker, and logs it. When rw closes the last sessions on a
+#      owner=worker nor named by a visit marker (visits/<endpoint>.json, a
+#      pane switched here on a directory this worker does not own; contract
+#      CS2), and logs it. When rw closes the last sessions on a
 #      worker the server exits and `last` still lists them; without this the
 #      next server start (rw's own new-session, or the boot restore) would
 #      bring closed sessions back, agents included. A session that is not in
@@ -104,6 +106,20 @@ if [ -d "$owned_dir" ]; then
       | select(($f != "") and ((" " + $own + " ") | contains(" " + $f + " ") | not))
       | ($f | gsub("-"; "") | .[0:8]) as $mid
       | (.endpoints // [])[] | "rw-" + $mid + "-" + .' "$record" 2>/dev/null
+  done)"
+fi
+# Visit endpoints (panes of a focus machine on a directory this worker does
+# not own) are in no record; their markers name their sessions. Closing a
+# visit endpoint removes its marker.
+visits_dir="$(rw_state_dir_at "$HOME")/visits"
+if [ -d "$visits_dir" ]; then
+  wanted="$wanted
+$(for marker in "$visits_dir"/*.json; do
+    [ -f "$marker" ] || continue
+    jq -r --arg own "$own_ids" '
+      (.focus_machine_id // "") as $f
+      | select(($f != "") and ((" " + $own + " ") | contains(" " + $f + " ") | not))
+      | .session_name // empty' "$marker" 2>/dev/null
   done)"
 fi
 snapshot_sessions=""

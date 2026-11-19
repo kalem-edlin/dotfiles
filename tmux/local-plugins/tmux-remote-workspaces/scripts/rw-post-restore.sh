@@ -8,7 +8,9 @@
 # and every pane whose sidecar record carries `rw_endpoint`, and before
 # libexec/reconcile.
 #
-# For every registered endpoint (endpoints/*.json without a tombstone):
+# For every registered endpoint (endpoints/*.json without a tombstone), owned
+# and visit endpoints alike (a visit endpoint, from a soft switch, is in no
+# ownership record; it carries the same position fields, S7):
 #
 #   1. Find the restored pane by endpoint id. The endpoint record says where
 #      its pane lived: focus_session_name + focus_window_index +

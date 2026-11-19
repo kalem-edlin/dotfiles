@@ -94,10 +94,11 @@ rw_test_sandbox() {
 # key=value pairs: pane_id, pane_current_path, session_name, window_index,
 # pane_index, pane_current_command, pane_pid, @options...), list-panes -a,
 # display-message, show-option and set-option answer from it. Remote
-# endpoint sessions (rw-*) report $FAKE_TMUX_REMOTE_CMD as their command.
-# send-keys of a claudef/pif resume flips a pane's command to the agent when
-# $FAKE_LOCAL_RESUME_OK=1 (an editor reopen, "&& nvim"/"&& vim", flips it
-# to nvim); respawn-pane resets it to a shell. The remote endpoint pane's
+# endpoint sessions (rw-*) report $FAKE_TMUX_REMOTE_CMD as their command
+# and $FAKE_REMOTE_CWD (when set) as their pane's directory.
+# send-keys of a claudef/pif resume flips a pane's command to the agent
+# (claude / pi) when $FAKE_LOCAL_RESUME_OK=1 (an editor reopen,
+# "&& nvim"/"&& vim", flips it to nvim); respawn-pane resets it to a shell. The remote endpoint pane's
 # other options come from $FAKE_REMOTE_PANE_OPTS ("@option=value" lines).
 # A fake agent "writes until stopped": reading the pane pid of
 # $FAKE_AGENT_PANE (how rw stops a local agent) appends to
@@ -160,6 +161,11 @@ case "$cmd" in
     if [ "$target" = "${FAKE_AGENT_PANE:-}" ] && [ -n "${FAKE_AGENT_LASTWRITE:-}" ]; then
       case "$fmt" in *pane_pid*) echo "last local write" >>"$FAKE_AGENT_LASTWRITE" ;; esac
     fi
+    # A remote endpoint session's pane: its cwd is $FAKE_REMOTE_CWD.
+    if [ "${target#rw-}" != "$target" ]; then
+      [ -n "${FAKE_REMOTE_CWD:-}" ] && expand "$fmt" "pane_current_path=$FAKE_REMOTE_CWD"
+      exit 0
+    fi
     l="$(line_of "$target")"
     [ -n "$l" ] && expand "$fmt" "$l"
     ;;
@@ -186,7 +192,8 @@ case "$cmd" in
     if [ "${FAKE_LOCAL_RESUME_OK:-0}" = 1 ] && [ -n "$(line_of "$target")" ]; then
       case "${rest[*]}" in
         *"&& nvim "* | *"&& vim "*) put "$target" pane_current_command nvim ;;
-        *claudef* | *pif*) put "$target" pane_current_command claude ;;
+        *claudef*) put "$target" pane_current_command claude ;;
+        *pif*) put "$target" pane_current_command pi ;;
       esac
     fi
     ;;
