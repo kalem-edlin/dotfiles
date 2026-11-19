@@ -354,10 +354,27 @@ _rw_remote_root_warn() {
   [[ -n ${1-} && ( ${OLDPWD:A} == $best || ${OLDPWD:A} == $best/* ) ]] && return 0
   print -r -- "rw: ${best/#$HOME/~} is remote on $bestw; new windows open there (rw handback to take it back)"
 }
-_rw_remote_root_chpwd() { _rw_remote_root_warn chpwd; }
+# Off-owner host chip (same doc, S6 / CS3): recompute this pane's
+# @rw-off-owner after every cd and at startup. Detached (&!), so cd never
+# waits; the script reads local files only (no ssh). A pane can only be
+# off-owner while a record exists, so with none it is not run at all, except
+# once more after the last record went, to clear a flag this shell set.
+_rw_off_owner_armed=0
+_rw_off_owner_refresh() {
+  [[ -n ${TMUX-} && -n ${TMUX_PANE-} ]] || return 0
+  local dir=${TMUX_REMOTE_WORKSPACES_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tmux-remote-workspaces}/owned
+  local -a recs=($dir/*/record.json(N))
+  (( $#recs || _rw_off_owner_armed )) || return 0
+  _rw_off_owner_armed=$(( $#recs > 0 ))
+  local script=${RW_REFRESH_INDICATORS:-$HOME/.config/tmux/local-plugins/tmux-remote-workspaces/scripts/rw-refresh-indicators.sh}
+  [[ -x $script ]] || return 0
+  "$script" --pane "$TMUX_PANE" </dev/null >/dev/null 2>&1 &!
+}
+_rw_remote_root_chpwd() { _rw_remote_root_warn chpwd; _rw_off_owner_refresh; }
 autoload -Uz add-zsh-hook
 add-zsh-hook chpwd _rw_remote_root_chpwd
 _rw_remote_root_warn
+_rw_off_owner_refresh
 
 # Preferred editor for local and remote sessions
 export EDITOR="nvim"

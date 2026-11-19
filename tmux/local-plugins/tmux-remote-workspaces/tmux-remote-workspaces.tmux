@@ -65,6 +65,26 @@ case "$existing_host_text" in
     ;;
 esac
 
+# Off-owner host chip (docs/tasks/remote-owned-directories.md, S6): the chip's
+# colour turns Catppuccin red (#f38ba8) while the focused pane carries
+# @rw-off-owner (set only by scripts/rw-refresh-indicators.sh), and keeps
+# host_indicator.sh's colour otherwise. The pinned catppuccin-tmux
+# (status/host.sh -> build_status_module) splices @catppuccin_host_color
+# verbatim into the separator's fg and the icon cell's bg, both inside #[...]
+# styles; tmux expands a #{?...} there per redraw against the client's active
+# pane, so one conditional recolours both (checked on a throwaway server,
+# tmux 3.7b). host_indicator.sh re-sets the plain colour on every config
+# reload before this runs; the guard keeps a plugin-only reload from nesting.
+# Without host_indicator.sh, the fallback is the theme's own default
+# (catppuccin mocha magenta).
+existing_host_color="$(tmux show-option -gqv @catppuccin_host_color 2>/dev/null || true)"
+case "$existing_host_color" in
+  *'@rw-off-owner'*) : ;; # already wrapped -- don't nest again
+  *)
+    tmux set-option -gq @catppuccin_host_color "#{?@rw-off-owner,#f38ba8,${existing_host_color:-#cba6f7}}"
+    ;;
+esac
+
 # Same wrap for the directory chip: a focused remote-backed pane shows its
 # LIVE remote cwd, local panes keep the existing local format. The live cwd
 # arrives with no ssh round-trips: endpoint sessions are created with
