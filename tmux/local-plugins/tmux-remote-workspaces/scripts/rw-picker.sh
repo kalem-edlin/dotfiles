@@ -76,7 +76,6 @@ mode="${1:-pick}"
 RW_BIN="${RW_PICKER_RW_BIN:-$SCRIPT_DIR/rw}"
 RW_FZF="${RW_PICKER_FZF:-fzf}"
 RW_PICK_SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-RW_PICK_US=$'\037'
 RW_PICK_AGENT_WARNING="⚠ the agent will work on a copy that does not own this directory"
 
 # --- Worker list (the handoff chooser) ----------------------------------------
@@ -202,63 +201,14 @@ rw_pick_failure_dialog() {
 
 # --- The pane: directory, root, hosts ---------------------------------------------
 
-# rw_pick_map_worker_path <worker path> <worker_root> <root_local> <root_rel> <worker_home>
-# A worker path back on this machine: under the worker root to the local
-# root, else under the worker home to $HOME; nothing otherwise.
-rw_pick_map_worker_path() {
-  local cwd="$1" worker_root="${2%/}" root_local="${3%/}" root_rel="$4" worker_home="${5%/}"
-  if [ -n "$worker_root" ] && [ -n "$root_local" ]; then
-    case "$cwd" in
-      "$worker_root") printf '%s\n' "$root_local"; return 0 ;;
-      "$worker_root"/*) printf '%s\n' "$root_local${cwd#"$worker_root"}"; return 0 ;;
-    esac
-  fi
-  if [ -z "$worker_home" ] && [ -n "$worker_root" ] && [ -n "$root_rel" ]; then
-    worker_home="${worker_root%"/$root_rel"}"
-    [ "$worker_home" != "$worker_root" ] || worker_home=""
-  fi
-  if [ -n "$worker_home" ]; then
-    case "$cwd" in
-      "$worker_home") printf '%s\n' "$HOME"; return 0 ;;
-      "$worker_home"/*) printf '%s\n' "$HOME${cwd#"$worker_home"}"; return 0 ;;
-    esac
-  fi
-  return 0
-}
-
 # rw_pick_pane_dir <pane> -- the pane's directory on this machine (S1).
-# Local pane: pane_current_path. Remote pane: its live worker cwd (the
-# pane_title the endpoint session pushes, trusted only when it is an
-# absolute path, as the directory chip does) mapped back through the
-# endpoint's worker root / worker home; else the endpoint's focus path.
-# RECONCILE AT MERGE: X1's shared resolver (scripts/common.sh) computes the
-# same thing for `rw switch --dir`; this one can be replaced by it.
-rw_pick_pane_dir() {
-  local pane="$1" host endpoint title cwd fields focus worker_root root_local root_rel worker_home mapped=""
-  host="$(rw_pane_get "$pane" @remote-host)"
-  cwd="$(tmux display-message -pt "$pane" -F '#{pane_current_path}' 2>/dev/null || true)"
-  if [ -z "$host" ]; then
-    printf '%s\n' "$cwd"
-    return 0
-  fi
-  endpoint="$(rw_pane_get "$pane" @rw-endpoint)"
-  fields=""
-  [ -n "$endpoint" ] && fields="$(rw_read_endpoint "$endpoint" 2>/dev/null | jq -r --arg us "$RW_PICK_US" '
-    [.workspace.focus_path // .workspace.root_local // "", .workspace.worker_root // "",
-     .workspace.root_local // "", .root_rel // "", .workspace.worker_home // .worker_home // ""] | join($us)' 2>/dev/null)"
-  IFS="$RW_PICK_US" read -r focus worker_root root_local root_rel worker_home <<<"$fields"
-  title="$(tmux display-message -pt "$pane" -F '#{pane_title}' 2>/dev/null || true)"
-  case "$title" in
-    /*) mapped="$(rw_pick_map_worker_path "$title" "$worker_root" "$root_local" "$root_rel" "$worker_home")" ;;
-  esac
-  if [ -n "$mapped" ]; then
-    printf '%s\n' "$mapped"
-  elif [ -n "$focus" ]; then
-    printf '%s\n' "$focus"
-  else
-    printf '%s\n' "$cwd"
-  fi
-}
+# The shared resolver (rw_pane_dir in roots.sh, X1) with --live: a remote
+# pane's pane_title can lag a worker-side cd by more than a minute (hidden
+# sessions have status off), so its current directory is asked of the
+# worker first (one ssh over the ControlMaster, bounded by the status
+# timeout), then the title, then the endpoint's focus path. The menu and
+# `rw switch --dir` therefore act on the same directory.
+rw_pick_pane_dir() { rw_pane_dir "$1" --live; }
 
 # rw_pick_context <pane> -- resolves the pane once into:
 #   P_PANE P_HOST (alias, or "" for this machine) P_DIR P_ROOT P_ROOT_ID

@@ -53,8 +53,8 @@ rw_owned_record_write "$oid" "$(rw_record_new "$oid" "$rel" "$owned" plain fakew
 endpoint() { # id focus_path root_local worker_root root_rel [worker_home]
   rw_write_json_atomic "$(rw_endpoint_file "$1")" "$(jq -nc --arg id "$1" --arg f "$2" --arg rl "$3" \
     --arg wr "$4" --arg rr "$5" --arg wh "${6:-}" \
-    '{endpoint_id: $id, root_rel: $rr,
-      workspace: ({focus_path: $f, root_local: $rl, worker_root: $wr} + (if $wh == "" then {} else {worker_home: $wh} end))}')"
+    '{endpoint_id: $id, root_rel: $rr, workspace: {focus_path: $f, root_local: $rl, worker_root: $wr}}
+      + (if $wh == "" then {} else {worker_home: $wh} end)')"
 }
 endpoint e0000001 "$owned/sub" "$owned" "/w/$rel" "$rel"
 endpoint e0000002 "$app" "" "" "" "/w"
