@@ -19,6 +19,32 @@ fail() {
 }
 note() { printf 'note %s\n' "$1"; }
 
+# ssh_config_check <worker>
+# Every rw key that reaches a worker (prefix [, splits, q, c) runs one ssh
+# and waits for it. Before ssh touches the network or the ControlMaster
+# socket it evaluates ~/.ssh/config, including any `Match ... exec` helper,
+# on every invocation. A slow helper there cost 1.5 s of each 1.65 s ssh
+# round trip in 2026-11 (docs/tasks/remote-owned-directories.md, "Remote key
+# latency"). `ssh -G` does only that evaluation, so time it -- twice, judging
+# the second, so a helper's first-call cache warm-up is not reported.
+# RW_DOCTOR_SSH_CONFIG_SLOW_MS sets the threshold (default 300).
+ssh_config_check() {
+  local worker="$1" limit start ms
+  limit="${RW_DOCTOR_SSH_CONFIG_SLOW_MS:-300}"
+  "$(rw_ssh_bin)" -G "$worker" </dev/null >/dev/null 2>&1
+  start="$(rw_now_epoch)"
+  if ! "$(rw_ssh_bin)" -G "$worker" </dev/null >/dev/null 2>&1; then
+    note "worker '$worker': could not evaluate its ssh config (ssh -G failed)"
+    return 0
+  fi
+  ms="$(rw_elapsed_ms "$start")"
+  if [ "$ms" -gt "$limit" ]; then
+    fail "worker '$worker': evaluating its ssh config takes ${ms} ms (ssh -G), before any network; every rw key that reaches the worker waits for it. Look for a slow 'Match ... exec' in ~/.ssh/config or ~/.ssh/config.local"
+  else
+    pass "worker '$worker': ssh config evaluates in ${ms} ms"
+  fi
+}
+
 echo "== Local prerequisites =="
 if command -v jq >/dev/null 2>&1; then pass "jq is available"; else fail "jq is required"; fi
 if command -v ssh >/dev/null 2>&1; then pass "ssh is available"; else fail "ssh is required"; fi
@@ -55,6 +81,7 @@ if rw_config_valid; then
       fail "worker '$worker_alias': $(tr '\n' ' ' <"$preflight_err" | sed -n 's/.*rw: //p' | head -c 200)"
     fi
     : >"$preflight_err"
+    ssh_config_check "$worker_alias"
     if [ -n "${report:-}" ] && [ "$(printf '%s' "$report" | jq -r '.ssh_reachable // false')" = "true" ]; then
       missing="$(printf '%s' "$report" | jq -r '.missing // [] | join(",")')"
       [ -n "$missing" ] && note "worker '$worker_alias' missing: $missing (run 'make setup-headless' there)"
