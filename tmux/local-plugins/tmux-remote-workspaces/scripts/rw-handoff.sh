@@ -635,8 +635,10 @@ done
 
 # S8: visit panes already on this worker in this root become owned panes of
 # it (listed in the record, so hand-back brings them back); their visit
-# markers go, since the mirror now lists them.
+# markers go once the mirror lists them (fix wave A, finding 5: never
+# before -- with neither, the worker's post-restore would kill the session).
 adopted=0
+adopted_eps=()
 for entry in ${adopt_panes[@]+"${adopt_panes[@]}"}; do
   IFS="$RW_TAB" read -r a_pane a_ep <<<"$entry"
   a_json="$(rw_read_endpoint "$a_ep" 2>/dev/null)" || continue
@@ -649,12 +651,18 @@ for entry in ${adopt_panes[@]+"${adopt_panes[@]}"}; do
     | .updated_at = $now')"
   rw_record_add_endpoint "$root_id" "$a_ep"
   rw_pane_set "$a_pane" @rw-root-id "$root_id"
-  rw_visit_marker_remove "$worker" "$worker_home" "$a_ep"
+  adopted_eps+=("$a_ep")
   adopted=$((adopted + 1))
 done
 
-rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
+if rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null; then
+  [ "${#adopted_eps[@]}" -eq 0 ] || rw_visit_marker_remove "$worker" "$worker_home" "${adopted_eps[@]}" ||
+    rw_warn "rw handoff: could not remove the visit markers of the adopted pane(s) on '$worker' (harmless: closing a pane removes its marker)."
+else
   rw_warn "rw handoff: could not write the ownership mirror on '$worker' (it is rewritten on the next ownership change)."
+  [ "${#adopted_eps[@]}" -eq 0 ] ||
+    rw_warn "rw handoff: the adopted pane(s) keep their visit markers there until then, so a restart of that remote keeps their sessions."
+fi
 # The worker's pane set just changed: a timer save that raced this refused
 # its inconsistent capture; ask for a fresh one now (fire and forget).
 rw_worker_request_save "$worker"

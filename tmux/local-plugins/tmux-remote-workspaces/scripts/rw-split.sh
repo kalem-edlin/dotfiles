@@ -45,11 +45,14 @@ worker="$(rw_pane_get "$pane_id" @remote-host)"
 
 if [ -n "$endpoint" ] && [ -n "$worker" ]; then
   # Source pane is itself remote-backed: the new pane opens on the same
-  # remote in the source pane's directory. Fall back to an interactive shell
-  # if `rw switch` returns (e.g. the remote is unreachable) instead of
-  # leaving the pane dead.
-  dir="$(rw_pane_dir "$pane_id" --live)"
-  cmd="$(printf '%q switch --to %q --dir %q' "$SCRIPT_DIR/rw" "$worker" "$dir")"
+  # remote in the source pane's live directory. The split is made at once,
+  # starting locally in the title-based directory (no ssh here: the key
+  # binding never waits on it); `rw switch --dir-of` in the new pane asks
+  # the remote (fix wave A, finding 9). Fall back to an interactive shell if
+  # `rw switch` returns (e.g. the remote is unreachable) instead of leaving
+  # the pane dead.
+  dir="$(rw_pane_dir "$pane_id")"
+  cmd="$(printf '%q switch --to %q --dir-of %q' "$SCRIPT_DIR/rw" "$worker" "$pane_id")"
   tmux split-window "${split_args[@]}" -c "$(rw_local_existing_dir "$dir")" -t "$pane_id" \
     "$cmd; exec \${SHELL:-/bin/sh} -l"
   exit 0

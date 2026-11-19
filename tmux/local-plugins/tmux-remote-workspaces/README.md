@@ -34,7 +34,7 @@ rw handback [--root <path>] [--pane <pane-id>] [--check-lfs]
             [--force-diverged] [--resolve overwrite|keep-both|abort]
             [--wait-idle [seconds]]
 rw open    [--worker <alias>] [--root <path>] [--pane <pane-id>] [--dir <abs-path>]
-rw switch  [--pane <pane-id>] --to <alias|local> [--dir <abs-path>]
+rw switch  [--pane <pane-id>] --to <alias|local> [--dir <abs-path> | --dir-of <pane-id>] [--force]
 rw forget  <root> [--worker <alias>] [--force]
 rw reclaim [--force] <root>
 rw status  [--json]

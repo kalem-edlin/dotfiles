@@ -239,6 +239,12 @@ rw_post_restore_main() {
       rw_log "post-restore: endpoint $id is tombstoned; not reattached"
       continue
     fi
+    # Released by `rw switch --to local --force` while its remote was
+    # unreachable: closed on the next contact, never reattached to a pane.
+    if [ "$(jq -r '.pending.action // empty' "$f" 2>/dev/null)" = "close" ]; then
+      rw_log "post-restore: endpoint $id has a pending close; not reattached"
+      continue
+    fi
     jq -c . "$f" >>"$work/endpoints.jsonl" 2>/dev/null || true
   done
   jq -s . "$work/endpoints.jsonl" >"$work/endpoints.json"

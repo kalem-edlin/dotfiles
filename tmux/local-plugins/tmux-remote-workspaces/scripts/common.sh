@@ -1223,6 +1223,43 @@ rw_worker_copy_root_for_path() {
 # job.json and the runner's pid while a transfer of that root is in flight.
 rw_bg_dir() { printf '%s/bg\n' "$(rw_state_dir)"; }
 
+# rw_bg_job_live <root_id> -- 0 while a background transfer of the root is
+# in flight: its job dir exists and its runner lives (or its pid is not
+# written yet: being started). The same test libexec/rw-bg uses as its lock.
+rw_bg_job_live() {
+  local job pid
+  job="$(rw_bg_dir)/${1:?root id required}"
+  [ -d "$job" ] || return 1
+  pid="$(cat "$job/pid" 2>/dev/null || true)"
+  [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null
+}
+
+# rw_worker_restore_state <worker> -- the worker's tmux restore state as its
+# boot restore wrapper reports it (`--state`): none, restoring, ready, or
+# `incomplete <marker>`; for a wrapper from before --state the same fallback
+# as rw_worker_server_sh. One ssh (status timeout); 6 when unreachable.
+rw_worker_restore_state() {
+  local out status=0
+  # shellcheck disable=SC2016 # expanded by the worker's shell
+  out="$(rw_ssh_batch "${1:?worker required}" "$(rw_ssh_status_timeout)" "sh -c $(rw_shquote "$(remote_wrapper_sh)"'
+    unset TMUX TMUX_PANE
+    if [ -n "$w" ]; then
+      s=$(TMUX_RESURRECT_RESTORE_TMUX_BIN="$tmux_bin" "$w" --state </dev/null 2>/dev/null) || s=""
+      case "$s" in none | restoring | ready | "incomplete "*) printf "state:%s\n" "$s"; exit 0 ;; esac
+    fi
+    if ! tmux list-sessions >/dev/null 2>&1; then
+      echo state:none
+    elif [ -n "$w" ] && { tmux has-session -t "=_tmux_restore_boot" 2>/dev/null ||
+      TMUX_RESURRECT_RESTORE_TMUX_BIN="$tmux_bin" "$w" --restoring </dev/null >/dev/null 2>&1; }; then
+      echo state:restoring
+    else
+      echo state:ready
+    fi')" </dev/null 2>/dev/null)" || status=$?
+  out="$(printf '%s\n' "$out" | sed -n 's/^state://p' | tail -n 1)"
+  [ "$status" -eq 0 ] && [ -n "$out" ] || return 6
+  printf '%s\n' "$out"
+}
+
 # rw_refresh_indicators --pane <pane-id> | --root <path>
 # Best effort recompute of the display flags (@rw-off-owner, contract CS3)
 # after a pane changed host or a root changed owner. Never fails the caller.

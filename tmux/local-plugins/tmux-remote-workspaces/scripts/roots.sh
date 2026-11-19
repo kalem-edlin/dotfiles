@@ -24,16 +24,19 @@ rw_root_panes() {
 }
 
 # rw_root_bound_panes <root_id> <endpoint-ids...>
-# Panes bound to the root: @rw-root-id equals it, or @rw-endpoint is one of
-# the record's endpoints (a pane restored before @rw-root-id existed).
+# Panes bound to the root ON ITS OWNER: those whose @rw-endpoint is one of
+# the record's endpoints (passed in). @rw-root-id alone is not enough: a
+# visit pane on another remote carries the root id too (rw switch stamps
+# it, CS2) and must never be released or counted as the owner's (fix wave
+# A, finding 1). <root_id> only keeps the callers' shape.
 # Prints pane_id<TAB>endpoint_id.
 rw_root_bound_panes() {
-  local root_id="$1"
   shift
-  tmux list-panes -a -F "#{pane_id}${RW_TAB}#{@rw-endpoint}${RW_TAB}#{@rw-root-id}" 2>/dev/null |
-    awk -F '\t' -v id="$root_id" -v eps="$*" '
+  [ $# -gt 0 ] || return 0
+  tmux list-panes -a -F "#{pane_id}${RW_TAB}#{@rw-endpoint}" 2>/dev/null |
+    awk -F '\t' -v eps="$*" '
       BEGIN { n = split(eps, e, " "); for (i = 1; i <= n; i++) want[e[i]] = 1 }
-      $2 != "" && ($3 == id || ($2 in want)) { print $1 "\t" $2 }'
+      $2 != "" && ($2 in want) { print $1 "\t" $2 }'
 }
 
 # rw_path_under_root <path> <root_local> <worker_root>
@@ -236,14 +239,22 @@ rw_endpoint_has_agent() {
 #                                 rescued); mark the mirror stale and
 #                                 focus-owned; keep the worker copy; drop the
 #                                 focus record
+#   endpoint pending.action = close -> (after `rw switch --to local --force`
+#                                 released its pane while <worker> was
+#                                 unreachable) close the endpoint: its
+#                                 session (and anything still running in it)
+#                                 and visit marker go; an owned one's mirror
+#                                 is rewritten from the record
+# Each root whose owner changed gets its off-owner flags recomputed (CS3).
 # Roots another rw process holds locked are skipped (next contact). Best
 # effort: a failure leaves the record pending.
 rw_reconcile_pending() {
-  local worker="$1" worker_home="$2" rec root_id root_rel action eps closable kept e out
+  local worker="$1" worker_home="$2" rec root_id root_rel root_local action eps closable kept e out
   while IFS= read -r rec; do
     [ -n "$rec" ] || continue
     root_id="$(printf '%s' "$rec" | jq -r '.root_id')"
     root_rel="$(printf '%s' "$rec" | jq -r '.root_rel')"
+    root_local="$(printf '%s' "$rec" | jq -r '.root_local // empty')"
     action="$(printf '%s' "$rec" | jq -r '.pending.action // empty')"
     rw_root_lock "$root_id" || continue
     # shellcheck disable=SC2207 # endpoint ids are fixed-format hex
@@ -254,6 +265,7 @@ rw_reconcile_pending() {
         rw_close_root_endpoints "$root_id" "forget" ${eps[@]+"${eps[@]}"}
         rw_owned_record_remove "$root_id"
         rw_held_unmark "$worker" "$root_id"
+        [ -z "$root_local" ] || rw_refresh_indicators --root "$root_local"
         rw_log_event "forget" "" "$worker" "" "success" "root=$root_rel pending=1 worker_copy=$out"
         ;;
       reconcile)
@@ -266,6 +278,7 @@ rw_reconcile_pending() {
         rw_mirror_push_json "$worker" "$worker_home" "$root_id" \
           "$(printf '%s' "$rec" | jq -c '.owner = "focus" | .endpoints = [] | .stale_worker = true | del(.pending)')" || continue
         rw_owned_record_remove "$root_id"
+        [ -z "$root_local" ] || rw_refresh_indicators --root "$root_local"
         if [ "${#kept[@]}" -gt 0 ]; then
           rw_warn "rw: the remote agent(s) on endpoint(s) ${kept[*]} kept running on $worker's stale copy of $root_rel; close each with 'rw close --endpoint <id>' once its work is rescued."
         fi
@@ -286,6 +299,29 @@ rw_reconcile_pending() {
     out="$(rw_forget_worker_copy "$worker" "$worker_home" "$root_id" "$root_rel")" || continue
     rm -f "$f"
     rw_log_event "forget" "" "$worker" "" "success" "root=$root_rel pending=1 worker_copy=$out"
+  done
+
+  # Endpoints released while <worker> was unreachable (rw switch --force).
+  local ej
+  for f in "$(rw_endpoints_dir)"/*.json; do
+    [ -f "$f" ] || continue
+    ej="$(cat "$f" 2>/dev/null)" || continue
+    [ "$(printf '%s' "$ej" | jq -r --arg w "$worker" 'select(.worker == $w) | .pending.action // empty' 2>/dev/null)" = "close" ] ||
+      continue
+    e="$(printf '%s' "$ej" | jq -r '.endpoint_id // empty')"
+    [ -n "$e" ] || continue
+    root_id="$(printf '%s' "$ej" | jq -r 'select((.kind // "owned") == "owned") | .root_id // empty')"
+    if [ -n "$root_id" ] && rw_owned_record_read "$root_id" >/dev/null 2>&1; then
+      rw_root_lock "$root_id" || continue
+    fi
+    rw_close_endpoint_core "$e" "pending-close" </dev/null
+    if [ -n "$root_id" ] && rw_owned_record_read "$root_id" >/dev/null 2>&1; then
+      rw_record_remove_endpoint "$root_id" "$e"
+      rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
+        rw_warn "rw: could not rewrite the ownership mirror on '$worker' after closing endpoint $e (rewritten on the next ownership change)."
+    fi
+    rw_worker_request_save "$worker"
+    rw_log_event "reconcile" "$e" "$worker" "" "success" "pending_close=1"
   done
   return 0
 }
@@ -444,28 +480,21 @@ rw_endpoint_local_path() {
 # remote has); rw_local_existing_dir finds where a local shell can start.
 #
 # --live first asks the worker for the hidden session's pane_current_path
-# (one ssh, bounded by the status timeout) and uses the title only when that
-# fails. The title can lag: a hidden session has `status off`, and tmux
-# re-sends a title only on a full redraw, so a `cd` on the worker reaches
-# the title late (measured: over a minute on a throwaway pair of servers).
-# Actions that open something in that directory (rw switch, splits, prefix
-# c) use --live; a display can use the title alone.
+# (rw_pane_remote_probe: one ssh with a hard deadline) and uses the title
+# only when that fails. The title can lag: a hidden session has `status
+# off`, and tmux re-sends a title only on a full redraw, so a `cd` on the
+# worker reaches the title late (measured: over a minute on a throwaway
+# pair of servers). Actions that open something in that directory (rw
+# switch, including the one a split or prefix c runs in its new pane) use
+# --live; a display, and anything a key binding waits on, uses the title.
 rw_pane_dir() {
   local pane_id="$1" live="${2:-}" ep host ej title focus out
   ep="$(rw_pane_get "$pane_id" @rw-endpoint)"
   host="$(rw_pane_get "$pane_id" @remote-host)"
   if [ -n "$ep" ] && [ -n "$host" ] && ej="$(rw_read_endpoint "$ep" 2>/dev/null)"; then
-    if [ "$live" = "--live" ]; then
-      out="$(rw_ssh_batch "$(printf '%s' "$ej" | jq -r '.worker // empty')" "$(rw_ssh_status_timeout)" \
-        "tmux display-message -p -t $(rw_shquote "=$(rw_session_name "$ep"):") '#{pane_current_path}'" \
-        </dev/null 2>/dev/null | tail -n 1)"
-      case "$out" in
-        /*)
-          [ "$out" = "/" ] || out="${out%/}"
-          rw_endpoint_local_path "$ej" "$out"
-          return 0
-          ;;
-      esac
+    if [ "$live" = "--live" ] && out="$(rw_pane_remote_probe "$pane_id")"; then
+      printf '%s\n' "${out%%"$RW_TAB"*}"
+      return 0
     fi
     title="$(tmux display-message -pt "$pane_id" -F '#{pane_title}' 2>/dev/null || true)"
     case "$title" in
@@ -482,6 +511,82 @@ rw_pane_dir() {
     fi
   fi
   tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null
+}
+
+# rw_pane_remote_probe <pane-id>   (pinned interface I3, fix wave A)
+# For a remote pane (@remote-host set and a registered @rw-endpoint): ONE
+# ssh to its remote that reads the endpoint's hidden session, under a HARD
+# deadline of the status timeout. Prints
+#   <its directory, mapped to this machine><TAB><its pane_current_command>
+# The ssh runs in the background and is killed at the deadline, because
+# ssh's ConnectTimeout does not bound a ControlMaster whose remote end is
+# dead. Exit 0; 6 on the deadline, an unreachable remote, or no answer (the
+# session is missing there); 1 when the pane is not a remote pane.
+rw_pane_remote_probe() {
+  local pane_id="$1" ep host ej worker limit out pid i=0 status=0 line path cmd=""
+  ep="$(rw_pane_get "$pane_id" @rw-endpoint)"
+  host="$(rw_pane_get "$pane_id" @remote-host)"
+  [ -n "$ep" ] && [ -n "$host" ] && ej="$(rw_read_endpoint "$ep" 2>/dev/null)" || return 1
+  worker="$(printf '%s' "$ej" | jq -r '.worker // empty' 2>/dev/null)"
+  [ -n "$worker" ] || worker="$host"
+  limit="$(rw_ssh_status_timeout)"
+  case "$limit" in '' | *[!0-9]* | 0) limit=3 ;; esac
+  out="$(mktemp "${TMPDIR:-/tmp}/rw-pane-probe.XXXXXX")" || return 6
+  # A simple command run with & is exec'd by the forked shell, so $! is
+  # ssh itself and the kill below reaches it.
+  "$(rw_ssh_bin)" -o BatchMode=yes -o ConnectTimeout="$limit" "$worker" \
+    "tmux display-message -p -t $(rw_shquote "=$(rw_session_name "$ep"):") $(rw_shquote "#{pane_current_path}${RW_TAB}#{pane_current_command}")" \
+    </dev/null >"$out" 2>/dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$i" -ge $((limit * 10)) ]; then
+      # Grouped under 2>/dev/null: bash reports a job killed by a signal
+      # ("Terminated") on its stderr when it reaps it.
+      {
+        kill -TERM "$pid"
+        sleep 0.1
+        kill -KILL "$pid"
+        wait "$pid"
+      } 2>/dev/null
+      rm -f "$out"
+      return 6
+    fi
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wait "$pid" 2>/dev/null || status=$?
+  line="$(tail -n 1 "$out" 2>/dev/null)"
+  rm -f "$out"
+  [ "$status" -eq 0 ] || return 6
+  path="${line%%"$RW_TAB"*}"
+  case "$line" in *"$RW_TAB"*) cmd="${line#*"$RW_TAB"}" ;; esac
+  case "$path" in /*) : ;; *) return 6 ;; esac
+  [ "$path" = "/" ] || path="${path%/}"
+  printf '%s\t%s\n' "$(rw_endpoint_local_path "$ej" "$path")" "$cmd"
+}
+
+# rw_owner_for_path <abs-path>   (pinned interface I2, fix wave A)
+# The owner of a path as the off-owner chip sees it: prints
+#   <root_id><TAB><worker><TAB><root_local>
+# for the longest enclosing worker-owned root, ignoring a record whose
+# pending action is `forget` (it is going away) and a mirror record whose
+# focus_machine_id is not this machine's (on a worker, the copies it holds
+# are owned there). Exit 1 when the path is owned by this machine. The same
+# filters as scripts/rw-refresh-indicators.sh. No ssh.
+rw_owner_for_path() {
+  local path own out
+  path="$(rw_physical_path "${1:?path required}")"
+  own="$(cat "$(rw_machine_id_file)" 2>/dev/null || true)"
+  out="$(rw_owned_records_json | jq -r --arg p "$path" --arg own "$own" '
+    [ .[] | select(.owner == "worker")
+      | select((.pending.action // "") != "forget")
+      | select((.focus_machine_id // "") == "" or .focus_machine_id == $own)
+      | select((.root_local // "") != "" and (.worker // "") != "")
+      | select(.root_local as $r | $p == $r or ($p | startswith($r + "/"))) ]
+    | sort_by(.root_local | length) | last
+    | if . == null then empty else "\(.root_id)\t\(.worker)\t\(.root_local)" end' 2>/dev/null)"
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 # rw_local_existing_dir <abs-path> -- the path, or its nearest existing parent.
@@ -519,10 +624,14 @@ rw_visit_marker_push() {
     >/dev/null 2>&1
 }
 
-# rw_visit_marker_remove <worker> <worker_home> <endpoint_id> -- best effort.
+# rw_visit_marker_remove <worker> <worker_home> <endpoint_id>...
+# Removes the markers in one ssh; non-zero when the worker did not answer.
 rw_visit_marker_remove() {
-  rw_ssh_batch "$1" "$(rw_ssh_status_timeout)" \
-    "rm -f $(rw_shquote "$(rw_state_dir_at "$2")/visits/$3.json")" </dev/null >/dev/null 2>&1 || true
+  local worker="$1" wh="$2" files="" e
+  shift 2
+  for e in "$@"; do files="$files $(rw_shquote "$(rw_state_dir_at "$wh")/visits/$e.json")"; done
+  [ -n "$files" ] || return 0
+  rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" "rm -f$files" </dev/null >/dev/null 2>&1
 }
 
 # rw_endpoint_open <kind> <worker> <worker_home> <worker_identity> <pane_id>
@@ -598,8 +707,25 @@ rw_endpoint_open() {
       created_at: $now, updated_at: $now, generation: 1}')"
 
   if [ "$kind" = "owned" ]; then
-    rw_record_add_endpoint "$root_id" "$endpoint_id"
-    rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null || true
+    # Fix wave A, finding 5: the endpoint is owned only once the record AND
+    # the worker's mirror list it. Without the mirror the worker's
+    # post-restore would kill its session at the next boot, so a failed push
+    # is a failure (the endpoint is discarded, nothing is left registered).
+    if ! rw_owned_record_read "$root_id" 2>/dev/null |
+      jq -e --arg w "$worker" '.owner == "worker" and .worker == $w' >/dev/null 2>&1 ||
+      ! rw_record_add_endpoint "$root_id" "$endpoint_id"; then
+      rw_close_endpoint_core "$endpoint_id" "record-add-failed" </dev/null
+      # shellcheck disable=SC2034 # read by the callers
+      RW_WORKER_SERVER_ERROR="the root is no longer remote on '$worker' (its ownership record changed)"
+      return 1
+    fi
+    if ! rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null; then
+      rw_record_remove_endpoint "$root_id" "$endpoint_id"
+      rw_close_endpoint_core "$endpoint_id" "mirror-push-failed" </dev/null
+      # shellcheck disable=SC2034 # read by the callers
+      RW_WORKER_SERVER_ERROR="could not record the pane in the ownership mirror on '$worker'"
+      return 1
+    fi
   elif ! rw_visit_marker_push "$worker" "$worker_home" "$endpoint_id" "$session_name" "$remote_path" </dev/null; then
     rw_close_endpoint_core "$endpoint_id" "visit-marker-failed" </dev/null
     # shellcheck disable=SC2034 # read by the callers
