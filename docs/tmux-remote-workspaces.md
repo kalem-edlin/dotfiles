@@ -18,19 +18,21 @@ is the command and operational reference.
 
 ### Local first
 
-New shells, windows, and agents start locally. `prefix e` on a local pane, or
-`rw handoff --worker <alias>`, hands the pane's root to a worker: every pane
-on the laptop server whose cwd is the root or inside it moves, in any session
-and at any depth. The rest of a mixed session stays local. `prefix e` on a
-remote pane hands the root back, behind a confirmation. `prefix e` runs both
-directions as background transfers (`rw bg`), so its popup closes as soon as
-the choice is made. A split follows the
-pane from which it was requested: a split of a remote pane opens remote in
-the same root, a split of a local pane stays local.
+New shells, windows, and agents start locally. `prefix e` opens one menu for
+the focused pane. Its first rows move only that pane to another host (a soft
+switch). Its last row transfers the pane's root: it hands the root off to a
+remote, or hands it back when a remote owns it, whichever pane it is pressed
+from. A handoff (that row, or `rw handoff --worker <alias>`) moves every pane
+on the laptop server whose cwd is the root or inside it, in any session and
+at any depth. The rest of a mixed session stays local. Transfers run in the
+background (`rw bg`), so the popup closes as soon as the choice is made. See
+"Pane host switching" for the menu.
 
-New windows and panes for a root that is already remote open on the worker:
-the picker's new-window and bare-worktree actions call `rw open` when the
-root is remote, and splits of a remote pane do the same.
+A new window or split follows the pane from which it was requested: from a
+remote pane, with or without ownership of its directory, it opens on that
+same remote in the pane's directory, and from a local pane it stays local,
+even beside remote panes. The picker's new-window and bare-worktree actions
+follow the owner instead: they call `rw open` when the root is remote.
 
 The outer laptop tmux owns the visible layout. Each remote-backed pane attaches
 over SSH to a single-pane, hidden worker tmux session (`prefix None`,
@@ -71,8 +73,8 @@ from reviving an endpoint the user deliberately closed. `prefix q` and
 `prefix &` use this lifecycle-aware path. Closing a pane does not change who
 owns its root.
 
-A worker session dies only through an explicit hand-back, `rw forget`, or
-`rw close`. No component deletes an endpoint or a copy merely because it is
+A worker session dies only through an explicit hand-back, `rw forget`,
+`rw close`, or a soft switch of its pane to another host. No component deletes an endpoint or a copy merely because it is
 old or because its local pane could not be found.
 
 ## Workspaces after slots and claims
@@ -121,7 +123,11 @@ transfer. They are not a global worktree ownership system.
 
 `rw handoff` creates one endpoint per pane in the root it moves. `rw open`
 creates one endpoint for a single new pane in a root the worker already owns,
-with no sync. Each endpoint follows this sequence:
+with no sync. `rw switch` creates one for a pane that visits a worker, or
+reuses the `rw open` path when that worker owns the directory. An endpoint
+is `owned` (listed in its root's ownership record, the default) or `visit`
+(the same hidden session and attach loop with no ownership record behind it).
+Each endpoint follows this sequence:
 
 1. Resolve the root and its ownership record and preflight the worker over
    SSH. Handoff refuses a root that is already remote. Open refuses a root
@@ -156,8 +162,7 @@ tombstones/<id>.json                 close intent written before teardown
 owned/<root_id>/record.json          ownership record: root, kind, worker, owner, since, endpoints, pending
 owned/<root_id>/manifest.focus.tsv   manifest of the laptop copy at the last ownership change
 owned/<root_id>/manifest.worker.tsv  manifest of the worker copy at the last ownership change
-held/<worker>/<root_id>.json         every worker copy this machine created, kept after hand-back
-handoff-backups/, handoff-staging/   git-channel backups and staging on the side being written
+held/<worker>/<root_id>.json         every worker copy this machine created, kept after hand-backhandoff-backups/, handoff-staging/   git-channel backups and staging on the side being written
 events.jsonl                         append-only lifecycle and transfer observations
 locks/                               mkdir locks around check-then-act operations
 rw.log                               diagnostic log
@@ -169,7 +174,10 @@ own state root, written by the laptop over SSH with `root_local` set to the
 worker path. The mirror survives hand-back with `owner: focus`, so the next
 handoff can check the worker copy against its manifest, and it is deleted only
 by `rw forget`. The `held/` index outlives the record so `rw forget` knows
-which workers still hold a copy.
+which workers still hold a copy. A visit endpoint has no record, so the
+worker keeps a small marker for it, `visits/<endpoint_id>.json` under its
+own state root, written when the endpoint is created and removed whenever the
+endpoint closes.
 
 Tmux pane and session options are caches. JSON and JSONL state is authoritative
 because tmux options do not survive a server restart and window indices are
@@ -207,6 +215,14 @@ with paths inside the root rewritten to the worker root. Unsaved buffer
 contents never travel (the picker warns first), and an editor that cannot
 be confirmed only prints the command to run, it never fails the handoff.
 
+A pane that is already visiting the target worker inside the root (a soft
+switch put it there) is not moved again. The handoff adopts it: its endpoint
+becomes owned and joins the record, with no second session and no respawn,
+and its visit marker goes once the mirror is written. A visiting pane that
+is mid-turn with an agent refuses the handoff before anything stops. Visit
+panes on other workers are left as they are. A hand-back moves only the
+record's endpoints, so those panes stay where they are, off-owner.
+
 A pane whose agent resume cannot be verified keeps its local agent running and
 stays local, so there are never two writers and never zero. The root still
 moves, and the command reports the pane. A handoff clears
@@ -218,9 +234,10 @@ checkout's `.git/worktrees`, discovery needs the path, hand-back is then a
 delta, and the copy stays readable while the worker is unreachable. Nothing
 blocks the filesystem. Any edit made to the frozen copy is caught by the
 manifest gate on hand-back. The zsh `chpwd` hook prints one line when a
-local shell enters a frozen root, naming the worker alias and `rw handback`;
-`rw-picker.sh` offers `rw open` when `prefix e` is pressed in a local pane
-that already sits inside a remote root.
+local shell enters a frozen root, naming the worker alias and `rw handback`,
+and the host chip turns red (see "Pane host switching"). From such a pane,
+`prefix e` lists the root's owner as its first, marked row, so enter moves
+the pane there in the same directory (the `rw open` path) without a prompt.
 
 `rw handback` brings the root and all of its panes back. It runs on the laptop
 from a local pane or popup and refuses to run inside the worker side of a
@@ -332,6 +349,176 @@ tmux or workspace transfer. Resumes go through `claudef --resume` and
 the same hooks run on the worker as on the laptop.
 Transcripts are installed under the worker's physical path, which is what
 Claude slugs its project directory from.
+
+## Pane host switching
+
+Ownership says which machine holds a root's files. A pane's host says where
+its shell runs. A handoff moves both together. A soft switch moves only the
+focused pane, in the same directory: no files move and ownership does not
+change. Three terms carry the rest of this section:
+
+- The owner host of a path is the remote named by the ownership record whose
+  root contains the path, otherwise this machine. A path that was never handed
+  off belongs to this machine.
+- The pane host is the remote the pane's attach loop runs on, otherwise this
+  machine.
+- An off-owner pane is one whose host is not the owner host of its directory.
+  Every soft switch away from the owner makes one, and so does the frozen
+  local copy of a remote root.
+
+Nothing here is specific to one worker. Any number of workers declared in
+`config.json` appear as menu rows. The UI says `remote` and `this machine`,
+never a host name, and follows `remote` with the configured alias in
+parentheses where the menu has to tell remotes apart.
+
+### The `prefix e` menu
+
+`prefix e` opens one popup for the focused pane. It first works out the pane's
+directory: a local pane's own, or a remote pane's live directory on the
+worker, asked over one ssh with a hard deadline. It then finds the root, the
+owner and the pane host, and names them in a two-line header (the directory and
+its root, then `pane on <host>` and `owned by <host>`). A warning line follows
+when an editor is involved, because unsaved buffers do not travel.
+
+The rows, in order:
+
+1. Soft-switch rows, one for every host except the pane's own: this machine
+   and each configured remote. The owner comes first, marked `(owner)`, so
+   enter picks it. Then this machine, then the other remotes in `config.json`
+   order. Remote rows show `online` or `offline` once probed, without moving
+   the cursor. When the pane has an agent and the destination is not the
+   owner, the row warns that the agent will work on a copy that does not own
+   the directory.
+2. One full-transfer row last. Its direction comes from the owner, not from
+   where the pane runs. When a remote owns the root, it reads "hand back
+   `<root>` to this machine", from a local pane or a remote one alike. When
+   this machine owns the root, it reads "hand off `<root>` to remote". Either
+   label adds the number of panes that move when more than one does. The root
+   is the one the header names, even if the pane has since changed directory.
+   The hand-off row is absent when the root is outside `~` or is `~` itself
+   (the header says so), when the directory exists only on the remote with
+   nothing enclosing it here to hand off, and when no worker is configured.
+
+Choosing a row is the confirmation. There is no yes or no prompt, including
+for a hand-back, and `esc` runs nothing. A hand-off asks which remote only
+when several are configured, listing the pane's own remote first, and the
+chooser is skipped when there is exactly one. Transfers start in the
+background and the popup closes. A soft switch runs in the popup, since it is
+quick. A refusal that `rw bg` finds at once, such as a root already moving,
+shows in the popup as a notice. Later conflicts and failures open their
+dialogs as before.
+
+If the pane's remote does not answer within the probe deadline, or its alias
+is no longer in `config.json`, the header says so and the menu changes. No
+soft-switch row is offered, because each one needs that remote. The first row
+is instead "release this pane to this machine (remote unreachable)" (or
+"remote not in config.json"). It runs `rw switch --to local --force`. The pane
+becomes a local shell in the last directory it reported, or the nearest
+existing parent, and prints one line saying so. Its endpoint leaves the
+ownership record but stays registered with a pending close. Whatever still
+runs on the remote, including an agent, is stopped by the next contact with
+that remote (any handoff, hand-back, open, switch or forget), and restore
+never reattaches that endpoint. Release changes no ownership, and a transfer
+row that needs the dead remote (a hand-back to it, a hand-off with no other
+remote) is left out. `rw reclaim --force` is the separate way to take a
+remote-owned root back. A reachable remote ignores `--force`, so the same
+command is then a normal switch.
+
+### Soft switch
+
+`rw switch --pane <pane> --to <alias|local> [--dir <abs-path> | --dir-of <pane>]`
+is what the menu runs. It is synchronous and moves one pane, in the same
+directory.
+
+- To a remote that owns the directory's root, the pane gets an owned endpoint,
+  made as `rw open` makes it and listed in the record. To any other remote it
+  gets a visit endpoint, which has no record. Either way the worker directory
+  is the mapped path, or its nearest existing parent with one printed line
+  saying so.
+- To this machine from a remote pane, the attach loop is replaced by a local
+  shell in the same pane, window and layout, in the mapped local directory
+  (the nearest existing parent when missing). The worker session closes and
+  the endpoint is unregistered, and removed from its record when it was owned.
+- Remote to remote works the same way, closing the source endpoint after the
+  new one is attached.
+
+What moves with the pane is the program in it. A shell moves as it is. A
+`claudef` or `pif` agent moves through the provider adapters, the same
+export, install and resume as a handoff without the directory sync, and the
+source agent stops only after the destination resume is confirmed, so there
+are never two writers and never zero. If anything fails before then, the new
+endpoint is discarded and the source is untouched. An editor (nvim, vim, vi)
+reopens on the destination, best effort, and unsaved buffers never travel.
+Files and ownership do not move. After a soft switch away from the owner, the
+pane works on whatever copy the destination has, which may be stale.
+
+A switch refuses, with exit 7 and one `rw: <reason>` line, when:
+
+- the pane already runs on that host;
+- the pane is a remote file tree pane (close it with `prefix Tab`);
+- its foreground program is not a shell, an editor or a recognized agent
+  (quit it first), checked on the remote for a remote pane;
+- an agent in it is working, or a remote agent has no session record to move;
+- an agent's directory does not exist on the destination, because Claude finds
+  its transcript by path;
+- a background transfer of the root is running (`rw bg`).
+
+The other exit codes are those of the rest of `rw`: 3 when an agent's CLI
+at the destination is older than the one that wrote the session (remote to
+remote compares the two remotes, since this machine's version does not
+matter); 6 when the destination, or the pane's own remote, is unreachable,
+with the pane unchanged; 64 for usage or an alias not in `config.json`; and
+1 for any other failure, which leaves the pane as it was. A remote pane whose
+session is missing on its remote also exits 1 while that remote is restoring
+its sessions or when an agent ran in it, so a restoring remote never has its
+agent mistaken for an empty shell. Every root a switch touches is locked while
+it runs.
+
+### New windows and splits
+
+`prefix c`, `prefix \`, and `prefix /` follow the pane host. From a remote
+pane, owned or off-owner, they open a new window or split on the same remote
+in the pane's directory. The window or pane appears at once as a local shell in
+the title-based directory, with no ssh in the key press, and `rw switch
+--dir-of <source pane>` then runs in it, asks the remote for the live
+directory, and attaches the remote shell, in about half a second. If the
+remote cannot be reached, the new pane simply stays a local shell. From a local
+pane, `prefix c` and the splits are ordinary local ones, even beside remote
+panes in the same window. The picker's new window (`prefix o`, then `w`) is
+the one exception: it follows the root's owner, opening remote for a remote
+root.
+
+### The red host chip
+
+The host chip in the status line is red instead of its usual color
+while the focused pane is off-owner. The pane option `@rw-off-owner` (`1` or
+unset) drives it, and `rw-refresh-indicators.sh` is its only writer. It shows
+in two cases:
+
+- A remote pane whose directory this machine owns, or another remote owns. The
+  directory is the one the endpoint was opened in, not whatever the shell has
+  `cd`'d to on the worker since.
+- A local pane in a directory a remote owns, which is the frozen copy.
+
+A pending forget does not make a remote the owner. The flag is recomputed when a local shell changes
+directory (the zsh `chpwd` hook, which runs while any ownership record
+exists), when an endpoint's attach loop starts, after every handoff, hand-back,
+switch, open, reclaim and forget (for every pane in the root), after pending
+actions finish, and after restore. It makes no ssh and runs under one lock, so
+the last run always writes the newest state. A restore recomputes it and never
+trusts the saved value.
+
+### Restore of visit panes
+
+Panes connected to a remote restore as such on both machines, visit panes the
+same as owned ones. On the laptop, `rw-post-restore.sh` reattaches a visit
+endpoint by endpoint id, and the sidecar treats the pane as captured. On the
+worker, the hidden session is saved by the worker's timer and restored by the
+boot restore. `rw-worker-post-restore.sh` keeps it because its visit marker
+names a different focus machine, and re-applies the hidden-session options as
+for any `rw-*` session. Reconciliation never closes a visit endpoint for
+lacking an ownership record. The one exception is an endpoint with a pending
+close, which restore leaves alone.
 
 ## Remote Treemux and input
 
@@ -491,15 +678,17 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 
 | Action | Behavior |
 | --- | --- |
-| `prefix e` | On a local pane, choose a worker and hand off the pane's root. On a remote pane, confirm, then hand the root back. Both run in the background |
-| `prefix \\` / `prefix /` | Split locally, or open a new remote pane in the source pane's root with `rw open` |
+| `prefix e` | One menu for the focused pane: soft-switch rows (this machine and each remote except the pane's own host), then one transfer row, hand back when a remote owns the root, hand off otherwise. Choosing a row is the confirmation. Transfers run in the background |
+| `prefix c` | New window on the pane's host: local from a local pane, the same remote from a remote pane |
+| `prefix \\` / `prefix /` | Split on the pane's host, with the same rule as `prefix c` |
 | `prefix q` | Close the focused endpoint through tombstone-first teardown, otherwise kill a plain pane |
 | `prefix &` | Confirm, close all endpoints in the window, then kill the window |
 | `prefix Tab` | Open local Treemux or toggle a remote tree endpoint |
 | `prefix [` / `PageUp` | Enter local or worker-side copy mode as appropriate |
 | `prefix Ctrl-s` | Run the verified local save and, when focused remotely, the worker save |
 | `rw status` | Print remote roots (owner, worker, panes, pending), then each endpoint's live pane and latest event |
-| `rw doctor` | Report local, worker, registry, reconciliation, and clipboard health |
+| `rw doctor` | Report local, worker, registry, reconciliation, ssh config speed, and clipboard health |
+| `rw switch` | Soft-switch one pane to a remote or back to this machine, in the same directory. No files move |
 | `rw bg handoff` / `rw bg handback` | Check, return at once, then transfer detached after the root's agents go idle; status-line chip, dialogs on conflict or failure |
 | `rw request handback` | On the worker side of a pane: ask the laptop to hand the root back |
 | `/remote-handoff to [worker]` / `back` | Agent skill: the agent hands off its own directory and continues on the other side |
@@ -507,7 +696,9 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 The CLI forms are `rw handoff`, `rw handback`,
 `rw bg handoff [--worker <alias>] --pane <pane> [--wait-idle <seconds>]`,
 `rw bg handback --pane <pane> [--wait-idle <seconds>]`,
-`rw request handback`, `rw open`, `rw forget`, `rw reclaim --force`,
+`rw request handback`, `rw open`,
+`rw switch [--pane <pane>] --to <alias|local> [--dir <abs-path> | --dir-of <pane>] [--force]`,
+`rw forget`, `rw reclaim --force`,
 `rw status [--json]`, `rw close`, and `rw doctor`. `rw bg` exits 0 once
 started, 1 when a transfer of the root already runs or the pane is
 missing, 7 for an invalid, already remote or not remote root or the
@@ -515,10 +706,11 @@ worker side, and 64 on usage; the transfer's own codes go to its log and
 dialog.
 Exit codes: 0 ok, 1 failure, 2 git history diverged, 3 agent CLI too old,
 5 manifest conflict, 6 worker unreachable, 7 root invalid or not in the
-required state, 64 usage.
+required state (`rw switch`: refused), 64 usage.
 
 Navigation and resize bindings are ordinary local tmux commands. New windows
-stay local unless they are opened for a root that is already remote.
+and splits follow the host of the pane they were made from, and the picker's
+new window follows the owner of its root.
 
 ## Implementation map
 
@@ -543,8 +735,10 @@ stay local unless they are opened for a root that is already remote.
   copy deletion, and pending-action reconciliation.
 - `scripts/rw-handoff.sh`, `rw-handback.sh`, `rw-forget.sh`, and
   `rw-reclaim.sh` implement root ownership changes.
-- `scripts/rw-open.sh`, `rw-close.sh`, `rw-close-window.sh`, and
-  `rw-split.sh` implement endpoint creation and pane or window lifecycle.
+- `scripts/rw-open.sh`, `rw-switch.sh`, `rw-close.sh`, `rw-close-window.sh`,
+  `rw-split.sh`, and `rw-new-window.sh` implement endpoint creation, the soft
+  switch, and pane or window lifecycle. `rw-split.sh` and `rw-new-window.sh`
+  back the splits and `prefix c`.
 - `scripts/attach-loop.sh` owns reconnect and pane-release behavior and
   starts and stops each endpoint's agent-state side channel.
 - `libexec/remote-state` is that side channel: the worker-side poll loop,
@@ -554,10 +748,10 @@ stay local unless they are opened for a root that is already remote.
   and reports the worker's physical home.
 - `scripts/resolve-workspace.sh` resolves a root and its `~`-relative worker
   placement without SSH.
-- `scripts/rw-picker.sh` implements the
-  `prefix e` popup: worker chooser and `rw bg handoff` on a local pane,
-  confirmation and `rw bg handback` on a remote pane, `rw open` on a local
-  pane in a remote root.
+- `scripts/rw-picker.sh` implements the `prefix e` popup: the soft-switch
+  and transfer rows, the release row, and the hand-off worker chooser. It
+  calls only `rw switch`, `rw bg handoff` and `rw bg handback`, and never
+  creates endpoints itself.
 - `libexec/rw-bg` is `rw bg`: the synchronous check, the `setsid` detach
   and the runner (wait-idle, transfer, conflict re-run, failure dialog).
   `libexec/rw-bg-dialog` runs the conflict dialog inside the runner's
@@ -567,7 +761,8 @@ stay local unless they are opened for a root that is already remote.
 - `scripts/rw-status.sh` and `rw-doctor.sh` expose state and health.
 - `scripts/rw-copy-mode.sh` enters copy mode on the correct tmux server.
 - `scripts/rw-refresh-indicators.sh` reconciles display caches with live attach
-  loops and, with `--transfers`, sets `@rw-transfer` and
+  loops, is the only writer of `@rw-off-owner` (`--pane`, `--root`, or every
+  pane), and, with `--transfers`, sets `@rw-transfer` and
   `@rw-transfer-label` from the running background transfers and wires
   their status-line chip.
 - `scripts/session-created-hook.sh` maintains stable session identities.
@@ -613,9 +808,9 @@ All `scripts/` paths in this section are relative to
 
 - `tmux/tmux.conf` loads the two local plugins in order, enables passthrough,
   wires the status line, and replaces Treemux's binding.
-- `tmux/tmux.reset.conf` owns picker, split,
+- `tmux/tmux.reset.conf` owns picker, new-window, split,
   navigation, resize, close, reload, and restore bindings, including
-  `prefix e` in both directions.
+  `prefix e`, `prefix c` and the splits.
 - `tmux/local-plugins/tmux-workspace-resurrect/`
   owns the companion sidecar, records `rw_endpoint` per pane, skips replay
   for endpoint panes, and honors `@workspace-resurrect-skip` during restore.
@@ -703,11 +898,19 @@ All `scripts/` paths in this section are relative to
   so `prefix e` no longer holds the client and an agent can hand off its
   own directory (`/remote-handoff`). `rw request handback` lets the worker
   side ask for a hand-back through the `@rw-request` pane option.
-
 - **2026-11-18 (R1):** Remote agents became visible on the laptop. Each
   attach loop runs one ssh side channel that mirrors the worker pane's
   `@agent_*` onto its laptop pane, with `disconnected` while the worker is
   out of sight. The same channel carries `rw request handback`.
+- **2026-11-18 (`rw-pane-switching`):** `prefix e` became one menu: soft-switch
+  rows that move only the pane (and its `claudef`, `pif` or editor) between
+  this machine and any remote, then one transfer row whose direction the
+  owner decides. Choosing a row is the confirmation, so the hand-back prompt
+  went. Visit endpoints carry a pane to a remote that does not own its
+  directory, `prefix c` and the splits follow the pane host, and a red host
+  chip marks off-owner panes. A pane on an unreachable remote is released
+  with `rw switch --to local --force`. Review findings were fixed before
+  merge (`docs/tasks/remote-owned-directories.md`, "Pane host switching").
 
 The September decision is final for this system. Do not reintroduce slots,
 claims, reflected repository rules, or a global worktree manager as a remote
@@ -728,7 +931,12 @@ Keep validation proportional to the layer changed:
 5. Use a private tmux socket and private Resurrect directory for any test that
    creates sessions, panes, hooks, or snapshots. Never test those paths on the
    interactive server.
-6. Run `rw doctor` for local and reachable-worker health. It is read-only.
+6. Run `rw doctor` for local and reachable-worker health. It is read-only. It
+   also times `ssh -G <worker>` and fails above 300 ms
+   (`RW_DOCTOR_SSH_CONFIG_SLOW_MS`). ssh evaluates a `Match ... exec` line on
+   every call, before it looks at the ControlMaster socket, so one slow check
+   (a LAN probe that hangs away from home, on the `mini` alias) once added
+   1.5 s to every key that reached the worker. Keep such helpers cached.
 7. Recheck `~`-relative placement, roots outside `~`, and subdirectories of a
    worktree after changing `resolve-workspace.sh` or the root helpers in
    `common.sh`.
