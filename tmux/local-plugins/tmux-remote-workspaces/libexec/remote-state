@@ -12,8 +12,9 @@
 #       The side channel. Started in the background by attach-loop.sh just
 #       before each attach, killed (SIGTERM) by it before the next attempt
 #       and on every exit. One long-lived ssh per endpoint (multiplexed on
-#       the alias's ControlMaster) runs a worker-side loop that polls the
-#       endpoint pane every RW_STATE_POLL_SECONDS (default 2) with one local
+#       rw's stream ControlMaster, rw_ssh_stream_opts) runs a worker-side
+#       loop that polls the endpoint pane every RW_STATE_POLL_SECONDS
+#       (default 2) with one local
 #       `tmux display-message` and prints a line only when it changed (plus a
 #       heartbeat, so a dead connection ends the worker loop). Never one ssh
 #       per poll. When the stream ends on its own (ssh lost), the pane's
@@ -316,9 +317,11 @@ rw_state_watch() {
   # shellcheck disable=SC2064
   trap "rm -rf '$tmpdir'" EXIT
 
+  # The stream ControlMaster (rw_ssh_stream_opts), beside the attach.
+  rw_ssh_stream_opts
   while rw_state_owns_pane "$pane_id" "$endpoint_id" && kill -0 "$parent" 2>/dev/null; do
     "$(rw_ssh_bin)" -o BatchMode=yes -o ConnectTimeout="$(rw_ssh_connect_timeout)" \
-      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 ${RW_SSH_STREAM_OPTS[@]+"${RW_SSH_STREAM_OPTS[@]}"} \
       "$worker" "$(rw_state_watch_cmd "$session_name")" </dev/null >"$fifo" 2>/dev/null &
     RW_STATE_SSH_PID=$!
     rw_state_apply_stream "$endpoint_id" "$pane_id" "$worker" "$session_name" \

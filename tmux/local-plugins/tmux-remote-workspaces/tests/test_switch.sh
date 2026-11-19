@@ -128,15 +128,21 @@ check "S: a switch event" grep -q '"event":"switch".*"outcome":"success"' "$TMUX
 check "S: no host name in what it printed" bash -c "! grep -q fakeworker <<<'$out'"
 
 # --- R: a remote pane ------------------------------------------------------------------
-remote %1 "$W/Developer/proj/sub"
-eq "R: a remote pane's directory is its live remote cwd, mapped back" "$(rw_pane_dir %1)" "$proj/sub"
+remote %1 "$W/Developer/proj"
+eq "R: a remote pane's directory is its live remote cwd, mapped back" "$(rw_pane_dir %1)" "$proj"
 setp %1 pane_title "$W/elsewhere/x"
 eq "R: ... anywhere under the remote home" "$(rw_pane_dir %1)" "$H/elsewhere/x"
 setp %1 pane_title "mini.local"
 eq "R: a title that is no path falls back to the endpoint's focus path" "$(rw_pane_dir %1)" "$proj/sub/deep"
+# X4: the pane is still in the parent it opened in, because its directory
+# (sub/deep) does not exist on the remote: it is in that directory as far as
+# this machine is concerned, so a switch back or a split keeps it.
 setp %1 pane_title "$W/Developer/proj/sub"
+eq "R: still in the parent it opened in (directory missing there): its focus path" "$(rw_pane_dir %1)" "$proj/sub/deep"
+eq "R: ... also when the remote answers (--live)" "$(FAKE_REMOTE_CWD="$W/Developer/proj/sub" rw_pane_dir %1 --live)" "$proj/sub/deep"
+setp %1 pane_title "$W/Developer/proj"
 eq "R: --live asks the remote session first (the title can lag)" "$(FAKE_REMOTE_CWD="$W/Developer/proj/sub/deep" rw_pane_dir %1 --live)" "$proj/sub/deep"
-eq "R: --live falls back to the title when the remote does not answer" "$(touch "$FAKE_SSH_DOWN"; rw_pane_dir %1 --live; rm -f "$FAKE_SSH_DOWN")" "$proj/sub"
+eq "R: --live falls back to the title when the remote does not answer" "$(touch "$FAKE_SSH_DOWN"; rw_pane_dir %1 --live; rm -f "$FAKE_SSH_DOWN")" "$proj"
 
 # --- X: refusals -------------------------------------------------------------------------
 rw switch --pane %1 --to fakeworker >/dev/null 2>"$SANDBOX/err"
@@ -164,7 +170,7 @@ eq "S: remote to another remote: exit 0" "$?" "0"
 ep2="$(opt %1 @rw-endpoint)"
 check "S: a new endpoint on the other remote" test -n "$ep2" -a "$ep2" != "$ep1"
 eq "S: ... a visit there too" "$(ep_field "$ep2" '.kind + " " + .worker')" "visit fakeworker2"
-eq "S: ... in the live directory" "$(ep_field "$ep2" .workspace.focus_path)" "$proj/sub"
+eq "S: ... in the live directory" "$(ep_field "$ep2" .workspace.focus_path)" "$proj"
 check "S: the old endpoint is closed" bash -c "[ -f '$TMUX_REMOTE_WORKSPACES_STATE_DIR/tombstones/$ep1.json' ] && [ ! -f '$(rw_endpoint_file "$ep1")' ]"
 check "S: ... its session killed after the pane moved" order "^tmux respawn-pane -k -t %1 .*$ep2" "kill-session -t '=$(rw_session_name "$ep1")'"
 check "S: ... and its marker gone" test ! -e "$markers/$ep1.json"
@@ -190,6 +196,20 @@ eq "S: remote-only directory: exit 0" "$?" "0"
 check "S: ... the shell starts at the nearest existing parent" grep -q "^tmux respawn-pane -k -t %1 -c $proj exec" "$FAKE_EVENTS"
 eq "S: ... with one line saying so" "$(printf '%s\n' "$out" | grep -c 'does not exist on this machine')" "1"
 check "S: ... and that endpoint closed" test -f "$TMUX_REMOTE_WORKSPACES_STATE_DIR/tombstones/$ep3.json"
+
+# X4 (real worker, 2026-11-18): a pane whose directory the remote lacks
+# opens there in the nearest existing parent; switched back without a cd,
+# it returns to the directory it left, not to that parent.
+pane_line %9 "$proj/sub/deep" zsh 999989 >>"$FAKE_TMUX_PANES"
+rw switch --pane %9 --to fakeworker >/dev/null 2>&1
+ep9="$(opt %9 @rw-endpoint)"
+eq "S: round trip: the remote side opened in the parent" "$(ep_field "$ep9" .workspace.remote_path)" "$W/Developer/proj/sub"
+remote %9 "$W/Developer/proj/sub"
+: >"$FAKE_EVENTS"
+out="$(FAKE_REMOTE_CWD="$W/Developer/proj/sub" rw switch --pane %9 --to local 2>/dev/null)"
+eq "S: round trip back: exit 0" "$?" "0"
+check "S: ... the local shell is in the directory the pane left" grep -q "^tmux respawn-pane -k -t %9 -c $proj/sub/deep exec" "$FAKE_EVENTS"
+eq "S: ... and says so" "$out" "rw: this pane runs on this machine again, in ~/Developer/proj/sub/deep."
 
 # --- O: the remote that owns the root ------------------------------------------------------------
 owned="$H/Developer/owned"

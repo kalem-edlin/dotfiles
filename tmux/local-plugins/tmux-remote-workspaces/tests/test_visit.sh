@@ -144,8 +144,12 @@ unset FAKE_TMUX_SESSIONS
 # --- A: handoff adopts the visit pane on that remote --------------------------------------------
 id="$(rw_root_id Developer/vproj)"
 : >"$FAKE_EVENTS"
-rw handoff --worker fakeworker --root "$proj" >/dev/null 2>"$SANDBOX/err"
+rw handoff --worker fakeworker --root "$proj" >"$SANDBOX/out" 2>"$SANDBOX/err"
 eq "A: handoff of the root: exit 0" "$?" "0"
+# X4: the summary names the adopted pane (it read "0 pane(s) moved" when
+# only adopted panes were in the root).
+eq "A: the summary counts the moved and the adopted pane" "$(cat "$SANDBOX/out")" \
+  "rw: Developer/vproj is now remote on fakeworker (1 pane(s) moved, 1 already there)."
 eq "A: the visit pane on that remote is now owned" "$(ep_field "$v1" '.kind + " " + .root_id')" "owned $id"
 eq "A: ... with the root's worker root" "$(ep_field "$v1" .workspace.worker_root)" "$W/Developer/vproj"
 check "A: ... listed in the record" bash -c "jq -e --arg e '$v1' '.endpoints | index(\$e)' '$(rw_owned_record_file "$id")' >/dev/null"

@@ -670,7 +670,13 @@ rw_worker_request_save "$worker"
 rw_log_event "handoff" "$self_endpoint" "$worker" "$(rw_elapsed_ms "$start_ts")" \
   "$([ "$failed" -eq 0 ] && echo success || echo partial)" \
   "root=$root_rel kind=$kind panes=$moved adopted=$adopted failed=$failed $(printf '%s' "$sync_out" | jq -r '"renamed=\(.renamed | length) overwritten=\(.overwritten)"' 2>/dev/null)"
-printf 'rw: %s is now remote on %s (%d pane(s) moved).\n' "$root_rel" "$worker" "$moved"
+# Panes that were already there (soft switches, adopted above) are named
+# too: "0 pane(s) moved" alone read as if they had been left behind.
+if [ "$adopted" -gt 0 ]; then
+  printf 'rw: %s is now remote on %s (%d pane(s) moved, %d already there).\n' "$root_rel" "$worker" "$moved" "$adopted"
+else
+  printf 'rw: %s is now remote on %s (%d pane(s) moved).\n' "$root_rel" "$worker" "$moved"
+fi
 # Every pane in the root changed host or owner (CS3). Best effort.
 rw_refresh_indicators --root "$root_local"
 
