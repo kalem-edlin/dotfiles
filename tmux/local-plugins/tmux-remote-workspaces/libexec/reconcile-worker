@@ -80,6 +80,7 @@ while read -r sname screated sattached; do
   id="${sname#"$prefix"}"
   [ -n "$id" ] || continue
   [ "$id" = "$exclude" ] && continue
+  # Registered (owned or visit; a visit endpoint is in no record) = wanted.
   rw_endpoint_exists "$id" && continue
   case "$screated" in *[!0-9]* | '') continue ;; esac
   [ $((remote_now - screated)) -ge "$min_age" ] || continue

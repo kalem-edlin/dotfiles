@@ -5,11 +5,12 @@
 # Idempotent: run against a pane that already has a live @rw-endpoint it
 # reattaches that endpoint instead of creating a second one.
 #
-# The pane's worker directory is its local cwd mapped onto the worker
-# (<worker home>/<path relative to ~>); a cwd outside the root (possible
-# with --root) maps to the worker root.
+# The pane's worker directory is its local cwd (or --dir, a path on this
+# machine) mapped onto the worker (<worker home>/<path relative to ~>); a
+# directory outside the root (possible with --root) maps to the worker root.
 #
 # Usage: rw-open.sh [--worker <alias>] [--root <path>] [--pane <pane-id>]
+#                   [--dir <abs-path>]
 #
 # On success this script `exec`s into attach-loop.sh in the calling pane,
 # or respawns the --pane target into it. It returns (shell intact) when
@@ -29,17 +30,20 @@ rw_config_valid || rw_die "config.json ($RW_CONFIG_FILE) is invalid"
 
 worker=""
 root_arg=""
+dir_arg=""
 pane_id="${TMUX_PANE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --worker) worker="${2:?}"; shift 2 ;;
     --root) root_arg="${2:?}"; shift 2 ;;
     --pane) pane_id="${2:?}"; shift 2 ;;
+    --dir) dir_arg="${2:?}"; shift 2 ;;
     *) rw_die "rw open: unknown argument: $1" 64 ;;
   esac
 done
 
 [ -n "$pane_id" ] || rw_die "rw open: must be run inside a tmux pane, or pass --pane" 64
+case "$dir_arg" in '' | /*) : ;; *) rw_die "rw open: --dir takes an absolute path" 64 ;; esac
 
 # start_loop <endpoint> [--fresh] -- the calling pane becomes the loop; any
 # other pane is respawned into it.
@@ -52,7 +56,7 @@ start_loop() {
   fi
   printf -v cmd '%q %q %s' "$SCRIPT_DIR/attach-loop.sh" "$endpoint" "$fresh"
   dir="$(rw_read_endpoint "$endpoint" | jq -r '.workspace.focus_path // empty')"
-  [ -d "$dir" ] || dir="$HOME"
+  dir="$(rw_local_existing_dir "${dir:-$HOME}")"
   tmux respawn-pane -k -t "$pane_id" -c "$dir" "$cmd" || rw_die "rw open: could not start the attach loop in pane $pane_id" 1
   exit 0
 }
@@ -70,7 +74,11 @@ fi
 start_ts="$(rw_now_epoch)"
 
 # --- Root -------------------------------------------------------------------
-cwd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null || true)"
+if [ -n "$dir_arg" ]; then
+  cwd="$dir_arg"
+else
+  cwd="$(tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null || true)"
+fi
 [ -n "$cwd" ] || cwd="$(pwd -P)"
 cwd="$(rw_physical_path "$cwd")"
 if [ -n "$root_arg" ]; then
@@ -119,60 +127,16 @@ case "$cwd" in
   *) focus_path="$root_local" ;;
 esac
 remote_path="$(rw_path_under_root "$focus_path" "$root_local" "$worker_root")"
-endpoint_id="$(rw_new_short_id)"
-session_name="$(rw_session_name "$endpoint_id")"
 
-# A worker with no tmux server gets one through its boot restore wrapper
-# (never a bare new-session); a server whose last restore did not complete is
-# refused, since nothing created there would ever be saved.
-if ! rw_create_remote_session "$worker" "$session_name" "$remote_path" "$(rw_ssh_connect_timeout)" </dev/null >/dev/null 2>&1; then
+# The owned endpoint (shared with `rw switch`, roots.sh): the hidden session
+# on the worker, endpoints/<id>.json, the record and its mirror.
+if ! rw_endpoint_open owned "$worker" "$worker_home" "$(printf '%s' "$preflight_json" | jq -r '.hostname')" \
+  "$pane_id" "$root_id" "$root_rel" "$kind" "$root_local" "$worker_root" "$focus_path" "$remote_path" open; then
   rw_log_event "create" "" "$worker" "$(rw_elapsed_ms "$start_ts")" "fail" "remote_session: $RW_WORKER_SERVER_ERROR"
   rw_die "rw open: could not create the remote session for this pane: $RW_WORKER_SERVER_ERROR." 1
 fi
-
-session_uuid="$(tmux show-option -t "$pane_id" -qv @session-uuid 2>/dev/null || true)"
-[ -n "$session_uuid" ] || session_uuid="$(rw_pane_get "$pane_id" @rw-session-uuid)"
-session_name_local="$(tmux display-message -pt "$pane_id" -F '#{session_name}' 2>/dev/null || true)"
-window_index="$(tmux display-message -pt "$pane_id" -F '#{window_index}' 2>/dev/null || echo 0)"
-pane_index="$(tmux display-message -pt "$pane_id" -F '#{pane_index}' 2>/dev/null || echo 0)"
-now="$(rw_now_iso)"
-
-rw_write_json_atomic "$(rw_endpoint_file "$endpoint_id")" "$(jq -nc \
-  --arg endpoint_id "$endpoint_id" \
-  --arg worker "$worker" \
-  --arg worker_identity "$(printf '%s' "$preflight_json" | jq -r '.hostname')" \
-  --arg focus_machine_id "$(rw_machine_id)" \
-  --arg root_id "$root_id" \
-  --arg root_rel "$root_rel" \
-  --arg focus_session_uuid "$session_uuid" \
-  --arg focus_session_name "$session_name_local" \
-  --argjson focus_window_index "${window_index:-0}" \
-  --argjson focus_pane_index "${pane_index:-0}" \
-  --arg focus_pane_id "$pane_id" \
-  --arg kind "$kind" \
-  --arg focus_path "$focus_path" \
-  --arg remote_path "$remote_path" \
-  --arg root_local "$root_local" \
-  --arg worker_root "$worker_root" \
-  --arg now "$now" \
-  '{endpoint_id: $endpoint_id, worker: $worker, worker_identity: $worker_identity,
-    focus_machine_id: $focus_machine_id, root_id: $root_id, root_rel: $root_rel,
-    focus_session_uuid: $focus_session_uuid, focus_session_name: $focus_session_name,
-    focus_window_index: $focus_window_index, focus_pane_index: $focus_pane_index,
-    focus_pane_id: $focus_pane_id,
-    workspace: {mode: $kind, identity: "", focus_path: $focus_path, remote_path: $remote_path,
-      root_local: $root_local, worker_root: $worker_root},
-    launch_intent: {worker: $worker, workspace_arg: "open"},
-    agent: {provider: null, session_id: null, resume_intent: null, state: null},
-    created_at: $now, updated_at: $now, generation: 1}')"
-rw_record_add_endpoint "$root_id" "$endpoint_id"
-rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null || true
-
-rw_pane_set "$pane_id" @rw-endpoint "$endpoint_id"
-rw_pane_set "$pane_id" @rw-worker "$worker"
-rw_pane_set "$pane_id" @rw-workspace "$remote_path"
-rw_pane_set "$pane_id" @rw-root-id "$root_id"
-[ -n "$session_uuid" ] && rw_pane_set "$pane_id" @rw-session-uuid "$session_uuid"
+endpoint_id="$RW_ENDPOINT_ID"
+rw_bind_pane "$pane_id" "$endpoint_id"
 
 rw_log_event "create" "$endpoint_id" "$worker" "$(rw_elapsed_ms "$start_ts")" "success" "open root=$root_rel"
 # New session on the worker: refresh its snapshot (fire and forget).

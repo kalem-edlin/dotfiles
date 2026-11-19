@@ -33,7 +33,8 @@ rw handoff --worker <alias> [--root <path>] [--pane <pane-id>] [--check-lfs]
 rw handback [--root <path>] [--pane <pane-id>] [--check-lfs]
             [--force-diverged] [--resolve overwrite|keep-both|abort]
             [--wait-idle [seconds]]
-rw open    [--worker <alias>] [--root <path>] [--pane <pane-id>]
+rw open    [--worker <alias>] [--root <path>] [--pane <pane-id>] [--dir <abs-path>]
+rw switch  [--pane <pane-id>] --to <alias|local> [--dir <abs-path>]
 rw forget  <root> [--worker <alias>] [--force]
 rw reclaim [--force] <root>
 rw status  [--json]
@@ -50,9 +51,25 @@ rw doctor
   off the project inside it, or pass `--root` to mean the whole folder.
 - `handback` brings the root and all of its panes (and their agents) back.
   It replaces `rw return`.
-- `open` is a new remote pane in a root that is already remote (splits and
-  the picker use it). No sync. Idempotent: on a pane that already has a
-  live endpoint it reattaches instead. It replaces `rw ensure`.
+- `open` is a new remote pane in a root that is already remote. No sync.
+  Idempotent: on a pane that already has a live endpoint it reattaches
+  instead. It replaces `rw ensure`. `--dir` names the directory (a path on
+  this machine) instead of the pane's own.
+- `switch` moves ONE pane to a remote or back to this machine (`local`), in
+  the same directory (default: the pane's own; for a remote pane its live
+  remote cwd, mapped back): no file moves and no ownership changes. To the
+  remote that owns the directory's root it makes an owned pane, as `open`
+  does; to any other remote a *visit* pane (same hidden session and attach
+  loop, listed in no ownership record; the directory is the home-relative
+  path there, or its nearest existing parent, with one line saying so).
+  Back to this machine the attach loop becomes a local shell in the same
+  pane and the remote session is closed. A `claudef`/`pif` agent moves with
+  the pane: resumed and confirmed on the destination before the source copy
+  stops; refused while it is working or when its directory is missing on
+  the destination. An editor is reopened there, best effort. Anything else
+  in the pane is refused (exit 7) until it is quit. Splits and `prefix c`
+  run it inside the new pane. Exit 0, 1 (failed, the pane is as it was),
+  3, 6 (unreachable), 7 (refused).
 - `forget` is for a root that is gone (deleted worktree or session): it
   deletes every remote copy this machine handed off, then closes the root's
   remote panes. A remote directory that already existed before rw's first
@@ -107,8 +124,9 @@ directly after setup. It can still be invoked by full path,
   2026-08-05 rw-dispatch forwarding layer this replaced cost ~150ms per
   forwarded key and produced two operator-facing incidents; it is gone.)
 - `prefix \` / `prefix /`: unchanged local splits, *unless* the source pane
-  is remote-backed, in which case the new pane opens in the same remote
-  root as its own endpoint via `rw open`.
+  is remote-backed (owned or visit), in which case the new pane opens on
+  the same remote in the source pane's live directory, as its own endpoint,
+  via `rw switch` run inside it.
 - `prefix &`: now closes any remote endpoints owned by panes in the window
   before killing it (`rw-close-window.sh`), behind the same confirmation
   prompt tmux ships by default.
@@ -136,7 +154,10 @@ directly after setup. It can still be invoked by full path,
   beside it. The listener is self-healing: attach-loop re-ensures it (via
   the listener's pidfile) on every attach/reconnect, which covers laptop
   restores and listener crashes without any restore-path coupling.
-- New windows stay local by default -- unchanged.
+- `prefix c` follows the pane host like the splits (`rw-new-window.sh`): a
+  new window from a remote pane (owned or visit) opens on the same remote in
+  that pane's live directory (`rw switch` inside the new pane); from a local
+  pane it is a plain local window.
 
 Remote Treemux is consume-never-provision like the rest of this plugin. The
 worker must already have the dotfiles, Neovim >= 0.10, and the Treemux TPM
@@ -291,7 +312,14 @@ Endpoint records keep their previous shape plus `root_id`, `root_rel`,
 `focus_session_uuid`, `focus_session_name`, `focus_window_index`,
 `focus_pane_index`, and `workspace.{root_local,worker_root}`; agent
 endpoints also record `agent.project_path_focus` and
-`agent.project_path_worker`.
+`agent.project_path_worker`. `kind` is `owned` (absent reads as owned:
+listed in its root's record) or `visit` (a `rw switch` pane on a remote
+that does not own its directory, in no record; `root_id`/`root_rel` name
+the enclosing root, or are null). Endpoints made by `rw open`/`rw switch`
+also carry `worker_home`. A visit endpoint has a marker on the worker,
+`<worker state>/visits/<endpoint_id>.json`, which the worker's
+post-restore reads so the restored session is kept; closing any endpoint
+removes it.
 
 `@session-uuid`, `@rw-endpoint`, `@rw-worker`, `@rw-workspace`,
 `@rw-root-id`, `@remote-host` are tmux user options and are **cache only** --

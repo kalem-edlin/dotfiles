@@ -26,6 +26,9 @@
 #   6. Commit: close the worker sessions, delete the ownership record, and
 #      rewrite the worker's mirror (owner focus, fresh manifests).
 #
+# Only the record's endpoints move (S8): visit panes of this root on other
+# remotes (soft switches, `rw switch`) stay where they are.
+#
 # Must run on the focus machine from a local pane or popup, never from the
 # worker side of a remote pane (that shell is on the worker).
 #
@@ -520,4 +523,7 @@ rw_prune_root_backups "$root_id" "$worker" "$worker_home"
 rw_log_event "handback" "" "$worker" "$(rw_elapsed_ms "$start_ts")" "success" \
   "root=$root_rel kind=$kind panes=${#released[@]} closed=${#endpoints[@]} $(printf '%s' "$sync_out" | jq -r '"renamed=\(.renamed | length) overwritten=\(.overwritten)"' 2>/dev/null)"
 printf 'rw: %s is local again (%d pane(s) back).\n' "$root_rel" "${#released[@]}"
+# The root's owner changed: every pane in it (visit panes left on other
+# remotes included) gets its display flags recomputed (CS3). Best effort.
+rw_refresh_indicators --root "$root_local"
 exit 0

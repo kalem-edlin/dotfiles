@@ -27,6 +27,18 @@ rw_state_dir_at() {
   printf '%s\n' "${TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR:-$home/.local/state/tmux-remote-workspaces}"
 }
 
+# rw_worker_state_sh -- the worker's state dir as one word for a command the
+# WORKER's shell runs, for callers that do not know the worker's home (it
+# expands $HOME there). Same override as rw_state_dir_at (C4).
+rw_worker_state_sh() {
+  if [ -n "${TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR:-}" ]; then
+    rw_shquote "$TMUX_REMOTE_WORKSPACES_WORKER_STATE_DIR"
+  else
+    # shellcheck disable=SC2016 # expanded by the worker's shell
+    printf '%s' '"$HOME/.local/state/tmux-remote-workspaces"'
+  fi
+}
+
 rw_machine_id_file() { printf '%s/machine-id\n' "$(rw_state_dir)"; }
 rw_sessions_file() { printf '%s/sessions.jsonl\n' "$(rw_state_dir)"; }
 rw_endpoints_dir() { printf '%s/endpoints\n' "$(rw_state_dir)"; }
@@ -336,8 +348,10 @@ rw_close_endpoint_core() {
 
   remote_outcome="skipped"
   if [ -n "$worker" ]; then
+    # A visit endpoint's worker-side marker goes with its session (removing
+    # an absent one is harmless, so every close does it).
     if rw_ssh_batch "$worker" "$(rw_ssh_status_timeout)" \
-      "tmux kill-session -t '=$session_name'" >/dev/null 2>&1; then
+      "tmux kill-session -t '=$session_name'; rc=\$?; rm -f $(rw_worker_state_sh)/visits/$endpoint_id.json; exit \$rc" >/dev/null 2>&1; then
       remote_outcome="killed"
     else
       remote_outcome="unreachable_or_absent"
@@ -1208,3 +1222,14 @@ rw_worker_copy_root_for_path() {
 # rw_bg_dir -- background transfer jobs (libexec/rw-bg): bg/<root_id>/ holds
 # job.json and the runner's pid while a transfer of that root is in flight.
 rw_bg_dir() { printf '%s/bg\n' "$(rw_state_dir)"; }
+
+# rw_refresh_indicators --pane <pane-id> | --root <path>
+# Best effort recompute of the display flags (@rw-off-owner, contract CS3)
+# after a pane changed host or a root changed owner. Never fails the caller.
+# A refresh script that does not know the mode is not run: it would ignore
+# the argument and repair every pane instead.
+rw_refresh_indicators() {
+  local script="$RW_PLUGIN_DIR/scripts/rw-refresh-indicators.sh"
+  [ -f "$script" ] && grep -q -e "${1:?mode required}" "$script" 2>/dev/null || return 0
+  bash "$script" "$@" </dev/null >/dev/null 2>&1 || true
+}

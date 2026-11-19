@@ -1,28 +1,30 @@
 #!/usr/bin/env bash
 # Backs the `\` and `/` split bindings (tmux.reset.conf). A split ALWAYS
-# follows the host of the pane it was invoked from: if the source pane is
-# remote-backed, the new pane opens remote in the same remote root via
-# `rw open` (its own endpoint, no sync);
-# if the source pane is local, this is an ordinary local split, even when a
-# sibling pane in the same window is
-# remote-backed. The original window-default inheritance was dropped on
-# 2026-08-03 during manual smoke testing: splitting from a local pane must
-# never produce a remote pane.
+# follows the host of the pane it was invoked from (D21): if the source pane
+# is remote-backed (its attach loop runs: @remote-host), the new pane opens
+# on the same remote, in the source pane's live directory (rw_pane_dir), via
+# `rw switch` run inside the new pane -- an owned endpoint when that remote
+# owns the directory (the `rw open` path), a visit endpoint otherwise, so an
+# off-owner pane splits onto its own remote too. If the source pane is local,
+# this is an ordinary local split, even when a sibling pane in the same
+# window is remote-backed. The original window-default inheritance was
+# dropped on 2026-08-03 during manual smoke testing: splitting from a local
+# pane must never produce a remote pane.
 #
-# Usage: rw-split.sh v|h   (v = split-window -v, h = split-window -h)
+# Usage: rw-split.sh v|h [pane-id]   (v = split-window -v, h = split-window -h)
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source-path=SCRIPTDIR
-# shellcheck source=common.sh
-source "$SCRIPT_DIR/common.sh"
+# shellcheck source=roots.sh
+source "$SCRIPT_DIR/roots.sh"
 
 direction="${1:?rw-split: direction (v|h) required}"
 split_flag="-v"
 [ "$direction" = "h" ] && split_flag="-h"
 
-pane_id="${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)}"
+pane_id="${2:-${TMUX_PANE:-$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)}}"
 [ -n "$pane_id" ] || { tmux split-window "$split_flag"; exit 0; }
 
 # Side-by-side splits start 20 columns smaller than half. Set the size at
@@ -39,21 +41,17 @@ fi
 
 current_path="$(tmux display-message -pt "$pane_id" -F '#{pane_current_path}' 2>/dev/null || true)"
 endpoint="$(rw_pane_get "$pane_id" @rw-endpoint)"
-remote_host="$(rw_pane_get "$pane_id" @remote-host)"
+worker="$(rw_pane_get "$pane_id" @remote-host)"
 
-worker=""
-if [ -n "$endpoint" ] && [ -n "$remote_host" ]; then
-  # Source pane is itself remote-backed -- the new pane opens in the same
-  # remote root (resolved by `rw open` from the inherited cwd).
-  worker="$(rw_pane_get "$pane_id" @rw-worker)"
-fi
-
-if [ -n "$worker" ]; then
-  rw_bin="$SCRIPT_DIR/rw"
-  # Fall back to an interactive shell if `rw open` returns early (e.g. the
-  # remote is unreachable) instead of leaving the pane dead.
-  tmux split-window "${split_args[@]}" -c "$current_path" -t "$pane_id" \
-    "\"$rw_bin\" open --worker \"$worker\"; exec \${SHELL:-/bin/sh} -l"
+if [ -n "$endpoint" ] && [ -n "$worker" ]; then
+  # Source pane is itself remote-backed: the new pane opens on the same
+  # remote in the source pane's directory. Fall back to an interactive shell
+  # if `rw switch` returns (e.g. the remote is unreachable) instead of
+  # leaving the pane dead.
+  dir="$(rw_pane_dir "$pane_id" --live)"
+  cmd="$(printf '%q switch --to %q --dir %q' "$SCRIPT_DIR/rw" "$worker" "$dir")"
+  tmux split-window "${split_args[@]}" -c "$(rw_local_existing_dir "$dir")" -t "$pane_id" \
+    "$cmd; exec \${SHELL:-/bin/sh} -l"
   exit 0
 fi
 

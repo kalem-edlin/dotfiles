@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tmux-remote-workspaces command dispatcher.
 #
-# Usage: rw <handoff|handback|bg|request|open|forget|reclaim|status|close|doctor> [args...]
+# Usage: rw <handoff|handback|bg|request|open|switch|forget|reclaim|status|close|doctor> [args...]
 #
 # The unit of handoff is a directory root (a worktree or a plain folder);
 # see docs/tasks/remote-owned-directories.md for the model and contracts.
@@ -52,9 +52,14 @@ commands:
       On the remote side of a handed-off pane: ask the local side to hand
       this root back (sets the pane option @rw-request).
 
-  open [--worker <alias>] [--root <path>] [--pane <pane-id>]
+  open [--worker <alias>] [--root <path>] [--pane <pane-id>] [--dir <abs-path>]
       A new remote pane in a root that is already remote. No sync.
       Reattaches instead when the pane already has an endpoint.
+
+  switch [--pane <pane-id>] --to <alias|local> [--dir <abs-path>]
+      Move ONE pane to a remote or back to this machine, in the same
+      directory: no files move, no ownership changes. An agent (claudef,
+      pif) or an editor in it moves too; anything else is refused (exit 7).
 
   forget <root> [--worker <alias>] [--force]
       The root is gone: delete every remote copy rw created of it, then
@@ -79,8 +84,8 @@ commands:
 exit codes: 0 ok, 1 failure, 2 git history diverged, 3 agent CLI too old,
   5 files changed on the copy being overwritten (stdout lists
   conflict<TAB>path<TAB>changed|added|deleted; re-run with --resolve),
-  6 remote unreachable, 7 root invalid or not in the required state,
-  64 usage.
+  6 remote unreachable, 7 root invalid or not in the required state
+  (switch: refused), 64 usage.
 EOF
 }
 
@@ -98,6 +103,7 @@ case "$command" in
   bg) exec "$SCRIPT_DIR/../libexec/rw-bg" "$@" ;;
   request) exec "$SCRIPT_DIR/../libexec/rw-request" "$@" ;;
   open) exec "$SCRIPT_DIR/rw-open.sh" "$@" ;;
+  switch) exec "$SCRIPT_DIR/rw-switch.sh" "$@" ;;
   forget) exec "$SCRIPT_DIR/rw-forget.sh" "$@" ;;
   reclaim) exec "$SCRIPT_DIR/rw-reclaim.sh" "$@" ;;
   status) exec "$SCRIPT_DIR/rw-status.sh" "$@" ;;
