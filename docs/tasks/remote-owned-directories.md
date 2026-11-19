@@ -446,6 +446,59 @@ Picker and off-owner fixes from the independent review of `rw-pane-switching` (d
 - Test seam: `RW_PICKER_STUBS`, a file `rw-picker.sh` sources after `roots.sh`. `tests/test_picker_menu.sh` uses it for stand-ins of I2 and I3 with the pinned output (the I3 stand-in ssh-es through the sandbox's fake ssh and kills it at the status timeout), so the picker is tested against the contracts, not against wave A's implementation.
 - Tests: `tests/test_picker_menu.sh` gains B1-B7 cases (dispatched `--root` equals the labelled root for a remote pane cd'd into another worker-owned root, live and title-only, and for a visit pane cd'd into another laptop root; worker-only directories in a git root, in a worker-owned root and with no root; unreachable owner pane, visit pane with one and two workers, a pane whose own remote hangs while the owner answers, a remote dropped from `config.json`; a hanging ssh (connects, never answers, 8 s) with a 1 s status timeout opens the menu within 3 s with `release` and no soft switch; pending forget and mirror owners; remote nvim; the hand-back count; no untargeted `display-message`). `tests/test_off_owner.sh` gains the lock cases (a run waits for a held lock, then computes from the state after a change made while it waited; a stale lock is passed after its guard and removed) and its throwaway server is now `-L rw-fb-offowner-<pid>`.
 
+### Remote key latency (2026-11-18)
+
+Complaint: in a remote pane, keys typed into the program are fast, but prefix commands rw handles with a script (`prefix [`/PPage copy-mode, `\` and `/` splits, `q`, `c`, `e`) take a long time to act.
+
+Measurements (laptop to `mini` over Tailscale, ping RTT 41-110 ms, ControlMaster up):
+
+| probe | time |
+|---|---|
+| `ssh -o BatchMode=yes mini true` (through the existing master) | 1.64-1.73 s |
+| `ssh -G mini` (config evaluation only, no network) | 1.52 s |
+| `~/.ssh/mini-lan-available Alfies-Mac-mini.local` (the `Match ... exec` helper) | 1.51 s, exit 143 (the watchdog killed nc) |
+| the same ssh with `-F /dev/null` straight onto the master socket | 0.12-0.13 s |
+| on the worker: `zsh -c true` / `/bin/sh -c true` | 5 ms / 5 ms |
+| sourcing `common.sh` | 8 ms |
+
+Root cause: not the worker and not rw. The untracked `~/.ssh/config.local` has `Match originalhost mini exec "~/.ssh/mini-lan-available Alfies-Mac-mini.local"`, and ssh evaluates it on EVERY invocation, before it looks at the ControlMaster socket. Away from the mini's LAN, mDNS resolution of the `.local` name hangs (about 5 s), so the helper always ran into its 1.5 s watchdog (added 2026-08-05 to cap the 5 s). 1.5 s of every 1.65 s ssh was this check; the network and the worker's shell were 0.12 s. The worker's zsh startup is not a factor (5 ms), so `zsh/.zshenv` was left alone. ssh skips a `Match exec` whose earlier predicate failed, so only the `mini` alias paid it.
+
+Per key (local overhead measured on a throwaway server, `-L rw-lat-<pid>`, `-f /dev/null`, with an instant fake ssh; ssh calls counted with the test harness):
+
+| key | ssh calls the client waits on | local overhead | before | after |
+|---|---|---|---|---|
+| `prefix [` / PPage (`rw-copy-mode.sh`) | 1 | ~45 ms | ~1.7 s | ~0.2 s |
+| `prefix \` / `/` (`rw-split.sh`) | 1 (`rw_pane_dir --live`), then the new pane's `rw switch` makes 4 sequential + 1 detached | ~100 ms | ~1.75 s to the split, ~6.6 s more until the remote shell shows | ~0.25 s, ~0.6 s more |
+| `prefix c` (`rw-new-window.sh`) | same as a split | ~100 ms | same as a split | same as a split |
+| `prefix q` (`rw-close.sh`) | 1 (kill-session) + 1 detached save request | | ~1.7 s | ~0.2 s |
+| `prefix e` (picker) | parallel probes, one per worker, not waited on to open | | rows went `…` to online after ~1.7 s | ~0.2 s |
+
+Every attach-loop reconnect and every other ssh to `mini` paid the same 1.5 s.
+
+Fix, `ssh/.ssh/mini-lan-available` (tracked; the `Match` line in `config.local` is unchanged):
+- A negative cache. "LAN unreachable" is written to `${XDG_CACHE_HOME:-~/.cache}/mini-lan-available/<host>_<port>` as `<epoch> <network key>`, the key being the default gateway and interface (`route -n get default`, about 3 ms; `ip route show default` on Linux). On a match the helper exits 1 at once (25 ms in the test). Once the entry is older than `MINI_LAN_RECHECK` (60 s) the call still answers from the cache and re-checks in the background, stdin/stdout/stderr on /dev/null so neither ssh (which waits only for the helper's pid) nor a `$(ssh ... 2>&1)` caller waits on it. A changed network key misses the cache and checks synchronously, as before.
+- A positive answer is never cached: a stale cache can only send ssh over Tailscale, which also works on the LAN, never to an unreachable LAN name. On the LAN the check costs what it did before (fast, the name resolves).
+- `run_nc` now `exec`s nc, so the watchdog's kill ends nc itself; before, it killed the wrapping subshell and left nc orphaned for the rest of its ~5 s lookup (seen live: several stray `nc -z -G 1 -w 1 Alfies-Mac-mini.local 22` at any moment).
+- Measured with a copy of the live config pointed at the new helper (same HostName, so the same ControlPath and master): `ssh mini true` 0.14-0.21 s, 0.16 s through `$(... 2>&1)` while a background re-check ran.
+
+`rw doctor` (`scripts/rw-doctor.sh`) now times `ssh -G <worker>` per worker (twice, judging the second so a helper's first-call cache fill is not reported) and fails above `RW_DOCTOR_SSH_CONFIG_SLOW_MS` (300 ms), naming `Match ... exec`, so the next slow config shows up in the doctor instead of as slow keys.
+
+Tests: `tests/test_ssh_latency.sh` (stub nc/route/ip, no network): cold check synchronous and cached, warm check from the cache with no nc, stale entry answered at once with a background re-check and a `$(... 2>&1)` caller not held, changed network synchronous, a reachable LAN removes the entry and is never cached; `rw-copy-mode.sh` makes exactly one ssh (also with `--page-up`); the doctor passes a fast config and fails a 0.6 s `ssh -G`.
+
+Rejected:
+- Speeding up the worker's zsh startup: measured at 5 ms; there was nothing to win.
+- Bypassing ssh config in rw (resolve `ssh -G` once, then `ssh -F /dev/null -S <ControlPath>`): it saves the same 1.5 s but duplicates ssh's config logic in rw, breaks when the route flips (the ControlPath hash includes the HostName), and leaves every non-rw ssh to `mini` slow. The cause is the helper, so it was fixed there.
+- Caching positive answers: a stale positive after the mini leaves the LAN would point ssh at a dead name until the entry expired.
+- `run-shell -b` for `prefix [`: tmux queues a client's keys behind a blocking `run-shell`, which is what makes the keys typed right after `prefix [` land in copy-mode. With `-b` they would reach the remote program until the ssh returns. At ~0.2 s the blocking form is the right one; the binding is unchanged.
+- Fewer ssh calls per key: the blocking path of each key already makes one ssh. The new pane's `rw switch` makes four sequential ones; merging them is a restructuring of `rw-switch.sh`/`roots.sh` (another fixer's files) and is worth ~0.4 s now instead of ~6 s.
+
+Left open:
+- The fix reaches the laptop when `ssh/.ssh/mini-lan-available` is deployed (it is a symlink into the main checkout); nothing on the worker changes.
+- Within one network the cache can say "unreachable" for up to 60 s plus one call after the mini appears on the LAN (or on another network with the same gateway address and interface); ssh then uses Tailscale, which works. When the route flips the ControlPath changes, so the first ssh after a flip builds a new master (unchanged behaviour).
+- The first ssh on a new network still pays the 1.5 s once.
+- `prefix q`, splits and `prefix c` still block the client queue for their one ssh (~0.15 s now). Whether they should run with `run-shell -b` is the concurrent fixer's call (`tmux.reset.conf` is in its scope); a split's or new window's later ssh calls run inside the new pane and never blocked the client.
+- `prefix C-s` (save) was not traced.
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: built by B2 (see "Changes recorded by B2").

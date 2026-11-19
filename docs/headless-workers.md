@@ -305,6 +305,12 @@ focus machine is a separate, manual, focus-machine-side pair of edits:
        User <mini-user>
    ```
 
+   ssh runs the `exec` helper on every invocation, even one that rides an
+   open ControlMaster socket, so it must be fast: `mini-lan-available`
+   caches a "not on the LAN" answer per network and re-checks it in the
+   background (`docs/tasks/remote-owned-directories.md`, "Remote key
+   latency"). `rw doctor` fails a worker whose `ssh -G` takes over 300 ms.
+
    A plain VPS worker (`agents-roll`) is simpler — a single `Host` block is
    enough when there is only one route:
 
