@@ -469,22 +469,50 @@ rw_endpoint_local_path() {
   fi
 }
 
+# rw_endpoint_pane_local_path <endpoint-json> <worker-path>
+# The directory a remote pane works in, as a path on this machine, from the
+# worker cwd its session reports: rw_endpoint_local_path, except while the
+# pane is still where its endpoint opened (workspace.remote_path) and that
+# was only the nearest existing parent of its directory, because the
+# directory did not exist on the remote (S3). The pane is then in its focus
+# path as far as this machine is concerned, so a switch there and back, a
+# split, a new window or the menu keep the directory the pane was switched
+# from instead of moving it up to that parent (smoke test X4, 2026-11-18).
+rw_endpoint_pane_local_path() {
+  local ej="$1" p="$2" mapped rp fp
+  mapped="$(rw_endpoint_local_path "$ej" "$p")"
+  rp="$(printf '%s' "$ej" | jq -r '.workspace.remote_path // empty' 2>/dev/null)"
+  fp="$(printf '%s' "$ej" | jq -r '.workspace.focus_path // empty' 2>/dev/null)"
+  if [ -n "$rp" ] && [ -n "$fp" ] && [ "$p" = "$rp" ]; then
+    case "$fp" in
+      "${mapped%/}"/*)
+        printf '%s\n' "$fp"
+        return 0
+        ;;
+    esac
+  fi
+  printf '%s\n' "$mapped"
+}
+
 # rw_pane_dir <pane-id> [--live]
 # The directory a pane works in, as a path on THIS machine (S1). A remote
 # pane (its attach loop runs: @remote-host, and its @rw-endpoint is
 # registered): the live worker cwd its hidden session reports as the pane
 # title (set-titles-string '#{pane_current_path}', the directory chip's
 # source) when that is an absolute path, mapped back through the endpoint
-# (rw_endpoint_local_path); else the endpoint's focus path. A local pane: its
-# pane_current_path. The path may not exist here (a directory only the
-# remote has); rw_local_existing_dir finds where a local shell can start.
+# (rw_endpoint_pane_local_path: the focus path while the pane is still in
+# the parent it opened in for a directory the remote lacks); else the
+# endpoint's focus path. A local pane: its pane_current_path. The path may
+# not exist here (a directory only the remote has); rw_local_existing_dir
+# finds where a local shell can start.
 #
 # --live first asks the worker for the hidden session's pane_current_path
 # (rw_pane_remote_probe: one ssh with a hard deadline) and uses the title
 # only when that fails. The title can lag: a hidden session has `status
 # off`, and tmux re-sends a title only on a full redraw, so a `cd` on the
 # worker reaches the title late (measured: over a minute on a throwaway
-# pair of servers). Actions that open something in that directory (rw
+# pair of servers; on the real worker, whose shell redraws its prompt, about
+# 0.5 s at 300-450 ms RTT in the X4 smoke test). Actions that open something in that directory (rw
 # switch, including the one a split or prefix c runs in its new pane) use
 # --live; a display, and anything a key binding waits on, uses the title.
 rw_pane_dir() {
@@ -500,7 +528,7 @@ rw_pane_dir() {
     case "$title" in
       /*)
         [ "$title" = "/" ] || title="${title%/}"
-        rw_endpoint_local_path "$ej" "$title"
+        rw_endpoint_pane_local_path "$ej" "$title"
         return 0
         ;;
     esac
@@ -562,7 +590,7 @@ rw_pane_remote_probe() {
   case "$line" in *"$RW_TAB"*) cmd="${line#*"$RW_TAB"}" ;; esac
   case "$path" in /*) : ;; *) return 6 ;; esac
   [ "$path" = "/" ] || path="${path%/}"
-  printf '%s\t%s\n' "$(rw_endpoint_local_path "$ej" "$path")" "$cmd"
+  printf '%s\t%s\n' "$(rw_endpoint_pane_local_path "$ej" "$path")" "$cmd"
 }
 
 # rw_owner_for_path <abs-path>   (pinned interface I2, fix wave A)

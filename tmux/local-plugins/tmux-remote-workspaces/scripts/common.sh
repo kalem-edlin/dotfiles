@@ -639,6 +639,41 @@ rw_ssh_connect_timeout() { rw_config_query '.ssh.connect_timeout_seconds' 8; }
 rw_ssh_preflight_timeout() { rw_config_query '.ssh.preflight_timeout_seconds' 10; }
 rw_ssh_status_timeout() { rw_config_query '.ssh.status_timeout_seconds' 3; }
 
+# rw_ssh_stream_opts -- sets the array RW_SSH_STREAM_OPTS to the ssh options
+# of rw's long-lived streams: an attach loop's `ssh -t`, the remote
+# agent-state watch (libexec/remote-state) and the attach loop's wait on a
+# worker restore. They get a ControlMaster of their own, beside the one
+# ~/.ssh/config gives every other ssh (ControlPath ~/.ssh/sockets/%C).
+#
+# Why (smoke test X4 on the real worker, 2026-11-18): each remote pane holds
+# two sessions for as long as it lives (attach and state watch), and an
+# OpenSSH server allows 10 sessions per connection by default (sshd
+# MaxSessions). On the shared master five remote panes used them all; from
+# then on every short ssh (a probe, a switch, copy-mode, a close, the
+# picker's reachability check) was refused by that master ("Session open
+# refused by peer") and opened a connection of its own: a full TCP and key
+# exchange on every key (0.27-0.61 s instead of 0.09-0.22 s at 12-50 ms
+# RTT; several round trips more on a slow link). With the streams on their
+# own master the shared one only carries short commands. When the stream
+# master is full in turn, a further stream opens its own connection, which
+# costs one handshake when it attaches.
+#
+# RW_SSH_STREAM_CONTROL_PATH overrides the path: `none` gives every stream a
+# connection of its own, and an empty value adds no option (ssh's
+# configured ControlPath, the shared master). The default sits in the
+# directory the dotfiles' ssh config already uses for its masters; if that
+# directory is missing ssh connects without a master.
+# shellcheck disable=SC2034 # read by the callers
+RW_SSH_STREAM_OPTS=()
+rw_ssh_stream_opts() {
+  # shellcheck disable=SC2088 # a literal ~: ssh expands it in ControlPath
+  local path="${RW_SSH_STREAM_CONTROL_PATH-~/.ssh/sockets/rw-stream-%C}"
+  # shellcheck disable=SC2034 # read by the callers
+  RW_SSH_STREAM_OPTS=()
+  # shellcheck disable=SC2034
+  [ -z "$path" ] || RW_SSH_STREAM_OPTS=(-o "ControlPath=$path")
+}
+
 # Run a remote command non-interactively with a bounded timeout. Never used
 # for anything that installs or mutates worker state beyond this plugin's own
 # managed endpoint session/workspace.

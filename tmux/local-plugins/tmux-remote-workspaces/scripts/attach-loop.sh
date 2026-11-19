@@ -96,7 +96,7 @@ reset_local_terminal() {
 
 # --- Remote agent state side channel (R1, contract CX1) -------------------
 # One background `libexec/remote-state watch` per attach: a single
-# long-lived ssh (on the alias's ControlMaster) streaming the worker pane's
+# long-lived ssh (on rw's stream ControlMaster) streaming the worker pane's
 # @agent_* and @rw-request changes onto this pane. It shares this loop's
 # process group, so closing the pane takes it down too; this loop stops it
 # before every new attach attempt and on every exit (EXIT trap, and before
@@ -296,8 +296,9 @@ restore_recheck_cmd() {
 # restore, so it carries keepalives. Prints yes | restoring | no.
 ask_worker_to_restore_then_recheck() {
   local worker="$1" session_name="$2"
+  rw_ssh_stream_opts
   "$(rw_ssh_bin)" -o BatchMode=yes -o ConnectTimeout="$(rw_ssh_connect_timeout)" \
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 ${RW_SSH_STREAM_OPTS[@]+"${RW_SSH_STREAM_OPTS[@]}"} \
     "$worker" "$(restore_recheck_cmd "$session_name")" </dev/null 2>/dev/null | tail -n 1
 }
 
@@ -504,8 +505,11 @@ attach_loop_main() {
     # every attach died with "missing or unsuitable terminal" and backed off
     # forever). screen-256color is universally present and fine for an outer
     # client whose only job is displaying the remote tmux.
+    # Its own ControlMaster (rw_ssh_stream_opts): it holds a session for as
+    # long as the pane is attached.
+    rw_ssh_stream_opts
     TERM=screen-256color "$(rw_ssh_bin)" -t \
-      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+      -o ServerAliveInterval=15 -o ServerAliveCountMax=4 ${RW_SSH_STREAM_OPTS[@]+"${RW_SSH_STREAM_OPTS[@]}"} \
       "$worker" "tmux attach-session -t '=${session_name}'"
     exit_code=$?
     duration_ms="$(rw_elapsed_ms "$start_ts")"
