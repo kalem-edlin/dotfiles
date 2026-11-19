@@ -615,6 +615,11 @@ Cleanup (proved by listings before and after):
 - Removed on the mini: every `rw-3b616c8f-*` session (by rw: switch back, hand-back, close); visit markers and the `visits/` directory the run created; the mirrors and staging of `plain`, `plain3`, `plain5` (`rw forget`); `~/Developer/rw-x4-smoke-80891/`; the pi transcript directory for that path and the run's pi SessionStart record (`tmux-workspace-resurrect/agents/server-19699-1794997959/pane-24.json`); the 27 `rw-3b616c8f-*` lines the worker's session-created hook appended to `sessions.jsonl` (back to its starting 14093 bytes). Left: the same hook's lines in the worker's `rw.log`, and tmux-resurrect snapshots taken while the run's sessions existed (the next saves supersede them).
 - Removed on the laptop: servers `rw-x4-a` and `rw-x4-b` (killed by name) and `/tmp/rwx4`; `~/Developer/rw-x4-smoke-80891/`; the two pi transcripts of the T5 session; the stream ControlMaster this run started (`ssh -O exit`); the scratch state, resurrect and config copies.
 
+### Accepted deviations (2026-11-18)
+
+- The `prefix e` header names the pane's host as `remote (<alias>)`, although S9 says aliases appear only as chooser rows. Kept on purpose: with more than one remote, "remote" alone cannot say which host the pane is on. The menu rows and every other UI string say `remote` and `this machine`.
+- S1 says "the worker chooser is skipped with one worker". In the code the soft-switch rows are themselves the destination list, and only the hand-off row has a chooser. That chooser is skipped when exactly one worker is configured (D26).
+
 ## Follow-ups (not in this plan)
 
 - R1 Remote agent state in the picker: built by B2 (see "Changes recorded by B2").
