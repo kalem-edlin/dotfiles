@@ -8,6 +8,14 @@ the content-engine repo at
 `docs/tasks/harness/research/basic-web-search.md` and its discussion ledger
 (T16).
 
+This lane is the reference implementation for the content-engine harness.
+Delegation now has its own reference,
+[`../subagent-delegation.md`](../subagent-delegation.md): the harness
+`delegate` (ledger A12) is built from that file, `delegate.ts` and its
+tests, and delegation decisions from D13 on are recorded there. Research
+behaviour changes are still recorded here, with their tests, before the
+harness follows them.
+
 ## Decisions
 
 - D1. Exa is the vendor. Highest accuracy and lowest latency on the late-2026
@@ -64,6 +72,32 @@ the content-engine repo at
   description, 269 characters for the three harness members; the same
   shape as Claude Code's own `Agent` tool listing, which carries whole
   descriptions.
+- D11 (2026-11-18, revises D9's blocking shape; Kalem: parity with the
+  widget, keep the delegation pattern). D9's premise was wrong: sibling
+  tool calls run concurrently only within one assistant message, so a
+  blocking `delegate` froze the driver for the child's whole run (no other
+  tools, no later delegations, no reply to the user). In the interactive
+  UI `delegate` now returns `Delegate #N` at once and steers the report back
+  as a `delegate` message (`deliverAs: "steer"`, `triggerTurn`), the
+  widget's delivery. `wait: true`, or a parent without a UI (`pif -p`),
+  keeps the blocking call (its cap revised by D12). `delegate_continue` and
+  `delegate_stop` restore the widget's continue and remove. The card is a
+  themed component again (dim rules, status colour, task, last call, last
+  line, cut to width), the duplicate progress block in the tool row is
+  gone, text from separate child messages no longer runs together, and
+  finished cards stay until the user's next prompt.
+- D12 (2026-11-18, revises the cap in D7 and D11; Kalem: one hour).
+  Every run, background or waited, is stopped after one hour. The ten
+  minute cap came in with D7's contract with no decision behind it; it was
+  sized for a research brief that takes a minute or two and then applied
+  to generalists doing implementation work. The cap guards against a
+  hung or looping child nobody is watching (`pif -p`, harness runners on
+  `pi -p`, a forgotten background delegate); Esc and `delegate_stop` cover
+  the watched case. A capped run reports `stopped` with its partial
+  output, and its kept session lets `delegate_continue` resume it, so
+  hitting the cap costs a follow-up call, not the work. Held: no cap
+  (an unattended hang never ends); an inactivity cap (catches hangs, not
+  a busy loop), added only if a real hang shows an hour is too long.
 - D10 (2026-11-18, revises D4's tool half; Kalem: repo wins; locked by
   Kalem 2026-11-18). A profile
   extension `extensions/<name>.ts` registers nothing when the project has
@@ -138,6 +172,8 @@ the content-engine repo at
   inherited. The child inherits `PI_CODING_AGENT_DIR`, so auth bridges
   work and `--no-extensions` keeps the other pif extensions out.
 - Blocks until the child exits (10 minute cap), returns its final text.
+  Superseded by D11 (background by default, `wait: true` blocks) and D12
+  (one hour cap on every run).
 - `promptSnippet` names the members found at startup so the driver knows
   what it can delegate to.
 

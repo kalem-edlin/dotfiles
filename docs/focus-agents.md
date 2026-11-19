@@ -137,19 +137,42 @@ this repository's active theme.
 `subagent-widget.ts` derivative on 2026-11-18; the `/sub` commands went with
 it). Each child is a separate Pi process started with `--no-extensions`, so
 the parent's extensions never load recursively, and a kept session file
-under `sessions/delegate/<member>-<time>.jsonl`, so a slow or wrong run can
+under `sessions/delegate/<member>-<time>-<random>.jsonl`, so a slow or wrong run can
 be read afterwards. Children share the working directory and filesystem but
 not the parent conversation. The child runs in `--mode json`; its tool
-calls and last line of text feed the tool call's partial result and a card
-above the editor (status, elapsed seconds, call count, last call), and the
-running count reaches `agent-state.ts` on `pif:subagents`. Cards clear when
-the parent's turn ends.
+calls and last line of text feed one card per delegate above the editor,
+in the old widget's shape: dim rules around
+`● Delegate #1 · research · wait · Turn 2  task  (12s) | Tools: 5` and one
+line of the newest activity (last text, or the last tool call when that
+came later; the stderr reason when the child failed), cut to the terminal
+width. The tool rows render without pi's shaded box, one line each, with
+`↳ Delegate #N started` under a background call. The running count reaches
+`agent-state.ts` on `pif:subagents`. Finished cards stay until the user's
+next prompt.
+
+In the interactive UI `delegate` runs in the background: it returns
+`Delegate #N` at once and the parent keeps working, calls other tools or
+starts more delegates. `delegate_continue(id, task)` resumes a finished
+child's kept session with a follow-up, and `delegate_stop(id)` ends a
+running one and returns its partial output. `wait: true`, or a parent with
+no UI (`pif -p`), blocks the call and returns the report as the tool
+result. Every run, background or waited, is stopped after one hour, a guard
+for a hung or looping child nobody is watching; its session is kept, so
+`delegate_continue` resumes it. A new session or quitting pif stops running
+children.
+
+Delegation nests two tiers at most. A child at the first tier gets
+`delegate` when it is the generalist or its member lists `Agent`; its
+calls block, so it fans out with several calls in one message, and the
+card counts them (`· 2 subagents`). Children at the second tier get no
+`delegate`. The depth travels in `PIF_DELEGATE_DEPTH`. Behaviour and
+decisions in full: [`subagent-delegation.md`](subagent-delegation.md).
 
 Without an `agent`, the child is a generalist on the parent's model and
 thinking with the built-in tools:
 
 ```text
-read,write,edit,bash,grep,find,ls
+read,write,edit,bash,grep,find,ls,delegate
 ```
 
 It gets the communication prompt and scope rules that allow implementation
@@ -157,10 +180,12 @@ inside the delegated scope, forbid unrelated reversions, and require a
 report of changes and checks. With an `agent`, the child is the named member
 described under Web research.
 
-Completed child reports use Pi's `steer` delivery mode. Pi inserts them before
-the coordinator's next model call, so the coordinator can synthesize the
-reports and its response remains the last visible message. The reports remain
-visible for inspection.
+Background reports arrive as `delegate` messages with Pi's `steer` delivery
+mode and `triggerTurn`. Pi inserts them before the coordinator's next model
+call, or starts a turn when it is idle, so the coordinator can synthesize the
+reports and its response remains the last visible message. The message shows
+a status header and the first eight lines of the report; expanding it shows
+the rest and the delegate number, tool count and session file.
 
 ### Web research
 
@@ -177,9 +202,8 @@ Exa's. Tool parameters are plain JSON Schema, which pi accepts, so the
 extension imports nothing from pi at runtime and `node --test` can load it.
 
 `delegate(task, agent?, model?)` with an `agent` runs a member defined in
-Claude Code's front matter format plus a `pi_model:` key, and blocks until
-it finishes; pi runs sibling tool calls concurrently, so several delegations
-in one assistant message run side by side. Members resolve from
+Claude Code's front matter format plus a `pi_model:` key, in the background
+unless `wait` is set (see Subagents). Members resolve from
 `<cwd>/.claude/agents/<name>.md` first, then `~/.config/pif/agents/<name>.md`
 (a link to `agents/subagents/`), the precedence Claude Code applies, so a
 repo that ships a member of the same name wins in both runtimes. The driver
@@ -194,9 +218,9 @@ too), `--tools` mapped from the Claude names (`WebSearch` to `web_search`,
 `find`, `Bash` to `bash`, `Write` to `write`, `Edit` to `edit`, `Ls` to
 `ls`), `--model` from `pi_model` unless overridden, `--thinking low`, the
 communication prompt and the member body appended to the system prompt, and
-the task on stdin. The child's last assistant message is the tool result,
-capped at 24,000 characters, followed by a bracketed note with the call
-count and session path; a child that runs past ten minutes is stopped.
+the task on stdin. The child's last assistant message is the report,
+capped at 24,000 characters, followed by a bracketed note with the delegate
+number, call count and session path.
 
 `agents/subagents/research.md` is the one member shipped: multi-search web
 research returning a brief with a URL and a quoted sentence per claim and a
