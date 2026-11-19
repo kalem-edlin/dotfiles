@@ -94,10 +94,11 @@ rw_test_sandbox() {
 # key=value pairs: pane_id, pane_current_path, session_name, window_index,
 # pane_index, pane_current_command, pane_pid, @options...), list-panes -a,
 # display-message, show-option and set-option answer from it. Remote
-# endpoint sessions (rw-*) report $FAKE_TMUX_REMOTE_CMD as their command.
-# send-keys of a claudef/pif resume flips a pane's command to the agent when
-# $FAKE_LOCAL_RESUME_OK=1 (an editor reopen, "&& nvim"/"&& vim", flips it
-# to nvim); respawn-pane resets it to a shell. The remote endpoint pane's
+# endpoint sessions (rw-*) report $FAKE_TMUX_REMOTE_CMD as their command
+# and $FAKE_REMOTE_CWD (when set) as their pane's directory.
+# send-keys of a claudef/pif resume flips a pane's command to the agent
+# (claude / pi) when $FAKE_LOCAL_RESUME_OK=1 (an editor reopen,
+# "&& nvim"/"&& vim", flips it to nvim); respawn-pane resets it to a shell. The remote endpoint pane's
 # other options come from $FAKE_REMOTE_PANE_OPTS ("@option=value" lines).
 # A fake agent "writes until stopped": reading the pane pid of
 # $FAKE_AGENT_PANE (how rw stops a local agent) appends to
@@ -143,6 +144,8 @@ target="${target#=}"
 case "$cmd" in
   list-panes)
     if [ -n "$target" ] && [ "${target#rw-}" != "$target" ]; then
+      # $FAKE_REMOTE_ABSENT=1: the endpoint session is not on the remote.
+      [ "${FAKE_REMOTE_ABSENT:-0}" = 1 ] && exit 1
       case "$fmt" in *pane_pid*) [ -n "${FAKE_REMOTE_LASTWRITE:-}" ] && echo "last remote write" >>"$FAKE_REMOTE_LASTWRITE" ;; esac
       expand "$fmt" "pane_id=%90	pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}	pane_pid=999999"
     elif [ "$all" = 1 ] && [ -n "$table" ]; then
@@ -159,6 +162,14 @@ case "$cmd" in
     fi
     if [ "$target" = "${FAKE_AGENT_PANE:-}" ] && [ -n "${FAKE_AGENT_LASTWRITE:-}" ]; then
       case "$fmt" in *pane_pid*) echo "last local write" >>"$FAKE_AGENT_LASTWRITE" ;; esac
+    fi
+    # A remote endpoint session's pane: its cwd is $FAKE_REMOTE_CWD.
+    if [ "${target#rw-}" != "$target" ]; then
+      # $FAKE_REMOTE_HANG: the remote does not answer for that long (a dead
+      # ControlMaster).
+      [ -n "${FAKE_REMOTE_HANG:-}" ] && sleep "$FAKE_REMOTE_HANG"
+      [ -n "${FAKE_REMOTE_CWD:-}" ] && expand "$fmt" "pane_current_path=$FAKE_REMOTE_CWD	pane_current_command=${FAKE_TMUX_REMOTE_CMD:-zsh}"
+      exit 0
     fi
     l="$(line_of "$target")"
     [ -n "$l" ] && expand "$fmt" "$l"
@@ -186,13 +197,16 @@ case "$cmd" in
     if [ "${FAKE_LOCAL_RESUME_OK:-0}" = 1 ] && [ -n "$(line_of "$target")" ]; then
       case "${rest[*]}" in
         *"&& nvim "* | *"&& vim "*) put "$target" pane_current_command nvim ;;
-        *claudef* | *pif*) put "$target" pane_current_command claude ;;
+        *claudef*) put "$target" pane_current_command claude ;;
+        *pif*) put "$target" pane_current_command pi ;;
       esac
     fi
     ;;
   respawn-pane)
     # $FAKE_ON_RESPAWN: a command run at each respawn (tests observe state then).
     [ -n "${FAKE_ON_RESPAWN:-}" ] && bash -c "$FAKE_ON_RESPAWN" >/dev/null 2>&1
+    # $FAKE_RESPAWN_FAIL=1: respawn-pane fails (the pane is left as it was).
+    [ "${FAKE_RESPAWN_FAIL:-0}" = 1 ] && exit 1
     [ -n "$(line_of "$target")" ] && put "$target" pane_current_command bash
     ;;
   list-sessions)

@@ -332,6 +332,12 @@ attach_loop_main() {
     # opt out of local workspace-resurrect capture.
     rw_pane_set "$pane_id" @remote-host "$worker"
     rw_pane_set "$pane_id" @workspace-resurrect-skip "1"
+    # The pane's host just became this endpoint's worker: recompute its
+    # display flags (@rw-off-owner, CS3) once per loop, in the background
+    # so the attach is not delayed. Best effort.
+    if [ "$attempt" -eq 0 ] && [ -n "$pane_id" ]; then
+      (rw_refresh_indicators --pane "$pane_id" &)
+    fi
 
     # Tree endpoints have a focus-side companion (rw-tree-listener.sh) that
     # answers the worker shim's "need an editor pane" requests. It is a plain

@@ -8,7 +8,9 @@
 # and every pane whose sidecar record carries `rw_endpoint`, and before
 # libexec/reconcile.
 #
-# For every registered endpoint (endpoints/*.json without a tombstone):
+# For every registered endpoint (endpoints/*.json without a tombstone), owned
+# and visit endpoints alike (a visit endpoint, from a soft switch, is in no
+# ownership record; it carries the same position fields, S7):
 #
 #   1. Find the restored pane by endpoint id. The endpoint record says where
 #      its pane lived: focus_session_name + focus_window_index +
@@ -235,6 +237,12 @@ rw_post_restore_main() {
     [ -n "$id" ] || continue
     if rw_tombstone_exists "$id"; then
       rw_log "post-restore: endpoint $id is tombstoned; not reattached"
+      continue
+    fi
+    # Released by `rw switch --to local --force` while its remote was
+    # unreachable: closed on the next contact, never reattached to a pane.
+    if [ "$(jq -r '.pending.action // empty' "$f" 2>/dev/null)" = "close" ]; then
+      rw_log "post-restore: endpoint $id has a pending close; not reattached"
       continue
     fi
     jq -c . "$f" >>"$work/endpoints.jsonl" 2>/dev/null || true

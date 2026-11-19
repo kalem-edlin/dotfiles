@@ -27,7 +27,9 @@
 #      nvim session, or its argv, with the root's paths rewritten); that is
 #      best effort: an editor that does not come back is only a warning.
 #   6. Commit: ownership record (owner = worker) and mirror, endpoint
-#      records (contract C3), panes replaced by their attach loops.
+#      records (contract C3), panes replaced by their attach loops. Visit
+#      panes already on this worker in the root (soft switches) are adopted
+#      as owned panes (S8); visit panes on other workers stay as they are.
 #
 # Usage: rw-handoff.sh --worker <alias> [--root <path>] [--pane <pane-id>]
 #                      [--check-lfs] [--force-diverged]
@@ -183,12 +185,38 @@ fi
 # 2. Panes and agents
 # ---------------------------------------------------------------------------
 
+# Visit panes (S8): a pane already on this worker by a soft switch, in this
+# root, is adopted as an owned pane at the commit (its session already sits
+# in the worker copy's path; no second session). Visit panes on other
+# workers stay where they are. An adopted pane's agent must not be
+# mid-turn: the transfer below rewrites the directory it works in.
+adopt_panes=()
+while IFS="$RW_TAB" read -r a_pane a_ep a_cwd; do
+  [ -n "$a_ep" ] || continue
+  a_json="$(rw_read_endpoint "$a_ep" 2>/dev/null)" || continue
+  [ "$(printf '%s' "$a_json" | jq -r '.kind // "owned"')" = "visit" ] || continue
+  [ "$(printf '%s' "$a_json" | jq -r '.worker // empty')" = "$worker" ] || continue
+  a_focus="$(printf '%s' "$a_json" | jq -r '.workspace.focus_path // empty')"
+  case "$a_focus" in "$root_local" | "$root_local"/*) : ;; *)
+    case "$a_cwd" in "$root_local" | "$root_local"/*) : ;; *) continue ;; esac
+    ;;
+  esac
+  if [ "$(rw_pane_get "$a_pane" @agent_state)" = "working" ]; then
+    fail_event "visit_agent_working:pane=$a_pane"
+    rw_die "rw handoff: the agent in pane $a_pane (already on that remote) is working; nothing was moved. Retry when it is idle." 1
+  fi
+  adopt_panes+=("$a_pane$RW_TAB$a_ep")
+done < <(tmux list-panes -a -F "#{pane_id}${RW_TAB}#{@rw-endpoint}${RW_TAB}#{pane_current_path}" 2>/dev/null |
+  awk -F '\t' '$2 != ""')
+
 pane_lines=()
 while IFS= read -r line; do
   [ -n "$line" ] || continue
   p_endpoint="$(printf '%s' "$line" | cut -f6)"
   if [ -n "$p_endpoint" ]; then
-    rw_warn "rw handoff: pane $(printf '%s' "$line" | cut -f1) already has remote endpoint $p_endpoint; left as is."
+    # Visit panes are adopted above (same worker) or stay as they are.
+    [ "$(rw_read_endpoint "$p_endpoint" 2>/dev/null | jq -r '.kind // "owned"' 2>/dev/null)" = "visit" ] ||
+      rw_warn "rw handoff: pane $(printf '%s' "$line" | cut -f1) already has remote endpoint $p_endpoint; left as is."
     continue
   fi
   pane_lines+=("$line")
@@ -605,16 +633,46 @@ for i in "${!pane_lines[@]}"; do
   fi
 done
 
-rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null ||
+# S8: visit panes already on this worker in this root become owned panes of
+# it (listed in the record, so hand-back brings them back); their visit
+# markers go once the mirror lists them (fix wave A, finding 5: never
+# before -- with neither, the worker's post-restore would kill the session).
+adopted=0
+adopted_eps=()
+for entry in ${adopt_panes[@]+"${adopt_panes[@]}"}; do
+  IFS="$RW_TAB" read -r a_pane a_ep <<<"$entry"
+  a_json="$(rw_read_endpoint "$a_ep" 2>/dev/null)" || continue
+  rw_write_json_atomic "$(rw_endpoint_file "$a_ep")" "$(printf '%s' "$a_json" | jq -c \
+    --arg root_id "$root_id" --arg root_rel "$root_rel" --arg kind "$kind" \
+    --arg root_local "$root_local" --arg worker_root "$worker_root" --arg worker_home "$worker_home" \
+    --arg now "$now" '
+    .kind = "owned" | .root_id = $root_id | .root_rel = $root_rel | .worker_home = $worker_home
+    | .workspace.mode = $kind | .workspace.root_local = $root_local | .workspace.worker_root = $worker_root
+    | .updated_at = $now')"
+  rw_record_add_endpoint "$root_id" "$a_ep"
+  rw_pane_set "$a_pane" @rw-root-id "$root_id"
+  adopted_eps+=("$a_ep")
+  adopted=$((adopted + 1))
+done
+
+if rw_mirror_push_from_record "$worker" "$worker_home" "$root_id" </dev/null; then
+  [ "${#adopted_eps[@]}" -eq 0 ] || rw_visit_marker_remove "$worker" "$worker_home" "${adopted_eps[@]}" ||
+    rw_warn "rw handoff: could not remove the visit markers of the adopted pane(s) on '$worker' (harmless: closing a pane removes its marker)."
+else
   rw_warn "rw handoff: could not write the ownership mirror on '$worker' (it is rewritten on the next ownership change)."
+  [ "${#adopted_eps[@]}" -eq 0 ] ||
+    rw_warn "rw handoff: the adopted pane(s) keep their visit markers there until then, so a restart of that remote keeps their sessions."
+fi
 # The worker's pane set just changed: a timer save that raced this refused
 # its inconsistent capture; ask for a fresh one now (fire and forget).
 rw_worker_request_save "$worker"
 
 rw_log_event "handoff" "$self_endpoint" "$worker" "$(rw_elapsed_ms "$start_ts")" \
   "$([ "$failed" -eq 0 ] && echo success || echo partial)" \
-  "root=$root_rel kind=$kind panes=$moved failed=$failed $(printf '%s' "$sync_out" | jq -r '"renamed=\(.renamed | length) overwritten=\(.overwritten)"' 2>/dev/null)"
+  "root=$root_rel kind=$kind panes=$moved adopted=$adopted failed=$failed $(printf '%s' "$sync_out" | jq -r '"renamed=\(.renamed | length) overwritten=\(.overwritten)"' 2>/dev/null)"
 printf 'rw: %s is now remote on %s (%d pane(s) moved).\n' "$root_rel" "$worker" "$moved"
+# Every pane in the root changed host or owner (CS3). Best effort.
+rw_refresh_indicators --root "$root_local"
 
 if [ -n "$self_endpoint" ]; then
   rm -rf "$work"
