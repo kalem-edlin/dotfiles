@@ -134,7 +134,7 @@ N = [0]
 class Run:
     """One shim process (or `argv`) with a pty as its terminal."""
 
-    def __init__(self, env=None, args=("new",), rows=40, cols=100, stdin=None, argv=None):
+    def __init__(self, env=None, args=("new",), rows=40, cols=100, stdin=None, argv=None, cwd=None):
         N[0] += 1
         self.dir = os.path.join(SANDBOX, "run%d" % N[0])
         os.makedirs(self.dir)
@@ -159,6 +159,7 @@ class Run:
             stderr=self.err,
             env=e,
             start_new_session=True,
+            cwd=cwd,
             close_fds=True,
         )
         self.reader = threading.Thread(target=self._read, daemon=True)
@@ -741,11 +742,11 @@ r.close()
 WRAPPER = os.environ["ZSH_WRAPPER"]
 
 
-def zsh_run(script, env=None):
+def zsh_run(script, env=None, cwd=None):
     # The sandbox $HOME has no ~/.config/tmux link: point the wrapper at
     # this checkout's shim (a test may override it again).
-    return Run(env=env, argv=["/bin/zsh", "-f", "-i", "-c", "source %s; _RW_PASTE_SHIM_BIN=%s; %s"
-                              % (WRAPPER, SHIM, script)])
+    return Run(env=env, cwd=cwd, argv=["/bin/zsh", "-f", "-i", "-c", "source %s; _RW_PASTE_SHIM_BIN=%s; %s"
+                                       % (WRAPPER, SHIM, script)])
 
 
 r = zsh_run("_rw_paste_shim_python && print -r -- \"PY=$_RW_PASTE_SHIM_PY\"; tmux new")
@@ -772,6 +773,152 @@ r.ready()
 r.send(b"\x00QUIT")
 r.wait(lambda: b"RC=" in r.out, 5)
 ok("W2-13 wrapper: `tmux new -d` skips the shim", r.child_tty() == os.ttyname(r.s), r.child_tty())
+r.close()
+
+# W2R-10b: only a standalone -d among new-session's own flags counts.
+r = zsh_run("tmux new -s dev -d; print -r -- RC=$?")
+r.ready()
+r.send(b"\x00QUIT")
+r.wait(lambda: b"RC=" in r.out, 5)
+ok("W2R-10b wrapper: `tmux new -s dev -d` skips the shim", r.child_tty() == os.ttyname(r.s), r.child_tty())
+r.close()
+r = zsh_run("tmux new -sdev; print -r -- RC=$?")
+r.ready()
+ok("W2R-10b wrapper: `tmux new -sdev` (a session named dev) goes through the shim",
+   r.child_tty() not in ("", os.ttyname(r.s)), r.child_tty())
+r.quit()
+r.close()
+
+# W2R-1: `tmux a` from a Python project whose tty.py would shadow the stdlib.
+proj = os.path.join(SANDBOX, "pyproject")
+os.makedirs(proj)
+marker = os.path.join(proj, "IMPORTED")
+with open(os.path.join(proj, "tty.py"), "w") as f:
+    f.write("open(%r, 'w').write('project tty.py imported')\n"
+            "def setraw(fd, when=None):\n    pass\n" % marker)
+r = zsh_run("tmux new", cwd=proj, env={"PYTHONPATH": proj})
+r.ready()
+ok("W2R-1 wrapper (-I): a project's tty.py in the cwd or PYTHONPATH is not imported",
+   not os.path.exists(marker))
+ok("W2R-1 wrapper: the shim still runs from that directory", r.child_tty() not in ("", os.ttyname(r.s)))
+r.send(b"\r")
+ok("W2R-1 wrapper: the terminal really is raw (CR arrives as CR)",
+   r.wait(lambda: r.recv().endswith(b"\r"), 3), r.recv()[-10:])
+r.quit()
+r.close()
+
+# W2R-5: a cached interpreter path that vanished is re-resolved; an
+# interpreter that cannot run (126/127) falls back to plain tmux.
+r = zsh_run("_RW_PASTE_SHIM_PY=/nonexistent/python3; tmux new")
+r.ready()
+ok("W2R-5 wrapper: a vanished cached interpreter is re-resolved (the shim runs)",
+   r.child_tty() not in ("", os.ttyname(r.s)), r.child_tty())
+r.quit()
+r.close()
+dead_py = os.path.join(SANDBOX, "dead-python3")
+with open(dead_py, "w") as f:
+    f.write("#!/bin/sh\nexit 127\n")
+os.chmod(dead_py, 0o755)
+r = zsh_run("_RW_PASTE_SHIM_PY=%s; tmux new; print -r -- RC=$?" % dead_py)
+ok("W2R-5 wrapper: interpreter exits 127: plain tmux starts instead", r.ready())
+eq("W2R-5 wrapper: ... on the terminal directly", r.child_tty(), os.ttyname(r.s))
+r.send(b"\x00QUIT")
+ok("W2R-5 wrapper: ... and tmux's own status is returned", r.wait(lambda: b"RC=0" in r.out, 5))
+r.close()
+
+# W2R-8: Ctrl-C while the bootstrap imports the shim ends the command; it
+# does not start plain tmux.
+interrupted = os.path.join(SANDBOX, "interrupted-shim")
+with open(interrupted, "w") as f:
+    f.write("raise KeyboardInterrupt\n")
+r = zsh_run("_RW_PASTE_SHIM_BIN=%s; tmux new; print -r -- RC=$?" % interrupted)
+ok("W2R-8 wrapper: KeyboardInterrupt during the import ends the command (exit 130)",
+   r.wait(lambda: b"RC=130" in r.out, 5), bytes(r.out[:200]))
+ok("W2R-8 wrapper: ... and no tmux was started", b"READY" not in r.out)
+r.close()
+
+# --- 19. W2R-2 (probe p7): no stale terminal read after a suspend -------------------------------
+# A launcher with job control owns the terminal (controlling tty, tcsetpgrp)
+# like zsh. The client stops itself; the shim is descheduled for a moment so
+# the stop's SIGCHLD and a keypress land in one select(); the "shell" eats
+# that key while the shim is stopped, then `fg`. The shim must relay the
+# client's output after fg without waiting for another key.
+P7_LAUNCHER = r"""
+import fcntl, os, signal, sys, termios, time, tty
+sname, shim, pidfile = sys.argv[1], sys.argv[2], sys.argv[3]
+fd = os.open(sname, os.O_RDWR)
+fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+    for i in (0, 1, 2):
+        os.dup2(fd, i)
+    os.execv(shim, [shim, "new"])
+os.setpgid(pid, pid)
+os.tcsetpgrp(fd, pid)
+open(pidfile, "w").write(str(pid))
+while True:
+    p, st = os.waitpid(pid, os.WUNTRACED)
+    if os.WIFSTOPPED(st) and os.WSTOPSIG(st) != signal.SIGTSTP:
+        continue
+    if os.WIFSTOPPED(st):
+        os.tcsetpgrp(fd, os.getpgrp())
+        time.sleep(0.2)
+        saved = termios.tcgetattr(fd)
+        tty.setcbreak(fd, termios.TCSANOW)
+        os.set_blocking(fd, False)
+        try:
+            while os.read(fd, 4096):
+                pass
+        except BlockingIOError:
+            pass
+        os.set_blocking(fd, True)
+        termios.tcsetattr(fd, termios.TCSANOW, saved)
+        os.tcsetpgrp(fd, pid)
+        os.killpg(pid, signal.SIGCONT)
+    else:
+        os._exit(0)
+"""
+pidfile = os.path.join(SANDBOX, "p7.pid")
+
+
+class P7Run(Run):
+    """The pty first (its name is the launcher's argument), then the
+    launcher in place of the placeholder process."""
+
+    def __init__(self):
+        Run.__init__(self, env={"FAKE_CHILD_STOP_DELAY": "0.3"}, argv=["/usr/bin/true"])
+        self.proc.wait(5)
+        e = dict(os.environ)
+        e.pop("RW_PASTE_SHIM", None)
+        e["FAKE_RECV"] = self.recv_path
+        e["FAKE_CHILD_TTY_FILE"] = self.tty_file
+        e["FAKE_CHILD_STOP_DELAY"] = "0.3"
+        self.proc = subprocess.Popen(
+            ["/usr/bin/python3", "-c", P7_LAUNCHER, os.ttyname(self.s), SHIM, pidfile],
+            stdin=subprocess.DEVNULL, stdout=self.err, stderr=self.err, env=e,
+            start_new_session=True, close_fds=True)
+
+
+r = P7Run()
+ok("W2R-2: child started under a job-control launcher", r.ready())
+shim_pid = int(open(pidfile).read())
+r.send(b"\x00STOP")  # the client stops itself in 0.3 s
+time.sleep(0.05)
+os.kill(shim_pid, signal.SIGSTOP)  # the shim is descheduled for a moment
+time.sleep(0.6)  # meanwhile the client stops (SIGCHLD pending) ...
+r.send(b"x")  # ... and the user types a key, which the shell will eat
+os.kill(shim_pid, signal.SIGCONT)  # one select() returns the wake pipe AND the terminal
+ok("W2R-2: after fg the client's output is relayed with no further keypress",
+   r.wait(lambda: b"RESUMED" in r.out, 1.5), bytes(r.out[-40:]))
+r.send(b"\x00QUIT")
+r.wait(lambda: r.proc.poll() is not None, 5)
+try:
+    os.kill(shim_pid, signal.SIGKILL)
+except OSError:
+    pass
 r.close()
 
 err = b""

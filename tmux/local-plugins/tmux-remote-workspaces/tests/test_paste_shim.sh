@@ -79,10 +79,10 @@ case "${1:-}" in
     ;;
   sigdisp)
     /usr/bin/perl -e 'print join(" ", map { "$_=" . ($SIG{$_} // "DEFAULT") } qw(PIPE XFSZ INT)), "\n"' >"$FAKE_SIGDISP_FILE"
-    exec /usr/bin/python3 "$FAKE_CHILD"
+    exec /usr/bin/python3 -I "$FAKE_CHILD"
     ;;
   '' | new | new-session | attach | attach-session | a | at)
-    exec /usr/bin/python3 "$FAKE_CHILD"
+    exec /usr/bin/python3 -I "$FAKE_CHILD"
     ;;
 esac
 exit 0

@@ -561,6 +561,7 @@ class Relay:
         self.in_loop = False
         self.terminate = None
         self.terminal_alive = True
+        self.suspends = 0  # how many times suspend() ran
         self.saved_attrs = None
         self.master = self.slave = None
         self.client_tty = None
@@ -756,6 +757,7 @@ class Relay:
         client at once instead of leaving it stopped. Input still waiting
         in the out-buffer stays there and is written once the client reads
         again."""
+        self.suspends += 1
         log("tmux client suspended itself: suspending the shim")
         self.drain_child_output()
         self.restore_tty()
@@ -971,9 +973,18 @@ class Relay:
             # input still waiting for the child (W2-1).
             if self.wake_r in r:
                 self.drain_wake()
+                suspends = self.suspends
                 if self.reap(0.0, on_stop=self.suspend):
                     self.drain_child_output()
                     return
+                if self.suspends != suspends:
+                    # This process was stopped and continued: the rest of
+                    # this select() result is stale (the shell may have read
+                    # the keys it reported while we were stopped, and a
+                    # blocking read of the terminal would then wait for the
+                    # next keypress with tmux's redraw unrelayed). Select
+                    # afresh (W2R-2).
+                    continue
             if self.master in r:
                 self.read_child()
             if self.master in w:

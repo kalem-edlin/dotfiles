@@ -22,16 +22,23 @@
 #   a different file, a directory, or no usable parent
 #                                  -> uploaded to worker_home/rw-drops/
 #                                     <stem>-<unique suffix><.ext>
-#   Never overwrites anything. Every upload goes to a temporary name in the
-#   destination directory and is renamed into place, so a kill never leaves
-#   a partial file under the final name.
+#   Never overwrites anything on the worker: an identical file is skipped, a
+#   differing one goes to rw-drops, and the final step is a hard link
+#   (sftp `ln`, hardlink@openssh.com, link(2)), which fails with EEXIST
+#   instead of clobbering a file that appeared after the check; that fails
+#   the whole batch, so the original paste goes through. Every upload goes
+#   to a temporary name in the destination directory first, so a kill never
+#   leaves a partial file under the final name. Missing parent directories
+#   are created only for files that land there, in the upload batch.
 #
 # Transport (C5), each step bounded: the shared ssh master (ssh -O check, no
 # ControlPath override), else the rw-stream master, else a direct connection
 # (ConnectTimeout=3). Never starts a master (ControlMaster=no). Over that
-# connection: ONE ssh that creates the parents and reports each target, then
-# ONE `sftp -b` batch (put to a temporary name, rename) with literal paths and
-# no remote shell. The caller enforces the wall-clock budget (the paste
+# connection: ONE ssh that reports each target (bounded at 1.5 s through a
+# master: a master that survived a laptop sleep can answer -O check with a
+# dead connection; on timeout the rest goes over a direct connection with
+# ConnectTimeout=2), then ONE `sftp -b` batch (mkdir, put to a temporary
+# name, ln, rm) with literal paths and no remote shell. The caller enforces the wall-clock budget (the paste
 # shim's 4 s deadline kills this process group). RW_SSH_BIN and RW_SFTP_BIN
 # (default sftp) let tests stub transport. bash 3.2 compatible.
 
@@ -47,13 +54,13 @@ shift
 rw_need_jq
 
 # rw_bounded <seconds> <command...> -- the command, killed by SIGALRM after
-# <seconds> (the alarm survives exec). Without perl: unbounded (the caller's
-# deadline still holds).
+# <seconds>, fractions allowed (the timer survives exec). Without perl:
+# unbounded (the caller's deadline still holds).
 rw_bounded() {
   local secs="$1"
   shift
   if [ -x /usr/bin/perl ]; then
-    /usr/bin/perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$secs" "$@"
+    /usr/bin/perl -MTime::HiRes=alarm -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$secs" "$@"
   else
     "$@"
   fi
@@ -152,8 +159,10 @@ else
   via=direct
 fi
 
-# --- one ssh: parents and the state of each target -----------------------------------
-# Prints "<index> missing|dir|noparent|other|file <algo> <hash>" per target.
+# --- one ssh: the state of each target (creates nothing) ----------------------------
+# Prints per target "<index> " followed by one of: missing (parent exists),
+# mkdir <deepest existing ancestor> (parent to be created), noparent (an
+# ancestor is not a directory), dir, other, file <algo> <hash>.
 # shellcheck disable=SC2016 # expanded by the worker's sh
 check_sh='
 h() {
@@ -164,19 +173,35 @@ h() {
 i=0
 for t in "$@"; do
   d=${t%/*}
-  if ! mkdir -p -- "$d" 2>/dev/null || [ ! -d "$d" ]; then echo "$i noparent"
-  elif [ -d "$t" ]; then echo "$i dir"
-  elif [ -f "$t" ]; then echo "$i file $(h "$t")"
-  elif [ -e "$t" ] || [ -L "$t" ]; then echo "$i other"
-  else echo "$i missing"; fi
+  [ -n "$d" ] || d=/
+  if [ -d "$d" ]; then
+    if [ -d "$t" ]; then echo "$i dir"
+    elif [ -f "$t" ]; then echo "$i file $(h "$t")"
+    elif [ -e "$t" ] || [ -L "$t" ]; then echo "$i other"
+    else echo "$i missing"; fi
+  else
+    p=$d
+    while [ -n "$p" ] && [ ! -e "$p" ] && [ ! -L "$p" ]; do p=${p%/*}; done
+    [ -n "$p" ] || p=/
+    if [ -d "$p" ] && [ ! -L "$p" ]; then echo "$i mkdir $p"; else echo "$i noparent"; fi
+  fi
   i=$((i + 1))
 done'
 cmd="sh -c $(rw_shquote "$check_sh") rw-push-file"
 for t in "${targets[@]}"; do
   cmd="$cmd $(rw_shquote "$t")"
 done
-report="$("$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)" ||
-  rw_die "rw-push-file: cannot reach $worker ($via connection)" 1
+if [ "$via" = direct ]; then
+  report="$("$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)" ||
+    rw_die "rw-push-file: cannot reach $worker (direct connection)" 1
+elif ! report="$(rw_bounded 1.5 "$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)"; then
+  # A master that answers -O check over a dead TCP connection (after the
+  # laptop slept): spend the rest of the budget on a direct connection.
+  via="direct, after the $via master did not answer"
+  opts=("${ssh_base[@]}" -o ControlPath=none -o ConnectTimeout=2)
+  report="$("$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)" ||
+    rw_die "rw-push-file: cannot reach $worker ($via)" 1
+fi
 
 # local_hash <algo> <file>
 local_hash() {
@@ -197,20 +222,23 @@ unique_drop() {
   case "$base" in
     ?*.*) stem="${base%.*}" ext=".${base##*.}" ;;
   esac
-  printf '%s/%s-%s-%s%s%s\n' "$drops" "$stem" "$stamp" "$$" "$2" "$ext"
+  printf '%s/%s-%s-%s-%s%s\n' "$drops" "$stem" "$stamp" "$$" "$2" "$ext"
 }
 
 finals=()
+mkfrom=()  # per index: the existing ancestor to create the parent from, or ""
 uploads=() # indexes to upload
 need_drops=0
 i=0
 while [ "$i" -lt "${#targets[@]}" ]; do
   t="${targets[$i]}"
-  state="$(printf '%s\n' "$report" | awk -v i="$i" '$1 == i { $1 = ""; sub(/^ /, ""); print; exit }')"
+  state="$(printf '%s\n' "$report" | sed -n "s|^$i ||p" | head -n 1)"
   final="$t"
   upload=1
+  anc=""
   case "$state" in
     missing) ;;
+    "mkdir /"*) anc="${state#mkdir }" ;;
     "file "*)
       read -r _ algo hash <<<"$state"
       if [ -n "$hash" ] && [ "$(local_hash "$algo" "${locals[$i]}")" = "$hash" ]; then
@@ -236,13 +264,15 @@ while [ "$i" -lt "${#targets[@]}" ]; do
     final="$(unique_drop "${t##*/}" "$i")"
     upload=1
     need_drops=1
+    anc=""
   fi
   finals+=("$final")
+  mkfrom+=("$anc")
   [ "$upload" = 0 ] || uploads+=("$i")
   i=$((i + 1))
 done
 
-# --- one sftp batch: put to a temporary name, rename into place ----------------------
+# --- one sftp batch: parents, put to a temporary name, link into place ----------------
 if [ "${#uploads[@]}" -gt 0 ]; then
   work="$(mktemp -d "${TMPDIR:-/tmp}/rw-push.XXXXXX")" || rw_die "rw-push-file: no temp dir" 1
   trap 'rm -rf "$work"' EXIT
@@ -254,8 +284,21 @@ if [ "${#uploads[@]}" -gt 0 ]; then
     # sftp globs a put's local path: put a symlink with a plain name.
     ln -s "${locals[$i]}" "$work/$i"
     f="${finals[$i]}"
-    part="${f%/*}/.rw-drop-$token-$i.part"
-    printf 'put "%s" "%s"\nrename "%s" "%s"\n' "$work/$i" "$part" "$part" "$f" >>"$batch"
+    d="${f%/*}"
+    # Missing parents, created one level at a time ("-": an existing one is
+    # fine; a real failure fails the put).
+    if [ -n "${mkfrom[$i]}" ]; then
+      cur="${mkfrom[$i]%/}"
+      rel="${d#"$cur"/}"
+      while [ -n "$rel" ]; do
+        cur="$cur/${rel%%/*}"
+        printf -- '-mkdir "%s"\n' "$cur" >>"$batch"
+        case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
+      done
+    fi
+    part="$d/.rw-drop-$token-$i.part"
+    # ln = hardlink@openssh.com: link(2) fails if the final name exists.
+    printf 'put "%s" "%s"\nln "%s" "%s"\nrm "%s"\n' "$work/$i" "$part" "$part" "$f" "$part" >>"$batch"
   done
   "${RW_SFTP_BIN:-sftp}" -q -b "$batch" "${opts[@]}" "$worker" </dev/null >/dev/null 2>"$work/err" ||
     rw_die "rw-push-file: copying to $worker failed ($via connection): $(tail -n 1 "$work/err" 2>/dev/null)" 1

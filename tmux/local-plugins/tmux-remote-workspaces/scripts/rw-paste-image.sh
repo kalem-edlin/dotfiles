@@ -9,8 +9,10 @@
 # pasted into the pane; in a local pane the laptop path is pasted. Paths are
 # escaped the way a Ghostty drop escapes them and pasted with paste-buffer -p
 # (bracketed when the program asked for it), so both behave like a drop. The
-# push is bounded (15 s); the path is pasted only if the pane still runs the
-# same command and is not in a mode.
+# push is bounded (15 s). The path is pasted only if the pane is not in a
+# mode and, in a local pane, still runs the same command; in a remote pane
+# (which always runs ssh) only if the copy finished within 2 s of the
+# keypress, else it is left in a paste buffer for prefix ].
 #
 # Bound with `run-shell -b`, so tmux never waits on it (osascript can take
 # hundreds of ms, R3). It prints nothing: run-shell would show any output in
@@ -30,6 +32,15 @@ pane="${1:-}"
 case "$pane" in %[0-9]*) ;; *) exit 64 ;; esac
 
 say() { tmux display-message -t "$pane" "$1" 2>/dev/null || true; }
+
+# Milliseconds since the epoch (perl ships with macOS; `date` has no %N).
+now_ms() { /usr/bin/perl -MTime::HiRes=time -e 'printf "%d", time * 1000' 2>/dev/null || echo 0; }
+pressed="$(now_ms)" # the keypress, near enough
+# A remote pane always runs `ssh` (the attach loop), so "the program did not
+# change" says nothing there: its path is pasted only if the copy finished
+# within this many ms of the keypress; otherwise it goes into a paste buffer
+# for prefix ] (W2R-3).
+REMOTE_PASTE_WINDOW_MS="${RW_PASTE_IMAGE_WINDOW_MS:-2000}"
 
 # Ghostty.Shell.escape (F3): a backslash before each special character.
 ghostty_escape() {
@@ -132,6 +143,19 @@ case "$path" in
   *) say "rw: copying the clipboard image to the worker failed"; exit 0 ;;
 esac
 
+escaped="$(ghostty_escape "$path")"
+if [ "$rc" = 0 ] && [ $(($(now_ms) - pressed)) -gt "$REMOTE_PASTE_WINDOW_MS" ]; then
+  # Slow copy into a remote pane: whatever the pane is doing by now is
+  # unknown. Leave the path in a new automatic buffer, the one prefix ]
+  # pastes (a named -b buffer is not what paste-buffer picks by default).
+  if tmux set-buffer -- "$escaped" 2>/dev/null; then
+    say "rw: image copied to ${path//#/##}; prefix ] to paste"
+  else
+    say "rw: image copied to ${path//#/##}"
+  fi
+  exit 0
+fi
+
 tab=$'\t'
 state="$(tmux display-message -p -t "$pane" "#{pane_current_command}$tab#{pane_in_mode}" 2>/dev/null)"
 if [ "${state%%"$tab"*}" != "$before" ] || [ "${state#*"$tab"}" != 0 ]; then
@@ -141,7 +165,7 @@ fi
 
 # A bracketed paste (when the program asked for one), the same as a drop.
 buf="rw-clip-$$"
-if ! { tmux set-buffer -b "$buf" -- "$(ghostty_escape "$path")" 2>/dev/null &&
+if ! { tmux set-buffer -b "$buf" -- "$escaped" 2>/dev/null &&
   tmux paste-buffer -p -d -b "$buf" -t "$pane" 2>/dev/null; }; then
   tmux delete-buffer -b "$buf" 2>/dev/null || true
   say "rw: could not paste the image path into the pane"

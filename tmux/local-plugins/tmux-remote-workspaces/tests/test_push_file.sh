@@ -2,9 +2,11 @@
 # shellcheck source-path=SCRIPTDIR
 # libexec/rw-push-file (contracts C1, C3, C5, decision D2 in
 # docs/tasks/drop-to-remote-paste.md): the D2 mapping, the C5 overwrite
-# policy (identical skips, anything else goes to rw-drops, temp name then
-# rename), the intercept scope, the transport order (shared master, stream
-# master, direct; each check bounded), exit codes, output only after every
+# policy (identical skips, anything else goes to rw-drops, temp name then a
+# no-clobber hard link), the intercept scope, the transport order (shared
+# master, stream master, direct; each check bounded; a dead master falls
+# back to direct), parents created only in the upload, exit codes, output
+# only after every
 # copy, and hostile file names. Then scripts/rw-paste-image.sh (prefix C-v).
 # Stub tmux (pane table), same-host fake ssh, fake sftp (paste_fakes.sh).
 
@@ -41,9 +43,11 @@ out="$("$PUSH" %5 "$ws/assets/shot.png")"
 eq "inside the workspace: exit 0" "$?" "0"
 eq "inside the workspace: remote_path + path relative to focus_path" "$out" "$wws/assets/shot.png"
 check "inside the workspace: the file is on the worker" cmp -s "$ws/assets/shot.png" "$wws/assets/shot.png"
-check "upload goes to a temporary .part name, then a rename into place" \
+check "upload goes to a temporary .part name, then a hard link into place" \
   grep -qE "^put	.*	$wws/assets/\.rw-drop-[^	]*\.part$" "$FAKE_SFTP_LOG"
-check "  ... and the rename targets the final name" grep -qE "^rename	.*\.part	$wws/assets/shot\.png$" "$FAKE_SFTP_LOG"
+check "  ... ln (hardlink, no clobber) to the final name, then rm of the .part" \
+  bash -c "grep -qE '^ln	.*\\.part	$wws/assets/shot\\.png\$' '$FAKE_SFTP_LOG' && grep -qE '^rm	.*\\.part\$' '$FAKE_SFTP_LOG'"
+check "  ... never sftp rename (posix-rename overwrites)" bash -c "! grep -q '^rename' '$FAKE_SFTP_LOG'"
 check "no .part file is left behind" bash -c "! ls -a '$wws/assets' | grep -q part"
 eq "one ssh (parents + target report) and one sftp batch" \
   "$(count '^ssh ' "$FAKE_TRANSPORT_LOG") $(count '^sftp ' "$FAKE_TRANSPORT_LOG")" "1 1"
@@ -70,7 +74,7 @@ echo "the worker's own edit" >"$wws/assets/shot.png"
 out="$("$PUSH" %5 "$ws/assets/shot.png")"
 eq "a different file at the target: exit 0" "$?" "0"
 check "a different file at the target: goes to rw-drops/<stem>-<suffix>.png" \
-  bash -c "[[ '$out' =~ ^$FAKE_WORKER_HOME/rw-drops/shot-[0-9]{8}T[0-9]{6}Z-[0-9]+\\.png$ ]]"
+  bash -c "[[ '$out' =~ ^$FAKE_WORKER_HOME/rw-drops/shot-[0-9]{8}T[0-9]{6}Z-[0-9]+-[0-9]+\\.png$ ]]"
 eq "a different file at the target: the worker's file is untouched" "$(cat "$wws/assets/shot.png")" "the worker's own edit"
 check "a different file at the target: the laptop file is at the printed path" cmp -s "$ws/assets/shot.png" "$out"
 
@@ -101,6 +105,28 @@ out="$("$PUSH" %5 "$ws/assets/shot.png" "$HOME/Desktop/note.txt" "$SANDBOX/outsi
 eq "several files: one line each, in input order" "$(printf '%s\n' "$out" | sed -n '2p;3p')" "$FAKE_WORKER_HOME/Desktop/note.txt
 $FAKE_WORKER_HOME/rw-drops/same.txt"
 eq "several files: still one ssh" "$(count '^ssh ' "$FAKE_TRANSPORT_LOG")" "1"
+
+# W2R-4: a file that appears at the target between the check and the upload
+# is never overwritten (the final ln fails with EEXIST; nothing printed).
+echo race >"$HOME/Desktop/race.txt"
+reset_logs
+# shellcheck disable=SC2016 # expanded by the hook's bash
+out="$(FAKE_SFTP_HOOK='echo "the worker wrote this meanwhile" >"$FAKE_WORKER_HOME/Desktop/race.txt"' \
+  "$PUSH" %5 "$HOME/Desktop/race.txt" 2>/dev/null)"
+eq "W2R-4 a target that appears after the check: exit 1, prints nothing (the paste passes through)" "$?:$out" "1:"
+eq "W2R-4 a target that appears after the check: the worker's file is not overwritten" \
+  "$(cat "$FAKE_WORKER_HOME/Desktop/race.txt")" "the worker wrote this meanwhile"
+
+# W2R-10a: the target check creates nothing; missing parents are made only
+# by the upload batch, for files that land there.
+mkdir -p "$HOME/Desktop/deep/er"
+echo deep >"$HOME/Desktop/deep/er/f.txt"
+out="$(FAKE_SFTP_DOWN=1 "$PUSH" %5 "$HOME/Desktop/deep/er/f.txt" 2>/dev/null)"
+eq "W2R-10a upload fails: exit 1" "$?" "1"
+check "W2R-10a upload fails: no directory was left on the worker" test ! -e "$FAKE_WORKER_HOME/Desktop/deep"
+out="$("$PUSH" %5 "$HOME/Desktop/deep/er/f.txt")"
+eq "W2R-10a two missing parent levels: created by the batch, file in place" "$out" "$FAKE_WORKER_HOME/Desktop/deep/er/f.txt"
+check "W2R-10a two missing parent levels: the bytes arrived" cmp -s "$HOME/Desktop/deep/er/f.txt" "$out"
 
 # --- hostile names -----------------------------------------------------------------------------
 out="$("$PUSH" %5 "$weird")"
@@ -145,6 +171,21 @@ rc=$?
 dt=$(($(date +%s) - t0))
 eq "wedged masters: each check is bounded, the push still succeeds (exit 0)" "$rc" "0"
 check "wedged masters: done within 4 s (took ${dt}s)" test "$dt" -le 4
+
+# W2R-9: a master that answers -O check over a dead connection (laptop
+# slept): the first ssh is cut at 1.5 s and the rest goes direct.
+reset_logs
+rm -f "$FAKE_WORKER_HOME/Desktop/note.txt"
+t0=$(date +%s)
+out="$(FAKE_MASTER=shared FAKE_MASTER_DEAD=1 "$PUSH" %5 "$HOME/Desktop/note.txt")"
+rc=$?
+dt=$(($(date +%s) - t0))
+eq "W2R-9 dead master: exit 0, the file is placed" "$rc:$out" "0:$FAKE_WORKER_HOME/Desktop/note.txt"
+check "W2R-9 dead master: done within 3 s (took ${dt}s)" test "$dt" -le 3
+check "W2R-9 dead master: retried direct (ControlPath=none, ConnectTimeout=2), sftp direct too" \
+  bash -c "grep -q -- '^ssh .*-o ControlPath=none -o ConnectTimeout=2 fakeworker' '$FAKE_TRANSPORT_LOG' &&
+    grep -q -- '^sftp .*-o ControlPath=none -o ConnectTimeout=2 fakeworker' '$FAKE_TRANSPORT_LOG'"
+check "W2R-9 dead master: the hung session was killed" bash -c "! pgrep -f 'sleep 9.8765' >/dev/null"
 
 # --- exit 2: not a remote workspace pane ----------------------------------------------------------
 out="$("$PUSH" %6 "$ws/assets/shot.png")"
@@ -242,6 +283,20 @@ FAKE_SFTP_HOOK='sed -i "" "s/pane_current_command=zsh/pane_current_command=nvim/
 check "paste-image, the pane's program changed during the copy: nothing pasted" bash -c "! grep -q '^set-buffer' '$FAKE_TMUX_LOG'"
 check "  ... and it says so" grep -q "^display-message -t %5 rw: the pane changed while the image was copied" "$FAKE_TMUX_LOG"
 sed -i '' 's/pane_current_command=nvim/pane_current_command=zsh/' "$FAKE_TMUX_PANES"
+
+# W2R-3: a remote pane always runs ssh, so a slow copy is never pasted into
+# it: the path goes to a new automatic buffer (what prefix ] pastes).
+: >"$FAKE_TMUX_LOG"
+rm -f "$clips_dir/"*.png
+rm -rf "$FAKE_WORKER_HOME/Pictures/rw-clips"
+FAKE_SFTP_SLEEP=3 FAKE_CLIPBOARD_HEX="$png_hex" bash "$IMG" %5 >/dev/null 2>&1
+clips=("$clips_dir/"*.png)
+clip="${clips[0]##*/}"
+check "W2R-3 remote pane, copy took 3 s: nothing pasted into the pane" bash -c "! grep -q '^paste-buffer' '$FAKE_TMUX_LOG'"
+check "W2R-3 remote pane, copy took 3 s: the worker path is in a new automatic buffer" \
+  grep -qxF "set-buffer -- $FAKE_WORKER_HOME/Pictures/rw-clips/$clip" "$FAKE_TMUX_LOG"
+check "W2R-3 remote pane, copy took 3 s: the message names the path and prefix ]" \
+  grep -qF "display-message -t %5 rw: image copied to $FAKE_WORKER_HOME/Pictures/rw-clips/$clip; prefix ] to paste" "$FAKE_TMUX_LOG"
 
 : >"$FAKE_TMUX_LOG"
 sed -i '' 's/^\(pane_id=%5.*\)pane_in_mode=0/\1pane_in_mode=1/' "$FAKE_TMUX_PANES"

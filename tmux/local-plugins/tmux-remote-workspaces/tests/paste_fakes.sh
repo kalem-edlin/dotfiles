@@ -3,9 +3,12 @@
 # lib.sh's rw_test_sandbox. Installs into $SANDBOX/bin:
 #   ssh-rw  RW_SSH_BIN: `-O check` answers from FAKE_MASTER (shared | stream
 #           | none; FAKE_CHECK_HANG=<s> makes a check hang like a wedged
-#           master); everything else goes to lib.sh's same-host fake ssh.
+#           master; FAKE_MASTER_DEAD=1 makes sessions through a master hang
+#           while direct ones work); everything else goes to lib.sh's
+#           same-host fake ssh.
 #           Every call is logged to FAKE_TRANSPORT_LOG.
-#   sftp    RW_SFTP_BIN: runs a `-b` batch (mkdir, put, rename; a leading
+#   sftp    RW_SFTP_BIN: runs a `-b` batch (mkdir, put, rename, ln as
+#           link(2) failing on an existing name, rm; a leading
 #           "-" ignores errors; "..." quoting with \" escapes) on this host.
 #           FAKE_SFTP_SLEEP=<s> sleeps first (a real `sleep` process),
 #           FAKE_SFTP_FAIL=1 fails the first put, FAKE_SFTP_HOOK=<cmd> runs
@@ -37,6 +40,11 @@ if [ "$check" = 1 ]; then
   exit $?
 fi
 printf 'ssh %s\n' "$*" >>"${FAKE_TRANSPORT_LOG:-/dev/null}"
+# FAKE_MASTER_DEAD=1: the master answers -O check, but a session through it
+# hangs (its TCP connection died while the laptop slept); direct works.
+if [ "${FAKE_MASTER_DEAD:-0}" = 1 ] && [ "$cp" != none ]; then
+  exec sleep 9.8765
+fi
 exec "$(dirname "$0")/ssh" "$@"
 EOF
 
@@ -52,7 +60,7 @@ if os.environ.get("FAKE_SFTP_HOOK"):
     subprocess.run(["bash", "-c", os.environ["FAKE_SFTP_HOOK"]])
 if os.environ.get("FAKE_SFTP_SLEEP"):
     subprocess.run(["sleep", os.environ["FAKE_SFTP_SLEEP"]])
-if os.path.exists(os.environ.get("FAKE_SSH_DOWN", "/nonexistent")):
+if os.path.exists(os.environ.get("FAKE_SSH_DOWN", "/nonexistent")) or os.environ.get("FAKE_SFTP_DOWN") == "1":
     sys.stderr.write("ssh: connect to host: Connection refused\n")
     sys.exit(255)
 tok = re.compile(r'"((?:[^"\\]|\\.)*)"|(\S+)')
@@ -77,6 +85,10 @@ for line in open(batch):
             shutil.copyfile(words[1], words[2])
         elif words[0] == "rename":
             os.replace(words[1], words[2])
+        elif words[0] == "ln":  # hardlink@openssh.com: EEXIST, never clobbers
+            os.link(words[1], words[2])
+        elif words[0] == "rm":
+            os.unlink(words[1])
         else:
             raise OSError("unknown command " + words[0])
     except OSError as e:

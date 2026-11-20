@@ -21,10 +21,12 @@
 typeset -g _RW_PASTE_SHIM_BIN="$HOME/.config/tmux/local-plugins/tmux-remote-workspaces/libexec/rw-paste-shim"
 unset _RW_PASTE_SHIM_PY
 
-# The real interpreter, found once per shell (one xcode-select call) and
-# kept in the global _RW_PASTE_SHIM_PY ("" when there is none).
+# The real interpreter, kept in the global _RW_PASTE_SHIM_PY ("" when there
+# is none). Resolved on first use (one xcode-select call) and again whenever
+# the cached path is no longer executable (Xcode moved or updated under a
+# long-lived shell, W2R-5).
 _rw_paste_shim_python() {
-  if [[ -z ${_RW_PASTE_SHIM_PY+set} ]]; then
+  if [[ -z ${_RW_PASTE_SHIM_PY+set} || ( -n $_RW_PASTE_SHIM_PY && ! -x $_RW_PASTE_SHIM_PY ) ]]; then
     local dev c
     dev=$(command xcode-select -p 2>/dev/null)
     _RW_PASTE_SHIM_PY=""
@@ -42,11 +44,20 @@ _rw_paste_shim_wanted() {
   case ${1-} in
     ''|attach|attach-session|a|at) return 0 ;;
     new|new-session)
-      local a
-      for a in "${@:2}"; do
-        [[ $a == -- ]] && break
-        # -d (alone or in a flag cluster): detached, nothing to relay.
-        [[ $a == -[[:alpha:]]* && $a != *[^[:alpha:]-]* && $a == *d* ]] && return 1
+      # A standalone -d among new-session's own flags (before the shell
+      # command): detached, nothing to relay. Values of the flags that take
+      # one are skipped, so `-s dev -d` counts and `-sdev`, `vim -d f` do
+      # not (W2R-10b).
+      local -i i=2
+      while (( i <= $# )); do
+        case ${@[i]} in
+          -d) return 1 ;;
+          -c|-e|-f|-F|-n|-s|-t|-x|-y) (( i += 2 )); continue ;;
+          --) break ;;
+          -?*) ;;
+          *) break ;;
+        esac
+        (( i++ ))
       done
       return 0
       ;;
@@ -57,17 +68,23 @@ _rw_paste_shim_wanted() {
 tmux() {
   if [[ -t 0 && -t 1 && -z ${TMUX:-} && ${RW_PASTE_SHIM:-} != 0 && -r $_RW_PASTE_SHIM_BIN ]] &&
      _rw_paste_shim_wanted "$@" && _rw_paste_shim_python; then
-    "$_RW_PASTE_SHIM_PY" -c '
+    # -I: isolated mode, so neither the current directory nor PYTHONPATH
+    # can shadow the standard library (a project's tty.py, W2R-1).
+    "$_RW_PASTE_SHIM_PY" -I -c '
 import sys
 try:
     import runpy
     shim = runpy.run_path(sys.argv[1], run_name="rw_paste_shim")
-except BaseException:
+except KeyboardInterrupt:
+    sys.exit(130)
+except Exception:
     sys.exit(213)
 shim["main"](sys.argv[2:])
 ' "$_RW_PASTE_SHIM_BIN" "$@"
     local rc=$?
-    (( rc == 213 )) || return $rc
+    # 213: the shim failed before tmux started; 126/127: the interpreter
+    # could not be run at all (tmux itself only exits 0 or 1).
+    (( rc == 213 || rc == 126 || rc == 127 )) || return $rc
   fi
   command tmux "$@"
 }
