@@ -38,7 +38,9 @@
 # its lock, and a live per-root rw lock (another rw command) refuses too.
 #
 # Exit (synchronous part): 0 started, 1 already running / pane missing,
-# 7 root invalid, already remote, not remote, or the worker side,
+# 7 root invalid, already remote, not remote, or the worker side, or (handoff)
+# an agent pane launched outside the root works inside it (roots.sh
+# rw_root_offsite_agents: it would not move and would keep writing the root),
 # 64 usage. The transfer's own exit codes (2, 3, 5, 6, 7) reach the log,
 # the dialog and events.jsonl (`bg-handoff` / `bg-handback`).
 
@@ -179,6 +181,12 @@ front() {
     fi
     if overlap="$(rw_owned_overlap "$root_local")"; then
       rw_die "rw bg handoff: '$root_local' overlaps the remote root '$overlap'." 7
+    fi
+    # An agent launched outside the root that now works inside it would keep
+    # writing the root here after it moves (the guard rw handoff also runs).
+    local offsite
+    if offsite="$(rw_offsite_agents_refusal "$root_local")"; then
+      rw_die "$offsite" 7
     fi
     if [ -z "$worker" ]; then
       [ "$(jq '.workers | length' "$RW_CONFIG_FILE")" = 1 ] ||

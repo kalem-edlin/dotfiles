@@ -23,6 +23,89 @@ rw_root_panes() {
     RW_AWK_ROOT="$1" awk -F '\t' '{ r = ENVIRON["RW_AWK_ROOT"] } $2 == r || index($2, r "/") == 1'
 }
 
+# rw_root_offsite_agents <root_local>
+# Agent panes a hand-off of the root would NOT move although the agent works
+# inside it (the off-root agent guard, docs/tasks/remote-owned-directories.md
+# A5). tmux's pane_current_path is the foreground process's cwd, and Claude
+# Code never chdirs, so a session launched outside the root that later cds
+# into it keeps reporting its launch directory: rw_root_panes misses it and
+# it would keep writing the root here while the worker owns it.
+#
+# Candidates: local panes (empty @rw-endpoint) NOT under the root by
+# pane_current_path, with @agent_kind set and a live @agent_pid (the liveness
+# rule rw-picker.sh uses). For claude, the last non-null `cwd` in the tail of
+# the session's transcript, under the root (symlinks resolved; the root
+# itself or a path below it), makes the pane offending. pi records its cwd
+# once, in the session header, and never updates it, so it cannot be told
+# apart here and is skipped. Any lookup failure (no recorded session, no
+# transcript, adapter or jq error) is "not offending": an unreadable
+# transcript never blocks a hand-off.
+# Prints one line per offending pane:
+#   pane_id<TAB>session:window.pane<TAB>kind<TAB>agent_cwd<TAB>pane_current_path
+# Test seam: RW_ADAPTERS_DIR (as rw-handoff.sh), RW_OFFSITE_TAIL_LINES.
+rw_root_offsite_agents() {
+  local root="$1" adapters pane_id label ppath kind agent_pid detect_out session project transcript acwd
+  adapters="${RW_ADAPTERS_DIR:-$RW_ROOTS_DIR/../libexec/adapters}"
+  while IFS="$RW_TAB" read -r pane_id label ppath kind agent_pid; do
+    [ -n "$pane_id" ] && [ -n "$kind" ] && [ -n "$agent_pid" ] || continue
+    kill -0 "$agent_pid" 2>/dev/null || continue
+    [ "$kind" = claude ] || continue
+    [ -x "$adapters/claude" ] || continue
+    detect_out="$("$adapters/claude" detect --pane "$pane_id" </dev/null 2>/dev/null)" || continue
+    session="$(printf '%s' "$detect_out" | jq -r '.session_id // empty' 2>/dev/null)" || continue
+    project="$(printf '%s' "$detect_out" | jq -r '.project_path // empty' 2>/dev/null)" || continue
+    [ -n "$session" ] && [ -n "$project" ] || continue
+    transcript="$("$adapters/claude" transcript-path --session-id "$session" --project-path "$project" </dev/null 2>/dev/null)" || continue
+    [ -n "$transcript" ] && [ -f "$transcript" ] || continue
+    # Bounded read: the last RW_OFFSITE_TAIL_LINES lines (default 200) of at
+    # most the last 16 MiB; a line cut by the byte bound fails to parse and
+    # is skipped. Lines without a string cwd (api-request entries) are
+    # skipped; the newest one that has it wins.
+    acwd="$(tail -c 16777216 "$transcript" 2>/dev/null | tail -n "${RW_OFFSITE_TAIL_LINES:-200}" |
+      jq -Rr 'fromjson? | objects | .cwd | strings | select(length > 0)' 2>/dev/null | tail -n 1)"
+    [ -n "$acwd" ] || continue
+    acwd="$(rw_physical_path "$acwd")"
+    case "$acwd" in
+      "$root" | "$root"/*) printf '%s\t%s\t%s\t%s\t%s\n' "$pane_id" "$label" "$kind" "$acwd" "$ppath" ;;
+    esac
+  done < <(tmux list-panes -a -F "#{pane_id}${RW_TAB}#{session_name}:#{window_index}.#{pane_index}${RW_TAB}#{pane_current_path}${RW_TAB}#{@agent_kind}${RW_TAB}#{@agent_pid}${RW_TAB}#{@rw-endpoint}" 2>/dev/null |
+    RW_AWK_ROOT="$root" awk -F '\t' '
+      { r = ENVIRON["RW_AWK_ROOT"] }
+      $6 == "" && $3 != "" && $4 != "" && $5 != "" && !($3 == r || index($3, r "/") == 1) { print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 }')
+  return 0
+}
+
+# rw_offsite_agents_refusal <root_local>
+# The one-line refusal (no "rw: " prefix; rw_die adds it) when
+# rw_root_offsite_agents finds a pane; returns 1 and prints nothing when it
+# finds none. Names the first pane and counts the rest.
+rw_offsite_agents_refusal() {
+  local root="$1" found first n more=""
+  found="$(rw_root_offsite_agents "$root")"
+  [ -n "$found" ] || return 1
+  first="$(printf '%s\n' "$found" | head -n 1)"
+  n="$(printf '%s\n' "$found" | grep -c .)"
+  [ "$n" -le 1 ] || more=" (and $((n - 1)) more)"
+  printf '%s%s runs %s working in %s (started in %s); it would keep writing %s on this machine. Stop it or start it inside %s, then hand off.\n' \
+    "$(printf '%s' "$first" | cut -f2)" "$more" "$(printf '%s' "$first" | cut -f3)" \
+    "$(rw_display_path "$(printf '%s' "$first" | cut -f4)")" "$(rw_display_path "$(printf '%s' "$first" | cut -f5)")" \
+    "$(rw_display_path "$root")" "$(rw_display_path "$root")"
+}
+
+# rw_display_path <path> -- ~/... under $HOME (as given or physical), for messages.
+# shellcheck disable=SC2088 # a literal ~ is the point
+rw_display_path() {
+  local home_p
+  home_p="$(rw_physical_path "$HOME")"
+  case "$1" in
+    "$HOME") printf '~\n' ;;
+    "$home_p") printf '~\n' ;;
+    "$HOME"/*) printf '~/%s\n' "${1#"$HOME"/}" ;;
+    "$home_p"/*) printf '~/%s\n' "${1#"$home_p"/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 # rw_root_bound_panes <root_id> <endpoint-ids...>
 # Panes bound to the root ON ITS OWNER: those whose @rw-endpoint is one of
 # the record's endpoints (passed in). @rw-root-id alone is not enough: a

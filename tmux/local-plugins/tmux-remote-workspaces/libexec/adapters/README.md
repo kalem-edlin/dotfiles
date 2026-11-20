@@ -162,3 +162,12 @@ resume. Run it directly:
 ```sh
 libexec/adapters/smoke-test
 ```
+
+## `claude transcript-path`
+
+Not part of the five-subcommand contract: `claude transcript-path
+--session-id <id> --project-path <path>` prints the local transcript file
+(`~/.claude/projects/<slug>/<id>.jsonl`, the adapter's own slug) or exits 1
+when it does not exist. Read-only. `rw_root_offsite_agents`
+(`../../scripts/roots.sh`) uses it to read an agent's current working
+directory without re-deriving the encoding.

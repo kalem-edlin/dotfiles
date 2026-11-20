@@ -26,6 +26,7 @@ Usage:
   claude export --session-id <uuid> --project-path <path> --out <dir> [--worker <alias>]
   claude install --snapshot <dir> --dest-path <path> [--worker <alias>]
   claude resume-cmd --dest-path <path> --session-id <uuid> [--fork] [--mode-flags <flags>]
+  claude transcript-path --session-id <uuid> --project-path <path>
 EOF
 }
 
@@ -393,8 +394,40 @@ cmd_resume_cmd() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# transcript-path --session-id <uuid> --project-path <path>
+#
+# Prints the LOCAL transcript file for a session; exit 1 (nothing printed)
+# when it does not exist. Not part of the five-subcommand handoff contract:
+# it only exposes claude_slug and the projects root so
+# `rw_root_offsite_agents` (scripts/roots.sh) never re-derives the
+# encoding. Read-only.
+# ---------------------------------------------------------------------------
+cmd_transcript_path() {
+  local session_id="" project_path="" file
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --session-id)
+        session_id="${2:?--session-id requires a value}"
+        shift 2
+        ;;
+      --project-path)
+        project_path="${2:?--project-path requires a value}"
+        shift 2
+        ;;
+      *) ca_die "transcript-path: unknown argument: $1" 1 ;;
+    esac
+  done
+  ca_require "$session_id" "--session-id"
+  ca_require "$project_path" "--project-path"
+  file="$(claude_projects_root_local)/$(claude_slug "$project_path")/$session_id.jsonl"
+  [ -f "$file" ] || exit 1
+  printf '%s\n' "$file"
+}
+
 case "$cmd" in
   detect) cmd_detect "$@" ;;
+  transcript-path) cmd_transcript_path "$@" ;;
   versions) cmd_versions "$@" ;;
   export) cmd_export "$@" ;;
   install) cmd_install "$@" ;;

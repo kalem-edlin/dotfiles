@@ -13,6 +13,9 @@
 #      already remote, a top-level folder of ~, or a plain folder holding git
 #      repositories -- the last two only without an explicit --root). Take
 #      the per-root lock. Preflight the worker (exit 6 unreachable).
+#      Refuse (exit 1, nothing touched) while a local agent pane launched
+#      OUTSIDE the root works inside it by its transcript's cwd: that pane is
+#      not moved and would keep writing the root here (rw_root_offsite_agents).
 #   2. Per pane: detect a supported agent; refuse a working agent and a busy
 #      pane no adapter recognizes; check the provider version policy (one
 #      exit-3 block aborts everything).
@@ -133,6 +136,15 @@ if record="$(rw_owned_record_read "$root_id")"; then
 fi
 if overlap="$(rw_owned_overlap "$root_local")"; then
   rw_die "rw handoff: '$root_local' overlaps the remote root '$overlap'; roots never nest across an ownership boundary." 7
+fi
+
+# An agent launched outside the root that now works inside it is not among
+# the panes this moves (its pane still reports the launch directory); it
+# would keep writing the root here while the worker owns it. Refuse, naming
+# it; nothing has been touched yet. (roots.sh rw_root_offsite_agents)
+if offsite_msg="$(rw_offsite_agents_refusal "$root_local")"; then
+  fail_event "offsite_agent"
+  rw_die "$offsite_msg" 1
 fi
 
 rw_root_lock_or_die "$root_id" "rw handoff"

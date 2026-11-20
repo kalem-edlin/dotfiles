@@ -195,7 +195,10 @@ UI and log strings say `remote`, never a host name.
 Nothing is replaced until every check that can refuse has run:
 
 1. Resolve the root (exit 7) and preflight the worker (exit 6 when
-   unreachable). Run any pending action recorded for that worker.
+   unreachable). Run any pending action recorded for that worker. Before
+   the root is locked, refuse (exit 1; `rw bg handoff` refuses the same way
+   with exit 7, inline in the `prefix e` picker) when a local agent pane
+   launched outside the root is working inside it, as below.
 2. Per pane: detect a supported agent, refuse a busy pane that is neither a
    shell, an editor, nor a recognized agent session, and check the provider
    version policy. One version block (exit 3) aborts the whole handoff.
@@ -206,6 +209,27 @@ Nothing is replaced until every check that can refuse has run:
    session, resume it there, confirm its process, and stop the local agent
    only after the remote resume is confirmed. Then write the endpoint and
    replace the pane with its attach loop.
+
+Off-root agent guard. A hand-off moves the panes whose `pane_current_path`
+is the root or inside it. That is the directory of the pane's foreground
+process, and Claude Code never changes its own, so an agent started outside
+the root that later `cd`s into it keeps reporting its launch directory. It
+would not move, and would keep writing the root here while the worker owns
+it. So the hand-off refuses, naming the pane, and never tries to move the
+agent: `rw: <session:window.pane> runs claude working in <dir> (started in
+<dir>); it would keep writing <root> on this machine. Stop it or start it
+inside <root>, then hand off.` (`(and N more)` follows the pane name when
+several qualify.) The agent's directory is the last non-null `cwd` in the
+tail (200 lines) of its Claude transcript, found through the adapter's
+`transcript-path`. A local pane with a live `@agent_pid` and `@agent_kind`
+`claude` that is not inside the root counts when that directory is the root
+or below it. Any failure to read it (no recorded session, no transcript, an
+adapter error) lets the hand-off proceed. pi sessions record their directory
+once, in the header, so pi panes are not checked. Not covered: an agent
+inside the root whose own directory is outside it (it moves, and loses
+access to that directory), and edits by absolute path, which leave no
+directory trace. See `docs/tasks/remote-owned-directories.md`, "Off-root
+agent guard".
 
 An editor pane (nvim, vim, vi) is not left as a bare remote shell: its
 editor is reopened in the worker pane, from the Neovim session that

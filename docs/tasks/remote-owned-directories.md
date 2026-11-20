@@ -663,3 +663,34 @@ No tmux server, no resurrect snapshots, uptime 10h28m (rebooted that day). `pmse
 
 ### F12 Ghidra batch 5
 Finished 2026-11-18 00:00:32 CST (`DONE5:` in `idol-app/scripts/work-native/run5-status.txt`). No Ghidra processes remain. Ghidra projects were temporary per run.
+
+## Off-root agent guard (A5, 2026-11-20)
+
+### Problem
+A hand-off moves every local pane whose `pane_current_path` is the root or inside it (`rw_root_panes`). tmux reports the foreground process's cwd, and Claude Code never `chdir`s its own process, so a Claude session launched outside the root keeps reporting its launch directory however far its working directory moves. The user's question: "What happens when a coding agent like claude code was STARTED in one session / dir, but its internal path its working on changes but the pane's focus dir does not? I'd still expect that agent to be handed off too right?" Verified: a pane reporting `~/Developer/dotfiles` has transcript entries with cwd `~/Developer/dotfiles/tmux/local-plugins/tmux-remote-workspaces`. Such an agent is not moved. It keeps writing the root on the laptop while the worker owns it: two writers.
+
+### Decision
+Refuse the hand-off, naming the agent pane (option O2, accepted by the user). Do not try to move the agent. Why refuse rather than move: the pane's launch directory is outside the root, so moving it means tearing a pane that is not part of the root out of its session and layout, resuming the agent in a directory mapping that only exists for panes inside the root, and then deciding where its other (non-root) work happens. The attach-loop, endpoint and rollback machinery all assume the moved panes are the root's panes. Refusing costs the user one `Ctrl-C` and a restart inside the root, and it can never leave two writers.
+
+Refusal text, one line (`~` for `$HOME`; `(and N more)` after the pane name when several qualify):
+`rw: s1:2.0 runs claude working in ~/Developer/proj/sub (started in ~/Developer/elsewhere); it would keep writing ~/Developer/proj on this machine. Stop it or start it inside ~/Developer/proj, then hand off.`
+
+Exit codes follow each command's own convention: `rw bg handoff` is a synchronous refusal, exit 7 like its other root refusals, and the `prefix e` picker shows the `rw:` line inline. `rw handoff` uses exit 1, "nothing was moved", like its working-agent and busy-pane refusals (exit 7 is its "root invalid or already remote"). Exit 1 also gives the failure dialog (when `rw bg`'s runner hits it after a wait-idle) the refusal line as the cause. The runner's retry loop matches only `is working; nothing was moved`, so this refusal does not loop.
+
+### Detection rule
+`rw_root_offsite_agents <root_local>` (`scripts/roots.sh`) prints `pane_id<TAB>session:window.pane<TAB>kind<TAB>agent_cwd<TAB>pane_current_path`, one line per offending pane. `rw_offsite_agents_refusal` formats the message. Both `libexec/rw-bg` (synchronous front, after the overlap check, before the worker check) and `scripts/rw-handoff.sh` (before the root lock and preflight) call it. The second call matters: `rw bg` waits up to `--wait-idle` for working agents, and an agent can `cd` into the root during that wait.
+- Candidates: local panes (empty `@rw-endpoint`) not under the root by `pane_current_path` (same prefix rule as `rw_root_panes`), with `@agent_kind` set and `@agent_pid` alive (`kill -0`, the rule `rw-picker.sh` uses).
+- `claude`: `libexec/adapters/claude detect --pane <id>` gives the session id and project path; the new read-only subcommand `transcript-path --session-id --project-path` resolves `~/.claude/projects/<slug>/<session>.jsonl` with the adapter's own `claude_slug`, so the encoding is never re-derived. The agent's directory is the last string `.cwd` in the tail of the transcript (last 200 lines of at most the last 16 MiB; `jq -R 'fromjson?'` per line, so a cut or malformed line is skipped, and `"cwd": null` lines such as `api-request` are skipped). The path is resolved with `rw_physical_path` (symlinks) and compared with the root by the same rule as `rw_root_panes`: equal, or below it by a `/` boundary (`proj-sibling` is not inside `proj`).
+- `pi`: investigated and skipped. The session file has one `"cwd"`, in the `type:"session"` header (line 1), written at start; none of the 267 session files under `~/.pi/agent/sessions` has a second distinct cwd, and the `agent-state.ts` extension publishes `@agent_cwd` at `session_start` only ("fixed per process"). pi's tool calls can `cd` inside a command, but nothing records it. The gap is the same as the absolute-path edit below: no trace to read.
+
+### Failure policy
+Fail open. No recorded session, no transcript, an adapter or `jq` error, an empty or unparsable tail: the pane is not offending and nothing is printed. A hand-off is never blocked on an unreadable transcript. Residual risk: an agent whose transcript cannot be read can still be left writing the root here.
+
+### Residual risks (out of scope, recorded)
+- The reverse case: an agent pane inside the root whose transcript cwd is outside it. It moves to the worker (its pane is in the root) and loses access to that directory, which stays on the laptop.
+- Edits by absolute path (an agent whose cwd is elsewhere writing `/Users/.../proj/file`) leave no cwd trace, so no check can see them.
+- Timing: the guard sees the transcript as of the check. An agent that `cd`s into the root after `rw handoff` has passed it, before its pane stops, is a race the all-or-nothing hand-off has for any local writer. `rw bg` re-runs the check inside `rw handoff` after its wait-idle, so an agent that moved in during the wait is caught.
+- Hook gap (finding, not built): `@agent_cwd` is published for claude by the `scripts/agent-state` hook (`SessionStart`, `UserPromptSubmit`, `Stop`, and `new_cwd` on `CwdChanged`, `docs/tmux-agent-sessions.md`) and is a cheaper, fresher signal than the transcript tail. It was not used because the accepted rule names the transcript and says an unreadable transcript is not offending; it could serve as the fallback when the transcript lookup fails.
+
+### Tests
+`tests/test_offsite_agent.sh` (29 checks, no tmux or ssh; the claude adapter is faked for `detect`, `transcript-path` runs the real one): refusal by `rw bg handoff` (exit 7, the exact line) and `rw handoff` (exit 1, nothing synced, no record); passes for an agent cwd outside the root, an agent launched inside the root, a dead `@agent_pid`, a missing transcript, no recorded session, a remote pane, a pi pane, no agent options and an unparsable transcript; trailing null-cwd lines skipped, newest cwd wins, a cwd back outside passes, a cwd equal to the root, a name-prefix sibling, a symlinked cwd, the bounded tail, and several offenders (`and N more`).
