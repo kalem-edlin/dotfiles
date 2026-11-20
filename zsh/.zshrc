@@ -609,6 +609,8 @@ fi
 
 # Persist each tmux pane's last submitted command and current ZLE edit buffer.
 source_if_exists "$HOME/.zsh/tmux-workspace-resurrect.zsh"
+# New tmux clients run behind the drop-to-remote paste shim (rw).
+source_if_exists "$HOME/.zsh/tmux-paste-shim.zsh"
 
 # Focus-mode agent launchers. Keep the Claude function as a stable delegate so
 # launcher changes take effect from the tracked executable after one shell reload,

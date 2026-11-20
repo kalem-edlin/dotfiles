@@ -196,3 +196,10 @@ tmux bind-key '[' if-shell -F '#{@remote-host}' \
 tmux bind-key PPage if-shell -F '#{@remote-host}' \
   "run-shell \"bash '$PLUGIN_DIR/scripts/rw-copy-mode.sh' '#{pane_id}' --page-up || true\"" \
   'copy-mode -u'
+
+# --- Clipboard image paste (prefix C-v) --------------------------------------
+# Saves the laptop pasteboard image as ~/Pictures/rw-clips/<UTC ts>.png,
+# pushes it to the worker when the pane is a remote workspace pane, and types
+# the resulting path into the pane (docs/tasks/drop-to-remote-paste.md, D3).
+# run-shell -b: tmux never waits on osascript or the copy.
+tmux bind-key C-v run-shell -b "bash '$PLUGIN_DIR/scripts/rw-paste-image.sh' '#{pane_id}'"

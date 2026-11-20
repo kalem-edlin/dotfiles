@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# rw-push-file <pane_id> <local path>... -- copy laptop files to the worker
+# behind a remote workspace pane, at the same relative spot (contracts C1,
+# C3 and decision D2 in docs/tasks/drop-to-remote-paste.md).
+#
+# Prints one worker path per line, in input order, and only once EVERY file
+# was copied, so a caller never sees a half-rewritten list.
+#   exit 0  every file copied
+#   exit 2  the pane is not a remote workspace pane (prints nothing)
+#   exit 1  any failure (missing file, unreachable worker, copy error)
+#   exit 64 usage
+#
+# Mapping (D2), laptop paths taken physically (symlinked directories
+# resolved, the form tmux reports):
+#   inside the pane's workspace: remote_path + path relative to focus_path
+#   elsewhere under the laptop $HOME: worker_home + path relative to $HOME
+#   anywhere else: worker_home/rw-drops/<basename>
+#
+# Transport: one ssh (mkdir -p of every parent), then one scp per file, all
+# with the stream ControlPath, ControlMaster=no (never starts a master),
+# BatchMode=yes and ConnectTimeout=5. scp runs in SFTP mode (-s), so the
+# worker path is never parsed by a remote shell. The caller enforces the
+# wall-clock budget (the paste shim's 8 s deadline kills this process
+# group). RW_SSH_BIN and RW_SCP_BIN (default scp) let tests stub transport.
+# bash 3.2 compatible (macOS /bin/bash).
+
+set -uo pipefail
+
+LIBEXEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../scripts/common.sh
+source "$LIBEXEC_DIR/../scripts/common.sh"
+
+[ $# -ge 2 ] || rw_die "usage: rw-push-file <pane_id> <local path>..." 64
+pane="$1"
+shift
+rw_need_jq
+
+endpoint="$(tmux display-message -p -t "$pane" '#{@rw-endpoint}' 2>/dev/null)" || exit 2
+[ -n "$endpoint" ] || exit 2
+record="$(rw_read_endpoint "$endpoint")" || exit 2
+
+worker="" worker_home="" focus_path="" remote_path=""
+{
+  IFS= read -r -d '' worker
+  IFS= read -r -d '' worker_home
+  IFS= read -r -d '' focus_path
+  IFS= read -r -d '' remote_path
+} < <(printf '%s' "$record" | jq -j '(.worker // ""), "\u0000", (.worker_home // ""), "\u0000",
+  (.workspace.focus_path // ""), "\u0000", (.workspace.remote_path // ""), "\u0000"' 2>/dev/null)
+[ -n "$worker" ] || exit 2
+case "$worker_home" in /?*) ;; *) exit 2 ;; esac
+worker_home="${worker_home%/}"
+
+home="$(rw_physical_path "$HOME")"
+focus=""
+if [ -n "$focus_path" ]; then
+  case "$remote_path" in
+    /?*) focus="$(rw_physical_path "$focus_path")" ;;
+  esac
+fi
+[ "$focus" = / ] && focus=""
+remote_path="${remote_path%/}"
+
+# map_path <absolute local file> -- the worker path per D2.
+map_path() {
+  local p="$1" dir base lp
+  dir="${p%/*}"
+  base="${p##*/}"
+  [ -n "$dir" ] || dir=/
+  dir="$(rw_physical_path "$dir")"
+  if [ "$dir" = / ]; then lp="/$base"; else lp="$dir/$base"; fi
+  if [ -n "$focus" ]; then
+    case "$lp" in
+      "$focus"/?*)
+        printf '%s/%s\n' "$remote_path" "${lp#"$focus"/}"
+        return 0
+        ;;
+    esac
+  fi
+  case "$lp" in
+    "$home"/?*)
+      printf '%s/%s\n' "$worker_home" "${lp#"$home"/}"
+      return 0
+      ;;
+  esac
+  printf '%s/rw-drops/%s\n' "$worker_home" "$base"
+}
+
+locals=()
+remotes=()
+for p in "$@"; do
+  case "$p" in
+    /*) ;;
+    *) rw_die "rw-push-file: not an absolute path: $p" 1 ;;
+  esac
+  [ -f "$p" ] || rw_die "rw-push-file: not a regular file: $p" 1
+  r="$(map_path "$p")" || rw_die "rw-push-file: cannot map $p" 1
+  for seen in ${remotes[@]+"${remotes[@]}"}; do
+    [ "$seen" != "$r" ] || rw_die "rw-push-file: two files map to the same worker path $r" 1
+  done
+  locals+=("$p")
+  remotes+=("$r")
+done
+
+rw_ssh_stream_opts
+opts=(${RW_SSH_STREAM_OPTS[@]+"${RW_SSH_STREAM_OPTS[@]}"} -o ControlMaster=no -o BatchMode=yes -o ConnectTimeout=5)
+
+# One ssh: create every parent directory.
+mkdir_cmd="mkdir -p --"
+parents=""
+for r in "${remotes[@]}"; do
+  d="${r%/*}"
+  [ -n "$d" ] || continue
+  case "$parents" in *"
+$d
+"*) continue ;; esac
+  parents="$parents
+$d
+"
+  mkdir_cmd="$mkdir_cmd $(rw_shquote "$d")"
+done
+if [ "$mkdir_cmd" != "mkdir -p --" ]; then
+  "$(rw_ssh_bin)" "${opts[@]}" "$worker" "$mkdir_cmd" </dev/null >/dev/null ||
+    rw_die "rw-push-file: could not create the parent directories on $worker" 1
+fi
+
+# One scp per file.
+i=0
+while [ "$i" -lt "${#locals[@]}" ]; do
+  "${RW_SCP_BIN:-scp}" "${opts[@]}" -s -q -- "${locals[$i]}" "$worker:${remotes[$i]}" </dev/null >/dev/null ||
+    rw_die "rw-push-file: copying ${locals[$i]} to $worker failed" 1
+  i=$((i + 1))
+done
+
+printf '%s\n' "${remotes[@]}"
