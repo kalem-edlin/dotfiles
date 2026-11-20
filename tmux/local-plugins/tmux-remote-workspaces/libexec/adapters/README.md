@@ -17,11 +17,14 @@ contract. `export --pane <pane|endpoint-session> [--worker <alias>] --out
 <dir>` captures how to reopen the editor in a pane's foreground (exit 1
 when there is none): the Neovim session registered by
 `nvim/lua/tmux_workspace_resurrect.lua`, refreshed over its RPC socket and
-stripped of the lines that embed buffer contents, or else the editor's
-argv. `install --snapshot <dir> --from-root <p> --to-root <p> --dest-dir
-<p> --dest-file <p> [--worker <alias>]` rewrites the root's paths, writes
-the session file (0600) and prints the command to type into the
-destination pane. `rw-handoff.sh` and `rw-handback.sh` call it best effort.
+including the two lines that embed every buffer's contents (so unsaved text
+travels), or else the editor's argv. `install --snapshot <dir> --from-root
+<p> --to-root <p> --dest-dir <p> --dest-file <p> [--worker <alias>]`
+rewrites the root's paths (inside the embedded snapshot too: its buffer
+names, never the text), writes the session file (0600) and prints the
+command to type into the destination pane. `rw-handoff.sh`,
+`rw-handback.sh` and `rw-switch.sh` call it best effort. Text typed in the
+source editor after `export` is not carried.
 
 Both adapters implement the full five-subcommand contract. (A Codex
 adapter existed until 2026-11-18, when Codex was removed from these

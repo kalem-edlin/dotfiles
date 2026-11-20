@@ -24,7 +24,7 @@
 #     Refused while it is working, and when its directory does not exist on
 #     the destination (Claude finds its transcript by path);
 #   - an editor (nvim, vim, vi): reopened on the destination through the
-#     editor adapter, best effort (unsaved buffers never travel);
+#     editor adapter, best effort (unsaved buffers travel in its session);
 #   - anything else: refused (quit it first).
 #
 # Run inside the pane itself (TMUX_PANE equals --pane, as rw-split.sh and

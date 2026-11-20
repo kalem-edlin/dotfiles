@@ -634,8 +634,8 @@ for i in "${!pane_lines[@]}"; do
     continue
   fi
   # Local agents are already stopped, so the pane runs its shell (or an
-  # editor, already reopened on the remote from its saved files; unsaved
-  # buffers stay behind, as the picker warned).
+  # editor, already reopened on the remote with its unsaved buffers; text
+  # typed since the editor's export is lost).
   printf -v loop_cmd '%q %q --fresh' "$SCRIPT_DIR/attach-loop.sh" "$endpoint_id"
   if tmux respawn-pane -k -t "$pid" -c "$pcwd" "$loop_cmd" 2>/dev/null; then
     moved=$((moved + 1))

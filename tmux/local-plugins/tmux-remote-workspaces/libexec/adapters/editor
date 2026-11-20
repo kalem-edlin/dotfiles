@@ -11,8 +11,12 @@
 #     fresh `mksession` is requested over its RPC socket, and that session
 #     file (open buffers, windows, tabs, cursor) is carried with the root's
 #     paths rewritten, then reopened with `nvim -S <file>`. The two lines
-#     tmux-workspace-resurrect adds to embed buffer CONTENTS are dropped:
-#     unsaved text never travels (the picker warns about it before handoff).
+#     tmux-workspace-resurrect adds to embed every buffer's CONTENTS (unsaved
+#     text, modified flag, cursors) travel too: the root's paths are
+#     rewritten INSIDE the encoded snapshot (buffer names, never the text),
+#     and the destination restores the unsaved text over the synced file.
+#     Text typed in the source editor after `export` ran is not in the
+#     snapshot and is lost.
 #   - otherwise (vim, vi, nvim without the registration): the editor's own
 #     argv (`ps`), with paths inside the root rewritten. A `-S <session>`
 #     pair names a file on the other machine and is dropped.
@@ -112,7 +116,7 @@ printf 'editor\t%s\t%s\t%s\n' "$name" "$([ -n "$sess" ] && echo 1 || echo 0)" "$
 printf '%s\n' "$argline"
 echo ---
 if [ -n "$sess" ]; then
-  grep -Ev "^lua require\('tmux_workspace_resurrect'\)\.(prepare_restore|restore_snapshot)\(" "$sess"
+  cat "$sess"
 fi
 exit 0
 EOS
@@ -154,23 +158,87 @@ cmd_export() {
     >"$out/manifest.json"
 }
 
-# ed_rewrite <from> <to> -- a session file on stdin to stdout with every
-# literal <from> replaced by <to>, both in the backslash-escaped spelling
-# :mksession writes (a space in a path is "\ "). ENVIRON, not -v: -v would
-# interpret backslashes.
+# tmux_workspace_resurrect.lua adds two lines to the session file:
+#   lua require('tmux_workspace_resurrect').prepare_restore(vim.json.decode(<L>))
+#   lua require('tmux_workspace_resurrect').restore_snapshot(vim.json.decode(<L>))
+# where <L> is vim.inspect(<json>): a Lua string literal, quoted with ' or ",
+# whose decoded text is the JSON snapshot {version, buffers: [{name, lines,
+# modified, views, ...}]}. The buffer names in it are absolute paths and must
+# point into the destination root, or the buffers restore under the old one.
+ED_SNAP_PREFIX="lua require('tmux_workspace_resurrect')."
+
+# ED_SNAP_JQ: one snapshot line per input line (jq -R) -> the same line with
+# every path equal to or under $from rewritten to $to inside the JSON (all
+# strings but the buffer text under "lines"), re-emitted with the JSON in a
+# Lua long-bracket string, which needs no escaping. A line this cannot decode
+# becomes __DROP__ and the caller leaves it out: a snapshot is never shipped
+# with the old root's paths in it.
+ED_SNAP_JQ=""
+IFS= read -r -d '' ED_SNAP_JQ <<'EOS'
+def after_ok: . == "" or test("^[/\\s\"'|,;)]");
+def swap($from; $to):
+  if $from == "" then . else
+    split($from) as $p
+    | reduce range(1; $p | length) as $i ($p[0];
+        . + (if ($p[$i] | .[0:1] | after_ok) then $to else $from end) + $p[$i])
+  end;
+def rwv($f; $t):
+  if type == "object" then with_entries(if .key == "lines" then . else .value |= rwv($f; $t) end)
+  elif type == "array" then map(rwv($f; $t))
+  elif type == "string" then swap($f; $t)
+  else . end;
+def lua_unescape:
+  gsub("\\\\(?<d>[0-9]{1,3}|.)";
+    .d as $d
+    | if ($d | test("^[0-9]+$")) then
+        ($d | tonumber) as $n | if $n > 127 then error("byte escape") else [$n] | implode end
+      else ({"n": "\n", "t": "\t", "r": "\r", "a": "\u0007", "b": "\b", "f": "\f", "v": "\u000b"}[$d] // $d) end);
+try (
+  capture("^lua require\\('tmux_workspace_resurrect'\\)\\.(?<fn>prepare_restore|restore_snapshot)\\(vim\\.json\\.decode\\((?<q>[\"'])(?<body>.*)\\k<q>\\)\\)$")
+  | (.body | lua_unescape | fromjson | rwv($from; $to) | tojson) as $j
+  | ([range(2; 50) as $n | select(($j | contains("]" + ("=" * $n) + "]")) | not) | $n][0]) as $k
+  | "lua require('tmux_workspace_resurrect')." + .fn + "(vim.json.decode([" + ("=" * $k) + "[" + $j + "]" + ("=" * $k) + "]))"
+) catch "__DROP__"
+EOS
+
+# ed_rewrite <from> <to> <session file> -- the session file on stdout with
+# every <from> path replaced by <to>. Ordinary lines: literal replacement in
+# the backslash-escaped spelling :mksession writes (a space in a path is
+# "\ "), and only where the path ends (end of line, "/", a space or a
+# quote), so /h/proj2 is not mistaken for /h/proj. Snapshot lines go through
+# ED_SNAP_JQ; their number and order are kept, and one that cannot be
+# decoded is dropped with a warning. ENVIRON, not -v: -v would interpret
+# backslashes.
 ed_rewrite() {
-  ED_FROM="$1" ED_TO="$2" awk '
-    function swap(s, a, b,   out, i) {
+  local from="$1" to="$2" file="$3" tmp rep in
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/rw-editor.XXXXXX")" || return 1
+  rep="$tmp/rep" in="$tmp/in"
+  awk -v p="$ED_SNAP_PREFIX" 'index($0, p) == 1' "$file" >"$in"
+  : >"$rep"
+  jq -R -r --arg from "$from" --arg to "$to" "$ED_SNAP_JQ" <"$in" >"$rep" 2>/dev/null
+  if grep -qx __DROP__ "$rep" || [ "$(grep -c '' "$in")" -ne "$(grep -c '' "$rep")" ]; then
+    ca_warn "the unsaved-buffer snapshot of the editor could not be rewritten for the destination and was left out; its unsaved text does not travel."
+  fi
+  ED_FROM="$from" ED_TO="$to" ED_REP="$rep" ED_PREFIX="$ED_SNAP_PREFIX" awk '
+    function swap(s, a, b,   out, i, c) {
       if (a == "") return s
       out = ""
-      while ((i = index(s, a)) > 0) { out = out substr(s, 1, i - 1) b; s = substr(s, i + length(a)) }
+      while ((i = index(s, a)) > 0) {
+        c = substr(s, i + length(a), 1)
+        if (c == "" || index("/ \t\"\047", c) > 0) out = out substr(s, 1, i - 1) b
+        else out = out substr(s, 1, i - 1) a
+        s = substr(s, i + length(a))
+      }
       return out s
     }
     BEGIN {
-      from = ENVIRON["ED_FROM"]; to = ENVIRON["ED_TO"]
+      from = ENVIRON["ED_FROM"]; to = ENVIRON["ED_TO"]; prefix = ENVIRON["ED_PREFIX"]
       efrom = from; gsub(/ /, "\\ ", efrom); eto = to; gsub(/ /, "\\ ", eto)
+      while ((getline line < ENVIRON["ED_REP"]) > 0) rep[++n] = line
     }
-    { print swap($0, efrom, eto) }'
+    index($0, prefix) == 1 { k++; if (k <= n && rep[k] != "__DROP__") print rep[k]; next }
+    { print swap($0, efrom, eto) }' "$file"
+  rm -rf "$tmp"
 }
 
 cmd_install() {
@@ -203,10 +271,10 @@ cmd_install() {
     local write
     write="umask 077 && mkdir -p $(printf '%q' "$ddir") && find $(printf '%q' "$ddir") -name '*.vim' -mtime +7 -delete 2>/dev/null; cat >$(printf '%q' "$dest_file")"
     if [ -n "$worker" ]; then
-      ed_rewrite "$from" "$to" <"$snap/$sess" | ca_ssh_run "$worker" "$write" ||
+      ed_rewrite "$from" "$to" "$snap/$sess" | ca_ssh_run "$worker" "$write" ||
         ca_die "install: could not write the editor session on '$worker'." 1
     else
-      ed_rewrite "$from" "$to" <"$snap/$sess" | bash -c "$write" ||
+      ed_rewrite "$from" "$to" "$snap/$sess" | bash -c "$write" ||
         ca_die "install: could not write the editor session to $dest_file." 1
     fi
     printf 'cd %q && nvim -S %q\n' "$dest_dir" "$dest_file"

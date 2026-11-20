@@ -135,7 +135,7 @@ rw_path_under_root() {
 }
 
 # rw_is_idle_command <pane_current_command> -- a shell or an editor: safe to
-# replace (editors only lose unsaved buffers, which the picker warns about).
+# replace (an editor's unsaved buffers travel through the editor adapter).
 rw_is_idle_command() {
   case "$1" in
     zsh | bash | sh | fish | dash | ksh | -zsh | -bash | nvim | vim | vi) return 0 ;;
