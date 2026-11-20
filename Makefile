@@ -426,11 +426,9 @@ lucide-font:
 	@chmod +x setup/lucide-font.sh
 	@./setup/lucide-font.sh
 
-# REA checkout (~/Developer/rea: submodules, npm ci, build) plus the pinned
-# JDK 21 and Ghidra it drives (~/Developer/tools). Rerun to update: fetches,
-# never resets the checkout. Needs node (fnm) and a GitHub-registered SSH key.
+# Pinned JDK 21 and Ghidra (~/Developer/tools). No REA checkout is cloned.
 rea:
-	@echo "Installing REA, JDK and Ghidra..."
+	@echo "Installing JDK and Ghidra..."
 	@chmod +x setup/rea.sh
 	@./setup/rea.sh
 
@@ -488,6 +486,6 @@ help:
 	@echo "  obsidian     Configure Obsidian Headless (ob)"
 	@echo "  lucide-font  Install the pinned Lucide icon font into ~/Library/Fonts"
 	@echo "  misc         Xcode tools, npm config, GitHub CLI auth check"
-	@echo "  rea          REA checkout + npm ci, pinned JDK 21 and Ghidra under ~/Developer/tools"
+	@echo "  rea          Pinned JDK 21 and Ghidra under ~/Developer/tools"
 	@echo "  reload       Reload all configs (aerospace, sketchybar, bat, tmux)"
 	@echo "  help         Show this help message"

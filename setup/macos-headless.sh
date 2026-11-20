@@ -71,9 +71,8 @@ sudo pmset -a sleep 0 autorestart 1 womp 1
 # binary), then language/tool steps, then install-headless (stow + TPM
 # plugins), then misc-headless (SSH key + launchd save timer) LAST — the
 # launchd timer setup asserts that tmux-resurrect's save.sh already exists,
-# which only install-headless creates. rea comes after them: it needs node
-# and the worker's GitHub-registered SSH key, and a missing key should not
-# block the rest of the worker. headless-doctor is the final gate: this
+# which only install-headless creates. rea comes after them so a failed JDK or
+# Ghidra download does not block the rest of the worker. headless-doctor is the final gate: this
 # script only reaches the success banner if it exits 0.
 run_make_target brew-headless
 run_make_target python

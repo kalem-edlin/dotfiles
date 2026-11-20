@@ -1,31 +1,23 @@
 #!/usr/bin/env bash
 #
-# setup/rea.sh - REA checkout plus the JDK and Ghidra it drives, for focus
-# machines and headless workers alike (`make rea`; wired into `make setup`
-# and both headless lanes).
+# setup/rea.sh - the pinned tools under ~/Developer/tools that the REA and
+# idol-app workflows drive, for focus machines and headless workers alike
+# (`make rea`; wired into `make setup` and both headless lanes). No git
+# checkout of REA is made.
 #
-#   ~/Developer/rea                          git@github.com:morluto/rea.git
-#                                            with submodules, npm ci, build
 #   ~/Developer/tools/jdk-<JDK_RELEASE>      Temurin JDK 21, pinned sha256
 #   ~/Developer/tools/ghidra_<VER>_PUBLIC    Ghidra release zip, pinned sha256
+#   ~/Developer/tools/ipatool/ipatool        ipatool <IPATOOL_VERSION>, pinned sha256,
+#                                            symlinked from the versioned binary
 #
-# Deliberately NOT run: REA's install.sh (global npm install), its global
-# agent skills, and .mcp.json rendering. Consumers spawn REA from the
-# checkout (`node dist/main.js` with cwd ~/Developer/rea) and take JAVA_HOME
-# and GHIDRA_INSTALL_DIR from zsh/.zshenv.
+# Take JAVA_HOME and GHIDRA_INSTALL_DIR from zsh/.zshenv. ipatool needs a
+# one-time `ipatool auth login` per machine (Apple ID, 2FA, keychain); this
+# script never handles credentials.
 #
-# Rerun is the update contract, and every step is idempotent:
-#   - An existing checkout is only fetched and has its submodules initialized
-#     and synced to the recorded commits. Its branch, HEAD and working tree
-#     are never reset, merged or rebased: on a focus machine it is a live
-#     checkout. Pull it yourself to move it forward.
-#   - `npm ci` runs only when node_modules is missing or package-lock.json is
-#     newer than npm's install record (node_modules/.package-lock.json), under
-#     the Node version in REA's .nvmrc (fnm, installed by setup/node.sh).
-#     `npm run build` (tsc into dist/, gitignored) runs after any npm ci, or
-#     when dist/main.js is missing.
-#   - The JDK and Ghidra directories are left alone once they exist; a new
-#     pin installs side by side under a new directory name.
+# Rerun is the update contract, and every step is idempotent: the JDK and
+# Ghidra directories are left alone once they exist; a new pin installs side
+# by side under a new directory name. ipatool's versioned binary is likewise
+# kept once present, and the `ipatool` symlink is repointed at it.
 #
 # Ghidra's public zip ships the decompiler native only for linux_x86_64 and
 # Windows. On macOS (both arches) and Linux aarch64 this script builds it
@@ -38,7 +30,7 @@
 # only after the checksum and layout checks pass, so an interrupted run
 # never leaves a half-installed tool under its final name.
 #
-# REA_DIR and REA_TOOLS_DIR override the two roots (tests only).
+# REA_TOOLS_DIR overrides the tools root (tests only).
 
 set -euo pipefail
 
@@ -46,8 +38,6 @@ DOTFILES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=setup/lib.sh
 . "$DOTFILES_DIR/setup/lib.sh"
 
-REA_REPO_URL="git@github.com:morluto/rea.git"
-REA_DIR="${REA_DIR:-$HOME/Developer/rea}"
 TOOLS_DIR="${REA_TOOLS_DIR:-$HOME/Developer/tools}"
 
 # Eclipse Temurin, github.com/adoptium/temurin21-binaries release
@@ -67,6 +57,16 @@ JDK_SHA256_LINUX_X64=ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcf
 GHIDRA_VERSION=12.1.4
 GHIDRA_BUILD_DATE=20260921
 GHIDRA_SHA256=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db
+
+# github.com/majd/ipatool release v$IPATOOL_VERSION, one tar.gz per platform
+# (each holds bin/ipatool-$IPATOOL_VERSION-<os>-<arch>). sha256 from the
+# release's GitHub asset digests, cross-checked against the downloaded
+# archives and the macOS arm64 binary already in use (2026-11-20).
+IPATOOL_VERSION=2.7.0
+IPATOOL_SHA256_MAC_ARM64=5ae100d4520cf4b3f4374239e5925a9ad9a8dc02abc16bae27479e7ae99aca33
+IPATOOL_SHA256_MAC_X64=05f48994d8b3cfefe7ea1172a0ac0b28715888e9df0af38cf3e490d2ed592263
+IPATOOL_SHA256_LINUX_X64=68372de9743d468296f2dba5b413a3e7df56ad0c85b8d0f4f0f6c9b8b53a54e8
+IPATOOL_SHA256_LINUX_ARM64=133c3fb754bafcd61698ba6047b48096c7033345529f57d7a83d281f8a403c23
 
 OS_NAME="$(uname -s)"
 MACHINE="$(uname -m)"
@@ -112,97 +112,6 @@ fetch_verified() {
         echo "  expected $expected" >&2
         echo "  actual   $actual" >&2
         exit 1
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# REA checkout
-# ---------------------------------------------------------------------------
-
-# BatchMode: fail fast with a clear error instead of hanging on a host-key or
-# passphrase prompt when setup runs over a noninteractive ssh session.
-rea_git() {
-    GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes}" git "$@"
-}
-
-rea_git_failed() {
-    echo "Error: $1 failed for $REA_REPO_URL." >&2
-    echo "  This machine's SSH key must be registered with GitHub and github.com" >&2
-    echo "  must be in ~/.ssh/known_hosts. Check with: ssh -T git@github.com" >&2
-    exit 1
-}
-
-sync_rea_checkout() {
-    local origin
-
-    mkdir -p "$(dirname "$REA_DIR")"
-
-    if [[ ! -e "$REA_DIR" ]]; then
-        echo "Cloning REA into $REA_DIR..."
-        rea_git clone --recurse-submodules "$REA_REPO_URL" "$REA_DIR" ||
-            rea_git_failed "git clone"
-        return
-    fi
-
-    if ! git -C "$REA_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
-        [[ "$(git -C "$REA_DIR" rev-parse --show-toplevel)" != "$(cd "$REA_DIR" && pwd -P)" ]]; then
-        echo "Error: $REA_DIR exists but is not a git checkout; move it aside and rerun." >&2
-        exit 1
-    fi
-
-    origin="$(git -C "$REA_DIR" remote get-url origin 2>/dev/null || true)"
-    case "$origin" in
-        *morluto/rea | *morluto/rea.git) ;;
-        *)
-            echo "Error: $REA_DIR has origin '${origin:-<none>}', expected $REA_REPO_URL." >&2
-            exit 1
-            ;;
-    esac
-
-    # Fetch only: the branch and working tree belong to whoever uses this
-    # checkout, so nothing here merges, resets or switches branches.
-    echo "Fetching REA in $REA_DIR (branch and working tree left as they are)..."
-    rea_git -C "$REA_DIR" fetch origin || rea_git_failed "git fetch"
-    rea_git -C "$REA_DIR" submodule update --init --recursive ||
-        rea_git_failed "git submodule update"
-}
-
-# npm writes node_modules/.package-lock.json on every install; it is a better
-# freshness stamp than the node_modules directory's own mtime.
-rea_needs_npm_ci() {
-    local stamp="$REA_DIR/node_modules/.package-lock.json"
-    [[ -d "$REA_DIR/node_modules" ]] || return 0
-    [[ -f "$stamp" ]] || stamp="$REA_DIR/node_modules"
-    [[ "$REA_DIR/package-lock.json" -nt "$stamp" ]]
-}
-
-sync_rea_node_modules() {
-    local ran_ci=0
-
-    cd "$REA_DIR"
-    if rea_needs_npm_ci || [[ ! -f dist/main.js ]]; then
-        if ! activate_fnm; then
-            echo "Error: fnm not found; run make node first." >&2
-            exit 1
-        fi
-        # Reads REA's .nvmrc; installs that Node under fnm if it is missing.
-        fnm use --install-if-missing --silent-if-unchanged
-        echo "Using Node $(node --version) for REA (.nvmrc: $(cat .nvmrc 2>/dev/null || echo none))"
-    fi
-
-    if rea_needs_npm_ci; then
-        echo "Installing REA dependencies (npm ci)..."
-        npm ci
-        ran_ci=1
-    else
-        echo "✓ REA node_modules up to date with package-lock.json"
-    fi
-
-    if [[ "$ran_ci" -eq 1 || ! -f dist/main.js ]]; then
-        echo "Building REA (npm run build -> dist/)..."
-        npm run build
-    else
-        echo "✓ REA dist/main.js present"
     fi
 }
 
@@ -358,9 +267,64 @@ install_ghidra() {
     echo "✓ Ghidra $GHIDRA_VERSION installed: $dir"
 }
 
-sync_rea_checkout
-sync_rea_node_modules
+# ---------------------------------------------------------------------------
+# ipatool
+# ---------------------------------------------------------------------------
+
+install_ipatool() {
+    local dir="$TOOLS_DIR/ipatool"
+    local os arch sha256 asset url name extracted link_temp version_out
+
+    case "$OS_NAME:$MACHINE" in
+        Darwin:arm64) os=macos arch=arm64 sha256="$IPATOOL_SHA256_MAC_ARM64" ;;
+        Darwin:x86_64) os=macos arch=amd64 sha256="$IPATOOL_SHA256_MAC_X64" ;;
+        Linux:aarch64 | Linux:arm64) os=linux arch=arm64 sha256="$IPATOOL_SHA256_LINUX_ARM64" ;;
+        Linux:x86_64 | Linux:amd64) os=linux arch=amd64 sha256="$IPATOOL_SHA256_LINUX_X64" ;;
+        *)
+            echo "Error: no pinned ipatool archive for $OS_NAME $MACHINE." >&2
+            exit 1
+            ;;
+    esac
+
+    name="ipatool-$IPATOOL_VERSION-$os-$arch"
+    asset="$name.tar.gz"
+    url="https://github.com/majd/ipatool/releases/download/v$IPATOOL_VERSION/$asset"
+
+    if [[ -x "$dir/$name" ]]; then
+        echo "✓ ipatool $IPATOOL_VERSION already installed: $dir/$name"
+    else
+        echo "Installing ipatool $IPATOOL_VERSION ($os $arch)..."
+        new_download_temp
+        fetch_verified "$url" "$sha256" "$DOWNLOAD_TEMP/$asset"
+        mkdir "$DOWNLOAD_TEMP/x"
+        tar -xzf "$DOWNLOAD_TEMP/$asset" -C "$DOWNLOAD_TEMP/x"
+        extracted="$DOWNLOAD_TEMP/x/bin/$name"
+        if [[ ! -f "$extracted" ]]; then
+            echo "Error: the ipatool archive did not contain bin/$name." >&2
+            exit 1
+        fi
+        chmod 755 "$extracted"
+        version_out="$("$extracted" --version 2>/dev/null || true)"
+        if [[ "$version_out" != *"$IPATOOL_VERSION"* ]]; then
+            echo "Error: the extracted ipatool does not report version $IPATOOL_VERSION." >&2
+            exit 1
+        fi
+        mkdir -p "$dir"
+        mv -f "$extracted" "$dir/$name"
+        cleanup_download
+        echo "✓ ipatool $IPATOOL_VERSION installed: $dir/$name"
+    fi
+
+    # Repoint the stable name atomically; the versioned binary stays in place.
+    mkdir -p "$TOOLS_DIR"
+    link_temp="$dir/.ipatool-link.$$"
+    ln -s "$name" "$link_temp"
+    mv -f "$link_temp" "$dir/ipatool"
+    echo "✓ ipatool: $dir/ipatool -> $name"
+}
+
 install_jdk
 install_ghidra
+install_ipatool
 
-echo "✓ REA, JDK $JDK_RELEASE and Ghidra $GHIDRA_VERSION ready"
+echo "✓ JDK $JDK_RELEASE, Ghidra $GHIDRA_VERSION and ipatool $IPATOOL_VERSION ready"

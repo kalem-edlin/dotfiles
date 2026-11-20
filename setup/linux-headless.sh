@@ -706,7 +706,7 @@ verify_commands() {
 # has a working, activated fnm) -> python.sh / neovim.sh / obsidian.sh
 # (obsidian.sh activates its own fnm too, so it works standalone) -> go.sh ->
 # dotfiles via lib.sh (stow, TPM, rw, ssh dirs) -> systemd save timer + fatal
-# linger verification -> boot restore service -> rea.sh (REA, JDK, Ghidra) -> internal
+# linger verification -> boot restore service -> rea.sh (JDK, Ghidra) -> internal
 # verify_commands -> success banner (only reachable if everything above
 # succeeded).
 
@@ -756,8 +756,7 @@ install_tmux_resurrect_save_timer
 # next boot; linger, which it also needs, was verified just above.
 install_tmux_resurrect_restore_agent
 
-# REA checkout plus JDK and Ghidra. Needs node (activated above) and the
-# worker's GitHub-registered SSH key; last, so a missing key leaves the rest
+# JDK and Ghidra (no REA checkout). Last, so a failure here leaves the rest
 # of the worker in place.
 "$DOTFILES_DIR/setup/rea.sh"
 

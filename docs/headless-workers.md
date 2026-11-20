@@ -72,14 +72,8 @@ this contract — not just that the installer exited zero.
   this repository's own `tmux-workspace-resurrect` and
   `tmux-remote-workspaces` plugin files exposed through the tmux dotfiles
   link.
-- **REA and its tools** (`make rea`, `setup/rea.sh`; the last install step
-  of both headless lanes and of `make setup`):
-  - `~/Developer/rea`: a clone of `git@github.com:morluto/rea.git` with its
-    submodules, `node_modules` from `npm ci` under the Node in REA's
-    `.nvmrc` (fnm), and `dist/` from `npm run build`. Consumers spawn
-    `node dist/main.js` from the checkout. REA's `install.sh`, its global
-    skills and `.mcp.json` rendering are deliberately not run. The clone is
-    over SSH, so the worker's key must already be registered with GitHub.
+- **JDK, Ghidra and ipatool** (`make rea`, `setup/rea.sh`; the last install
+  step of both headless lanes and of `make setup`). No REA checkout is cloned:
   - `~/Developer/tools/jdk-21.0.12.1+1`: Eclipse Temurin JDK 21, and
     `~/Developer/tools/ghidra_12.1.4_PUBLIC`: Ghidra 12.1.4. Both are
     pinned sha256 archives from the vendors' GitHub releases (JDK per OS and
@@ -87,6 +81,13 @@ this contract — not just that the installer exited zero.
     Ghidra's zip ships the decompiler native only for Linux x86_64, so on
     macOS and Linux aarch64 the script builds it from the zip's own sources
     (`make` plus a C++ compiler: Xcode CLT, or the Linux build toolchain).
+  - `~/Developer/tools/ipatool/ipatool`: ipatool 2.7.0 (`majd/ipatool`),
+    a symlink to the pinned, sha256-verified versioned binary beside it.
+    Apple ID sign-in is a one-time manual step, `ipatool auth login`, and
+    the credentials live in the login keychain. On a headless Mac the
+    keychain must be unlocked for that user, so sign in on the worker itself
+    (or over a session that unlocks it) before relying on it. The doctor
+    reports sign-in state as info and does not fail on it.
   - `zsh/.zshenv` exports `JAVA_HOME` (the JDK's `Contents/Home` on macOS,
     its root on Linux), puts its `bin` first on `PATH`, and exports
     `GHIDRA_INSTALL_DIR`, each only when the directory exists, so
@@ -264,12 +265,8 @@ piece:
 
 - Homebrew or distro packages, Node globals (such as `pi`), `claude`,
   dotfile links and timers: brought to what the repo declares.
-- `~/Developer/rea`: `git fetch` and `git submodule update --init
-  --recursive` only. The branch, HEAD and working tree are never reset,
-  merged or rebased; pull it yourself to move REA forward. `npm ci` runs
-  only when `package-lock.json` is newer than `node_modules`, and
-  `npm run build` after any `npm ci` or when `dist/main.js` is missing.
-- JDK and Ghidra: skipped while the pinned directory exists. A new pin in
+- JDK, Ghidra and ipatool: skipped while the pinned directory exists; the
+  `ipatool` symlink is repointed at the pinned binary each run. A new pin in
   `setup/rea.sh` installs side by side under its own directory name; update
   the matching names in `zsh/.zshenv` in the same commit (the doctor's
   `env:jdk-ghidra` check fails until they agree), and remove the old

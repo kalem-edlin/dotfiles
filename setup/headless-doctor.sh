@@ -870,7 +870,7 @@ else
 fi
 
 # ===========================================================================
-# 8. REA and its tools (setup/rea.sh), and worker power policy (macOS)
+# 8. JDK, Ghidra, ipatool and worker power policy (macOS)
 # ===========================================================================
 
 if [ "$QUIET" -eq 0 ]; then
@@ -878,56 +878,11 @@ if [ "$QUIET" -eq 0 ]; then
 fi
 
 REA_SETUP="$DOTFILES_DIR/setup/rea.sh"
-REA_CHECKOUT="$TARGET_HOME/Developer/rea"
 REA_TOOLS_DIR="$TARGET_HOME/Developer/tools"
 REA_REMEDIATION="run make rea"
 # Read the pins from the installer itself so this check never drifts from it.
 JDK_RELEASE="$(sed -n 's/^JDK_RELEASE=//p' "$REA_SETUP" 2>/dev/null)"
 GHIDRA_VERSION="$(sed -n 's/^GHIDRA_VERSION=//p' "$REA_SETUP" 2>/dev/null)"
-
-if has_cmd git && git -C "$REA_CHECKOUT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  rea_origin="$(git -C "$REA_CHECKOUT" remote get-url origin 2>/dev/null)"
-  case "$rea_origin" in
-    *morluto/rea | *morluto/rea.git)
-      rea_uninit="$(git -C "$REA_CHECKOUT" submodule status --recursive 2>/dev/null | grep -c '^-')"
-      rea_head="$(git -C "$REA_CHECKOUT" rev-parse --short HEAD 2>/dev/null)"
-      rea_branch="$(git -C "$REA_CHECKOUT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-      if [ "$rea_uninit" -eq 0 ]; then
-        c_pass "rea:checkout" "$REA_CHECKOUT at $rea_branch $rea_head, submodules initialized"
-      else
-        c_fail "rea:checkout" "$REA_CHECKOUT has $rea_uninit uninitialized submodule(s)" "$REA_REMEDIATION"
-      fi
-      ;;
-    *)
-      c_fail "rea:checkout" "$REA_CHECKOUT origin is '${rea_origin:-<none>}', expected morluto/rea" "point origin at git@github.com:morluto/rea.git, or move the directory aside and $REA_REMEDIATION"
-      ;;
-  esac
-else
-  c_fail "rea:checkout" "$REA_CHECKOUT is not a git checkout" "$REA_REMEDIATION (needs this machine's SSH key registered with GitHub)"
-fi
-
-# npm records every install in node_modules/.package-lock.json; a lockfile
-# newer than that record means `npm ci` is pending (setup/rea.sh uses the
-# same rule).
-if [ -d "$REA_CHECKOUT/node_modules" ]; then
-  rea_stamp="$REA_CHECKOUT/node_modules/.package-lock.json"
-  [ -f "$rea_stamp" ] || rea_stamp="$REA_CHECKOUT/node_modules"
-  if [ "$REA_CHECKOUT/package-lock.json" -nt "$rea_stamp" ]; then
-    c_fail "rea:node-modules" "$REA_CHECKOUT/package-lock.json is newer than node_modules (npm ci pending)" "$REA_REMEDIATION"
-  else
-    c_pass "rea:node-modules" "$REA_CHECKOUT/node_modules matches package-lock.json"
-  fi
-else
-  c_fail "rea:node-modules" "$REA_CHECKOUT/node_modules does not exist" "$REA_REMEDIATION"
-fi
-
-# Consumers spawn `node dist/main.js` from the checkout; dist/ is gitignored
-# and produced by `npm run build`.
-if [ -f "$REA_CHECKOUT/dist/main.js" ]; then
-  c_pass "rea:build" "$REA_CHECKOUT/dist/main.js present"
-else
-  c_fail "rea:build" "$REA_CHECKOUT/dist/main.js does not exist" "$REA_REMEDIATION"
-fi
 
 REA_JDK_HOME=""
 if [ -z "$JDK_RELEASE" ]; then
@@ -973,6 +928,30 @@ else
   else
     c_pass "tool:ghidra" "$REA_GHIDRA_DIR ($GHIDRA_VERSION, $ghidra_os_dir decompiler)"
   fi
+fi
+
+# ipatool (setup/rea.sh): the stable symlink must run and report the pinned
+# version. Apple ID login is a one-time manual step, so it is reported as info
+# and never fails the gate.
+IPATOOL_VERSION="$(sed -n 's/^IPATOOL_VERSION=//p' "$REA_SETUP" 2>/dev/null)"
+REA_IPATOOL="$REA_TOOLS_DIR/ipatool/ipatool"
+if [ -z "$IPATOOL_VERSION" ]; then
+  c_fail "tool:ipatool" "could not read IPATOOL_VERSION from $REA_SETUP" "restore setup/rea.sh from the repository"
+elif [ -x "$REA_IPATOOL" ]; then
+  ipatool_version="$("$REA_IPATOOL" --version 2>/dev/null | sed -n 's/^ipatool version //p')"
+  if [ "$ipatool_version" = "$IPATOOL_VERSION" ]; then
+    c_pass "tool:ipatool" "$REA_IPATOOL reports $ipatool_version"
+    ipatool_auth="$("$REA_IPATOOL" auth info --format json 2>/dev/null | grep -c '"success"[[:space:]]*:[[:space:]]*true' || true)"
+    if [ "${ipatool_auth:-0}" -gt 0 ]; then
+      c_info "tool:ipatool:auth" "Apple ID signed in"
+    else
+      c_info "tool:ipatool:auth" "not signed in; one-time manual step: $REA_IPATOOL auth login"
+    fi
+  else
+    c_fail "tool:ipatool" "$REA_IPATOOL reports '${ipatool_version:-unreadable}', expected $IPATOOL_VERSION" "$REA_REMEDIATION"
+  fi
+else
+  c_fail "tool:ipatool" "$REA_IPATOOL does not exist or is not executable" "$REA_REMEDIATION"
 fi
 
 # zsh/.zshenv exports both for every shell, including the noninteractive
