@@ -1,6 +1,6 @@
 # Drop-to-remote paste: local files dropped into remote panes land on the worker
 
-Status: design accepted 2026-11-20, build starting 2026-11-20. Owning system doc: `docs/tmux-remote-workspaces.md` (add a short "Dropping files into remote panes" section there when the build lands; the detail stays here).
+Status: design accepted 2026-11-20; W1 built and W2-reviewed 2026-11-20; W3 fixes landed 2026-11-20 (C5, findings ledger); smoke test by the user pending. Owning system doc: `docs/tmux-remote-workspaces.md` (add a short "Dropping files into remote panes" section there when the build lands; the detail stays here).
 
 ## User intent (verbatim)
 
@@ -77,6 +77,33 @@ On the shim and on risk (the acceptance bar for this build):
 - Never invoke the real `tmux` (no `tmux` process may be started by any test or any agent; a fake `tmux` script on PATH is the only tmux a test sees). Never ssh. Never touch `~/.local/state/tmux-remote-workspaces`; tests use a sandbox state dir (see `tests/lib.sh` `rw_test_sandbox`).
 - Required test cases: plain bytes pass through unchanged byte-for-byte (including lone ESC, mouse sequences, and a paste of ordinary text); a paste of one existing file into a remote pane is rewritten; a paste of a non-existent path passes through; a paste into a local pane passes through; a fake scp that fails yields the original paste plus one display-message; a fake scp that sleeps past the deadline yields the original paste and keeps relaying output meanwhile; input typed during a pending copy arrives after the paste in order; child exit code is propagated; the terminal attributes are restored after exit; a 64 KiB+ paste passes through; a split start marker passes through.
 - `bash -n` and shellcheck on the shell files; `python3 -m py_compile` on the shim.
+
+### C5 Transport, overwrite policy, scope, exit codes (added by W3, 2026-11-20, from the W2 review)
+
+These amend C1-C3 wherever they disagree.
+
+- **Deadline:** 4 s from the paste's end marker, covering the file check, the pane lookup and the copy (was 8 s). Once the copy has run for more than 300 ms, the shim shows one `display-message`: "rw: copying N file(s) to <worker>…". Input typed meanwhile stays queued behind the paste, in order. New input never cancels a pending paste, because the common flow is drop and then Enter.
+- **Transport order** (rw-push-file). Every step uses `-o BatchMode=yes -o ControlMaster=no`, so it never starts a master, and every `ssh -O check` is killed after 1 s (perl `alarm` + `exec`).
+  1. `ssh -O check <worker>` on the configured shared master, with no ControlPath override. If it is alive, use it.
+  2. Otherwise `-O check` on the rw-stream master (`rw_ssh_stream_opts`). If it is alive, use it.
+  3. Otherwise a direct connection: `-o ControlPath=none -o ConnectTimeout=3`.
+
+  Over the chosen connection run exactly one `ssh` (which runs `mkdir -p` for each parent and reports each target) and then at most one `sftp -b` batch (`put` to a temporary name, then `rename`). The batch uses literal paths and no remote shell. On a direct connection these are two connections, not one. `RW_SFTP_BIN` (default `sftp`) and `RW_SSH_BIN` let tests stub the transport. scp is no longer used.
+- **Overwrite policy** (amends D2). The D2 mapping gives the target. Then:
+  - Nothing at the target: upload there.
+  - An identical file at the target (sha256 via `shasum`/`sha256sum`, or `cksum` CRC and size when neither exists on the worker, compared with the same algorithm locally): no copy; the target path is used.
+  - A different file, a directory, anything else, or a parent that cannot be created: upload to `<worker_home>/rw-drops/<stem>-<UTC stamp>-<pid><index><.ext>`.
+  - Two inputs of one call never share a target; the later one gets the unique rw-drops name.
+  - A target whose path contains `"` or `\` cannot be written into the sftp batch, so it goes to rw-drops under a basename with those characters replaced by `_`.
+  - Uploads always go to `<destination dir>/.rw-drop-<token>-<i>.part` and are renamed into place. A kill never leaves a partial file under the final name; it can leave a `.part` file.
+  - Nothing on the worker is ever overwritten.
+- **Intercept scope:** only files whose physical parent directory is under the laptop `$HOME`, `/private/tmp` (`/tmp`), `/private/var/folders` or `/Volumes`. Anything else (`/etc/hosts`, `/Applications/...`) passes through unchanged, with no lookup and no transport. The shim checks this before the pane lookup, and rw-push-file checks it again.
+- **rw-push-file exit codes:** 0 placed, 1 failure, 2 not a remote workspace pane, 3 outside the intercept scope (nothing copied, nothing printed), 64 usage. The shim treats 2 and 3 as a silent pass-through.
+- **Reserved shim exit code 213:** the shim failed before tmux started (setup, raw mode, fork). The zsh wrapper loads the shim through a bootstrap that also turns an import or syntax error into 213, and on 213 it runs `command tmux "$@"`. After the child exists, the shim exits with the child's status. Routing is not failure: when `$TMUX` is set, `RW_PASTE_SHIM=0`, or stdin or stdout is not a tty, the shim execs plain tmux.
+- **Interpreter:** the wrapper runs the shim on `$(xcode-select -p)/usr/bin/python3` (else `/Library/Developer/CommandLineTools/usr/bin/python3`), resolved once per shell. It never uses the `/usr/bin/python3` xcrun stub, which can exit 69 or open a dialog after an Xcode or macOS update.
+- **Wrapper scope:** `tmux new`/`new-session` with `-d` (alone or in a flag cluster) skips the shim, because there is nothing to relay. The shim no longer exports `RW_PASTE_SHIM` to tmux; the variable is only the user's off switch (`=0`).
+- **Lookup format:** `#{pane_id}\t#{@rw-endpoint}\t#{pane_in_mode}`. A pane in a mode is a pass-through.
+- **Unsupported:** a tmux client stopped by SIGTTIN or SIGTTOU (for example `detach -E <cmd>` reading `/dev/tty`) is mirrored as a suspend and re-stops on every `fg`. This config does not use it (W2-14).
 
 ## Risks
 
@@ -163,6 +190,86 @@ Reading the numbers: the shim itself costs about 0.6 s of CPU per 50 MB, roughly
 - R-W1-10: the output direction's throughput cost (Measurements above) applies to every client started through the shim. `command tmux` and `RW_PASTE_SHIM=0` remain the escape hatches.
 - Not done in W1: the short "Dropping files into remote panes" section in `docs/tmux-remote-workspaces.md`. The status line says it is added when the build lands, after W2 and W3.
 
+## Changes recorded by W3 (2026-11-20)
+
+W3 fixed every W2 finding as the orchestrator decided. W2-14 is documented as unsupported (C5). The contract changes are in C5 above, and the per-finding detail is in the ledger below. This section covers what the ledger does not.
+
+### What changed, by file
+
+Paths are relative to `tmux/local-plugins/tmux-remote-workspaces/` unless they start with `zsh/`.
+
+- `libexec/rw-paste-shim`:
+  - Input path: the child pty master is non-blocking. Input waits in an ordered out-buffer, and the master is in select's write set only while that buffer is non-empty. Above 256 KiB the terminal is not read.
+  - Loop order: the wake pipe (child exit, suspend) is serviced first, then child output, then flushing input, then the terminal.
+  - Errors and exits: EAGAIN on either read means "nothing to read". A new `pump_output` forwards child output while the shim waits for the child after a hang-up; see W3-A below.
+  - Paste checks: the 4 s deadline and the progress message; the scope check before the lookup; `pane_in_mode` in the lookup.
+  - Startup: the child starts with SIGPIPE, SIGXFSZ and SIGINT at their defaults, and `RW_PASTE_SHIM` is never exported to it. The nesting check is now `$TMUX`. A failure before the child exists exits 213.
+  - Parse: a regex parse with cheap byte-level bounds (at most 64 paths, no run between spaces longer than 2 x PATH_MAX, no token longer than PATH_MAX).
+- `libexec/rw-push-file` was rewritten for C5: scope (exit 3), transport order with bounded checks, one ssh that reports each target, the overwrite policy, and one sftp batch with temporary names and renames.
+- `scripts/rw-paste-image.sh`:
+  - The file name is claimed atomically with a hard link, `-N` on a collision. This uses `ln` rather than the review's `mv -n`, because `ln` is an exclusive create and `mv -n` checks and then renames.
+  - The push runs as a background job in its own process group and is killed with its group after 15 s (`RW_PASTE_IMAGE_TIMEOUT`).
+  - The path is pasted only if `#{pane_current_command}` is unchanged and `#{pane_in_mode}` is 0. It is pasted with `set-buffer -b rw-clip-<pid>` + `paste-buffer -p -d`, never `send-keys`.
+- `zsh/.zsh/tmux-paste-shim.zsh`: the real interpreter is resolved once per shell, the shim is loaded through a bootstrap, the wrapper falls back to plain tmux on exit 213, and `new -d` skips the shim.
+- Tests: `tests/paste_fakes.sh` is new (fake `ssh-rw` with `-O check` states and a hang, and a fake `sftp` batch runner). `test_paste_shim.sh`, `paste_shim_driver.py` and `test_push_file.sh` were extended (the W2-* cases in the ledger).
+
+### Found during W3 (not in the W2 list)
+
+- **W3-A: macOS throws away output still queued in a pty when its last slave fd closes, and that close waits for the queue to drain.** While the W1 `end_child` slept in `reap()` without reading the master, the bytes the child wrote on hang-up (the server's terminal resets) were discarded: the master read returned EOF at once. The reviewer's probe p1 showed this even after the W2-4 drain was added. Fixed by `pump_output`: every wait for the child selects on the master and forwards what arrives, or discards it once the terminal is gone. Regression test: "W2-4 SIGTERM: the server's terminal resets written on hang-up reach the terminal".
+- **W3-B: measurement artefact, not a product bug.** This agent runs inside tmux, so `$TMUX` is set in its environment. With the new nesting rule, the shim (correctly) execed the fake tmux directly in three measurement scripts that did not unset `$TMUX`, which produced a bogus "no cost" reading. The scripts now unset it, and the numbers below were taken with it unset. No real tmux was involved: the measurement PATH holds only the fake tmux and `/usr/bin:/bin`.
+
+### W1 deviations superseded by W3
+
+- **#4:** the deadline is 4 s, not 8 s.
+- **#10:** nesting is decided by `$TMUX`, and `RW_PASTE_SHIM` is only the off switch.
+- **#11:** the wrapper now invokes the real interpreter with a bootstrap.
+- **#12:** sftp replaces scp.
+- **#13:** two inputs with one target get a unique rw-drops name instead of exit 1.
+- **#14:** the image path is pasted with `paste-buffer -p`, not typed.
+- **W1 risks:** R-W1-4 is fixed (W2-1), R-W1-6's deadline is now 4 s, and R-W1-7 is fixed (W2-7).
+
+### Tests after W3
+
+- `bash tests/run.sh paste`: `test_paste_shim.sh` 13 passed, 0 failed. Driver: 122 passed, 0 failed.
+- `bash tests/run.sh push`: `test_push_file.sh` 73 passed, 0 failed.
+- Both suites were run 3 times in a row, with no failures. `bash -n`, `shellcheck -x`, `zsh -n` and `/usr/bin/python3 -m py_compile` are clean.
+- The reviewer's probes p1, p2, p4 and p5, run unchanged against the fixed shim:
+  - p1: the reset reaches the terminal.
+  - p2: RESUMED with 2048 bytes in flight.
+  - p4: no `RW_PASTE_SHIM` in the child.
+  - p5: the shim survives and prints no traceback.
+
+### Measurements after W3 (same harness as W1, 2026-11-20)
+
+| Measure | Direct | Through the shim |
+|---|---|---|
+| 50 MB of text to a pty, harness A (3 runs, two sessions) | 0.43 / 0.42 / 0.42 s; 0.44 / 0.42 / 0.43 s | 0.86 / 0.80 / 0.86 s; 0.78 / 0.89 / 0.86 s |
+| 50 MB of text to a pty, harness B (fork + wait4, 3 runs) | wall 0.43 s; CPU sys 0.17 s | wall 0.53-0.60 s; CPU (shim + cat) user 0.19-0.21 s, sys 0.45-0.47 s |
+| 1-byte keystroke echo round trip, 500 rounds, 3 runs | median 14 / 10 / 10 us; p99 28 / 15 / 18 us | median 58 / 52 / 50 us; p99 168 / 179 / 132 us |
+| Idle shim | - | RSS about 13.5 MB; 0.00 s CPU over 5 s idle |
+| Start to child output | - | 30 ms, including the fake child's own Python start |
+| Parse of a 64 KiB single-line paste on the relay thread (W2-12 probe) | - | 0.0-0.1 ms for every probe payload; 2.7 ms for the worst paste that is still a candidate (60 paths of 1000 characters), against 9.5-13.4 ms before |
+
+Reading the numbers: the shim's own CPU per 50 MB is now about 0.47 s, roughly 9 ms per MB, against 12 ms per MB in W1. A keystroke still gains tens of microseconds; the median went from 23-57 us to 50-58 us, which is noise-level next to a 16 ms frame. Relayed output was again checked to be lossless (identical once CR bytes are removed).
+
 ## Findings ledger (W2, W3)
 
-(filled in after review: ID, finding, root cause, outcome, regression test, residual risk)
+The test names are the check descriptions in `tests/paste_shim_driver.py` (driver) and `tests/test_push_file.sh` (push).
+
+| ID | Finding | Root cause | Outcome | Regression test | Residual risk |
+|---|---|---|---|---|---|
+| W2-1 (blocker) | On `prefix C-z`, more than ~1 KiB of input arriving while the server has stopped reading the client tty blocks the shim forever; the tab is dead. | `write_all` to the child pty was blocking (the raw pty queue takes ~1022 bytes), so the SIGCHLD wake and `suspend()` never ran. | Fixed: non-blocking master, ordered out-buffer, master in the write set only while it is non-empty, wake pipe serviced first, terminal not read above 256 KiB. | driver "W2-1 suspend with 4 KiB in flight: …" (3 checks) and "W2-1 child not reading, 1 MiB pending: …" (output keeps flowing, nothing lost) | Input waits in memory up to 256 KiB; above that Ghostty's own write to the pty blocks, which is the intended back-pressure. |
+| W2-2 (blocker by the bar) | All input is queued for up to 8 s while a candidate paste is pending. | 8 s deadline; worst-case transport (dead master, fresh connections, a sleeping worker) filled it. | Fixed as decided: 4 s total deadline; a progress `display-message` once the copy runs past 300 ms; masters checked first (ms), direct connections bounded at ConnectTimeout=3; one ssh plus one sftp for all files. New input does not cancel. | driver "W2-2 deadline: released at the 4 s deadline", "W2-2 progress: …" (2 checks) | The keyboard can still be held up to 4 s in the worst case (worker unreachable with no live master); the message explains it. |
+| W2-3 (major, data loss) | scp overwrote whatever was at the mapped target (a worker checkout file, a same-name drop); a kill left a truncated target; a directory at the target swallowed the file. | The D2 mapping had no existence check and copied straight to the final name. | Fixed: one ssh reports each target (missing / identical by sha256 / differs / dir / no parent); identical files are skipped, everything else goes to a unique rw-drops name; uploads go to `.part` and are renamed. Scope limited to $HOME, /tmp, /private/var/folders and /Volumes. | push "identical file at the target: …", "a different file at the target: …" (4), "a directory at the target: …", "no usable parent …", "two outside files with one basename: …" (3), "upload goes to a temporary .part name …", "outside the intercept scope (/etc/hosts): exit 3 …"; driver "W2-3 scope: …" (2) | A file that appears at a "missing" target between the check and the rename is replaced (ms window). A killed upload can leave a `.part` file. A cksum fallback on a worker with no sha256 tool is CRC-strength. |
+| W2-4 (major) | On SIGTERM or a loop failure, the shim exited without relaying the server's terminal resets (alt screen, mouse, bracketed paste left on). | No drain after the hang-up; plus W3-A: macOS discards queued pty output when the last slave closes unless someone reads meanwhile. | Fixed: `pump_output` forwards child output during every wait for the child; after `end_child` the output is drained on every path where the terminal is alive (all but `_TerminalGone` and SIGHUP); the failure path is SIGHUP, bounded reap, drain, then termios restore. | driver "W2-4 SIGTERM: the server's terminal resets written on hang-up reach the terminal" | Resets written more than 1 s after the drain starts are not waited for. |
+| W2-5 (major, uptime) | `/usr/bin/python3` is the xcrun stub: after an Xcode or macOS update it exits 69 or opens a dialog, and every new-tab `tmux` failed; the same applied to a shim syntax error. | The wrapper trusted `-x /usr/bin/python3` and the shim's exit status. | Fixed: the wrapper resolves `$(xcode-select -p)/usr/bin/python3` (else the CLT one) once per shell and loads the shim through a bootstrap that turns import or syntax errors into 213; the shim exits 213 for any failure before the child exists; on 213 the wrapper runs `command tmux`. | driver "W2-5 wrapper: runs the shim on the developer tools' real python3 …", "W2-5 wrapper, shim with a syntax error: plain tmux starts instead" (3 checks) | If the developer tools are removed, there is no interpreter and the wrapper runs plain tmux (feature off, tmux fine). The 213 path for a setup failure inside the shim (e.g. openpty fails) has no fault-injection test. |
+| W2-6 (major) | Pushes used the rw-stream ControlPath, whose master is full with 5+ remote panes (N+1 fresh connections), and hung on a wedged master. | The transport choice ignored the C3 rationale in common.sh, and the master checks were unbounded. | Fixed per C5: shared master, then stream master, then direct (ControlPath=none, ConnectTimeout=3); each `-O check` is killed after 1 s; one ssh plus one `sftp -b` over the chosen connection; `RW_SFTP_BIN`. | push "shared master alive: …" (2), "stream master alive: …" (2), "no master: …" (2), "wedged masters: …" (2), "one ssh (parents + target report) and one sftp batch" | On a direct connection the ssh and the sftp are two connections (two handshakes), inside the 4 s deadline. A master that answers `-O check` but whose session then hangs is cut only by the caller's deadline (4 s for the shim, 15 s for the image key). |
+| W2-7 (major) | The image key had no time bound, typed the path with `send-keys -l` into whatever the pane was doing by then, and two presses in one second lost an image. | Synchronous push; `send-keys`; check-then-create naming. | Fixed: the push runs in its own process group and is killed at 15 s with a message; the path is pasted only if the pane's command is unchanged and it is not in a mode, via `set-buffer` + `paste-buffer -p -d`; the name is claimed with `ln` (an atomic exclusive create). | push "paste-image, hung copy: …" (4), "paste-image, the pane's program changed during the copy: …" (2), "paste-image, the pane is in a mode: …", "paste-image: two presses in the same second keep two images", "… pasted bracketed and the buffer deleted …", "paste-image: never send-keys" | The command check compares names only (a different nvim buffer looks unchanged). |
+| W2-8 (minor) | The lookup returns the active pane, but the paste may go to a popup, the `:` prompt or copy mode. | The lookup format had no mode field. | Fixed for modes: `#{pane_in_mode}` is in the lookup, and 1 means pass-through. | driver "W2-8 pane in a mode …" (2) | Known limit: tmux 3.7b has no format for an open popup or command prompt, so a drop into those while the pane is remote is still rewritten. |
+| W2-9 (minor) | The child, and a server it starts, inherited SIGPIPE and SIGXFSZ ignored from Python; every pane ran with SIGXFSZ ignored. | Exec resets caught signals, not ignored ones; Python ignores both. | Fixed: SIGPIPE, SIGXFSZ and SIGINT are set to SIG_DFL in the child before exec. | driver "W2-9 the child starts with SIGPIPE, SIGXFSZ, SIGINT at their defaults" (the fake tmux reads its dispositions with perl `%SIG`) | None known. |
+| W2-10 (minor) | `RW_PASTE_SHIM=1` leaked into the tmux server's global environment. | The shim set it in the child's environment as a nesting guard. | Fixed: never exported; it is removed from the child's environment even when the user's environment has it; nesting is decided by `$TMUX`; `RW_PASTE_SHIM=0` stays the off switch. | driver "W2-10 RW_PASTE_SHIM never reaches the child …", "$TMUX set: runs tmux directly …", "RW_PASTE_SHIM=0: runs tmux directly …" | `env -u TMUX tmux attach` typed inside a pane would nest a shim (no worse than nesting tmux itself). |
+| W2-11 (minor) | EAGAIN on reading the terminal or the child killed the relay. | `BlockingIOError` was re-raised by the loop. | Fixed: EAGAIN or EINTR on either read means nothing to read. | driver "W2-11 EAGAIN storm on the terminal: …" (3) | None known. |
+| W2-12 (minor) | The per-character parse stalled the relay thread for 9.5-13.4 ms on 64 KiB pastes. | Python loop over every character. | Fixed: first byte must be `/`; byte-level bounds (at most 64 paths, no run between spaces longer than 2 x PATH_MAX); a C-speed regex; no token longer than PATH_MAX. 0.0-0.1 ms on the probe payloads; worst candidate 2.7 ms. | driver "parse: a 64 KiB paste costs under 5 ms …", "parse: more than 64 paths: no", "parse: a token longer than PATH_MAX: no", "parse: second token relative: no" | A drop of more than 64 files passes through unchanged. |
+| W2-13 (minor) | Short routed commands cost ~64 ms against 2.6 ms direct. | Python start plus the 50 ms drain on exit. | Fixed for the case named: `tmux new`/`new-session` with `-d` skips the shim. Attaching commands still pay the Python start (about 30 ms) once per attach. | driver "W2-13 wrapper: `tmux new -d` skips the shim" | `tmux attach` costs about 30 ms more to start. |
+| W2-14 (minor) | A client stopped by SIGTTIN or SIGTTOU (e.g. `detach -E <cmd>` reading `/dev/tty`) is mirrored as a suspend and re-stops on every `fg`. | The client is in a background process group of the user's terminal session (deviation W1 #1). | Documented as unsupported (C5); not used in this config; no code change. | none | Recovery is to close the tab or `kill -CONT`/`kill` the client; the sessions survive. |
+| W3-A | Child output written during the hang-up was lost on macOS. | See "Found during W3". | Fixed with `pump_output`. | same as W2-4 | As W2-4. |

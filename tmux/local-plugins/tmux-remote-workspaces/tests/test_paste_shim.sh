@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
-# libexec/rw-paste-shim (contracts C1, C2, C4 in
-# docs/tasks/drop-to-remote-paste.md), headless: the "terminal" is a pty the
-# test holds, the child is a fake `tmux` that records every byte it reads,
-# the pane lookup and display-message answer from environment variables,
-# and scp is a fake. No tmux server, no ssh, no network.
+# libexec/rw-paste-shim and the zsh wrapper (contracts C1, C2, C4, C5 in
+# docs/tasks/drop-to-remote-paste.md), headless: the "terminal" is a pty
+# the test holds, the child is a fake `tmux` that records every byte it
+# reads, the pane lookup and display-message answer from environment
+# variables, and ssh/sftp are fakes. No tmux server, no ssh, no network.
 #
 # The cases live in paste_shim_driver.py (it needs ptys); this file builds
 # the sandbox and the fakes, lints the new files (C4), and runs it.
@@ -13,6 +13,9 @@ set -uo pipefail
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 rw_test_sandbox
+# shellcheck source=paste_fakes.sh
+source "$RW_TEST_DIR/paste_fakes.sh"
+paste_fakes_install
 
 SHIM="$RW_PLUGIN/libexec/rw-paste-shim"
 REPO="$(cd "$RW_PLUGIN/../../.." && pwd)"
@@ -21,7 +24,7 @@ REPO="$(cd "$RW_PLUGIN/../../.." && pwd)"
 check "py_compile: rw-paste-shim" /usr/bin/python3 -c \
   'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$SHIM"
 for f in "$RW_PLUGIN/libexec/rw-push-file" "$RW_PLUGIN/scripts/rw-paste-image.sh" \
-  "$RW_TEST_DIR/test_paste_shim.sh" "$RW_TEST_DIR/test_push_file.sh"; do
+  "$RW_TEST_DIR/test_paste_shim.sh" "$RW_TEST_DIR/test_push_file.sh" "$RW_TEST_DIR/paste_fakes.sh"; do
   check "bash -n: ${f#"$RW_PLUGIN"/}" bash -n "$f"
   if command -v shellcheck >/dev/null 2>&1; then
     # shellcheck disable=SC2016 # expanded by the inner bash
@@ -34,12 +37,15 @@ check "zsh -n: zsh/.zsh/tmux-paste-shim.zsh" zsh -n "$REPO/zsh/.zsh/tmux-paste-s
 export FAKE_MESSAGES="$SANDBOX/messages.log"
 export FAKE_LOOKUP_TTYS="$SANDBOX/lookups.log"
 export FAKE_CHILD="$SANDBOX/fake_child.py"
-export FAKE_SCP_LOG="$SANDBOX/scp.log"
+export ZSH_WRAPPER="$REPO/zsh/.zsh/tmux-paste-shim.zsh"
 
 # The only tmux any of this sees. As a client command (new/attach) it
-# becomes the fake child; display-message -p answers the pane lookup from
-# FAKE_PANE / FAKE_ENDPOINT (FAKE_LOOKUP_SLEEP / FAKE_LOOKUP_RC for a slow
-# or failing server); display-message without -p appends to FAKE_MESSAGES.
+# becomes the fake child; `sigdisp` first records the signal dispositions
+# it inherited (perl's %SIG shows IGNORE for a signal ignored on entry;
+# bash's trap -p does not); display-message -p answers the pane lookup from FAKE_PANE /
+# FAKE_ENDPOINT / FAKE_PANE_IN_MODE (FAKE_LOOKUP_SLEEP / FAKE_LOOKUP_RC for
+# a slow or failing server); display-message without -p appends to
+# FAKE_MESSAGES.
 cat >"$SANDBOX/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${FAKE_TMUX_LOG:-/dev/null}"
@@ -65,10 +71,15 @@ case "${1:-}" in
       f="$1"
       f="${f//"#{pane_id}"/${FAKE_PANE:-%5}}"
       f="${f//"#{@rw-endpoint}"/${FAKE_ENDPOINT:-}}"
+      f="${f//"#{pane_in_mode}"/${FAKE_PANE_IN_MODE:-0}}"
       printf '%s\n' "$f"
     else
       printf '%s\t%s\n' "$t" "$1" >>"$FAKE_MESSAGES"
     fi
+    ;;
+  sigdisp)
+    /usr/bin/perl -e 'print join(" ", map { "$_=" . ($SIG{$_} // "DEFAULT") } qw(PIPE XFSZ INT)), "\n"' >"$FAKE_SIGDISP_FILE"
+    exec /usr/bin/python3 "$FAKE_CHILD"
     ;;
   '' | new | new-session | attach | attach-session | a | at)
     exec /usr/bin/python3 "$FAKE_CHILD"
@@ -78,26 +89,39 @@ exit 0
 EOF
 
 # The fake tmux client: raw mode on its tty, records every byte it reads to
-# FAKE_RECV, prints READY, optionally TICK every FAKE_CHILD_TICK seconds
-# (output that must keep flowing while a copy is pending), exits with
-# FAKE_CHILD_EXIT once it has read the sentinel NUL "QUIT", and on NUL "STOP"
-# sends itself SIGTSTP like tmux suspend-client, then prints RESUMED.
+# FAKE_RECV, prints READY, optionally TICK every FAKE_CHILD_TICK seconds from
+# a thread of its own (output that must keep flowing while input waits),
+# and acts on sentinels: NUL "QUIT" exits with FAKE_CHILD_EXIT; NUL "STOP"
+# waits FAKE_CHILD_STOP_DELAY without reading (tmux's server has stopped
+# reading the tty) and then sends itself SIGTSTP like tmux suspend-client,
+# printing RESUMED once continued; NUL "HOLD" stops reading for 2 s.
+# FAKE_CHILD_RESET_ON_HUP=1: on SIGHUP/SIGTERM it writes <RESET> after 50 ms
+# (the server's terminal resets) and exits.
 cat >"$FAKE_CHILD" <<'EOF'
-import os, select, signal, sys, tty
+import os, select, signal, sys, threading, time, tty
 with open(os.environ["FAKE_CHILD_TTY_FILE"], "w") as f:
     f.write(os.ttyname(0))
 with open(os.environ["FAKE_CHILD_TTY_FILE"] + ".env", "w") as f:
-    f.write(os.environ.get("RW_PASTE_SHIM", ""))
+    f.write(os.environ.get("RW_PASTE_SHIM", "unset"))
+if os.environ.get("FAKE_CHILD_RESET_ON_HUP") == "1":
+    def hup(signum, frame):
+        time.sleep(0.05)
+        os.write(1, b"<RESET>")
+        os._exit(1)
+    signal.signal(signal.SIGHUP, hup)
+    signal.signal(signal.SIGTERM, hup)
 tty.setraw(0)
 os.write(1, b"READY\r\n")
 tick = float(os.environ.get("FAKE_CHILD_TICK") or 0)
+if tick > 0:
+    def ticker():
+        while True:
+            time.sleep(tick)
+            os.write(1, b"TICK")
+    threading.Thread(target=ticker, daemon=True).start()
 fd = os.open(os.environ["FAKE_RECV"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
 tail = b""
 while True:
-    r, _, _ = select.select([0], [], [], tick if tick > 0 else None)
-    if not r:
-        os.write(1, b"TICK")
-        continue
     try:
         d = os.read(0, 65536)
     except OSError:
@@ -107,30 +131,16 @@ while True:
     os.write(fd, d)
     tail = (tail + d)[-5:]
     if tail == b"\x00QUIT":
-        sys.exit(int(os.environ.get("FAKE_CHILD_EXIT") or 0))
-    if tail == b"\x00STOP":  # what tmux suspend-client does
+        os._exit(int(os.environ.get("FAKE_CHILD_EXIT") or 0))
+    if tail == b"\x00STOP":
+        time.sleep(float(os.environ.get("FAKE_CHILD_STOP_DELAY") or 0))
         os.kill(os.getpid(), signal.SIGTSTP)
         os.write(1, b"RESUMED")
+    if tail == b"\x00HOLD":
+        time.sleep(2)
+        os.write(1, b"HELD")
 EOF
-
-cat >"$SANDBOX/bin/scp" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >>"${FAKE_SCP_LOG:-/dev/null}"
-[ -n "${FAKE_SCP_SLEEP:-}" ] && sleep "$FAKE_SCP_SLEEP"
-[ "${FAKE_SCP_FAIL:-0}" = 1 ] && { echo "scp: fake failure" >&2; exit 1; }
-args=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -o) shift 2 ;;
-    --) shift; args+=("$@"); break ;;
-    -*) shift ;;
-    *) args+=("$1"); shift ;;
-  esac
-done
-cp -- "${args[0]}" "${args[${#args[@]}-1]#*:}"
-EOF
-chmod +x "$SANDBOX/bin/tmux" "$SANDBOX/bin/scp"
-export RW_SCP_BIN="$SANDBOX/bin/scp"
+chmod +x "$SANDBOX/bin/tmux"
 
 ws="$HOME/Developer/idol-app"
 mkdir -p "$ws/assets" "$TMUX_REMOTE_WORKSPACES_STATE_DIR/endpoints"
