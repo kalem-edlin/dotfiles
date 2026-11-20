@@ -141,6 +141,11 @@ fi
 alias pmpm="pnpm"
 alias pmpn="pnpm"
 
+# ipatool (setup/rea.sh): stable symlink to the pinned binary. Interactive
+# shells only; noninteractive jobs call the full path.
+[[ -x "$HOME/Developer/tools/ipatool/ipatool" ]] &&
+  alias ipatool="$HOME/Developer/tools/ipatool/ipatool"
+
 # Sane defaults for built-ins (verbose and interactive)
 # Agent shells (CLAUDECODE set) have no terminal and no stdin: skip aliases
 # that prompt, page, or swap a coreutil for a tool with different flags.
