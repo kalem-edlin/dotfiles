@@ -414,9 +414,15 @@ give it. Its first line names the directory and its root (`<dir> (root)` or
 appears only when the two differ, or when the pane's remote is unreachable or
 no longer in `config.json`. Warnings are yellow: an unreachable remote, a
 directory only the remote has, a root that cannot be handed off (outside `~`
-or `~` itself). When a hand-off row is offered and more than one pane would
-move, a line `moves: <session>:<window>.<pane> <command>, ...` names them,
-folded to the popup's width.
+or `~` itself). The header's last line describes the highlighted row and
+changes as the cursor moves:
+
+- a switch row: `only this pane moves (claude); no files move`
+- a hand-off row: `moves 4 panes and the files: 1 t3 code (claude, nvim) ·
+  2 claudef (claude)`, the panes grouped by window (index and name), each
+  named by its agent or command, a window in another session prefixed
+  `<session> › `, wrapped to the popup's width
+- a hand-back row: `moves N panes and the files back to this machine`
 
 Each row starts with a reachability marker, then the label, then a short note
 when there is one: a grey `…` while the remote is being probed, a green `●`

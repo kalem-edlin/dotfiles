@@ -13,8 +13,11 @@
 #   - the agent note on soft switches to a non-owner destination
 #   - the header (picker revision 2026-11-20): directory and root; the
 #     hosts line only when pane host and owner differ or the remote is
-#     unreachable; yellow warnings; the muted --color=header; the `moves:`
-#     line naming the panes a hand-off moves; no unsaved-buffers line
+#     unreachable; yellow warnings; the muted --color=header; no
+#     unsaved-buffers line; no static `moves:` line
+#   - the highlighted-row description (2026-11-20): `describe` per row key,
+#     panes named by window and agent, folding, and the fzf focus binding
+#     (transform-header) that swaps it as the cursor moves
 #   - dispatch: the chosen row runs exactly `rw switch`, `rw bg handoff
 #     --worker <alias>` or `rw bg handback`; no second chooser; esc runs
 #     nothing; refusals and failures are shown inline
@@ -224,9 +227,14 @@ eq "header: hosts line, off-owner pane" "$(hdr %5 | sed -n 2p)" "pane on remote 
 check "header never says unsaved buffers or save first (local nvim)" bash -c "! bash '$PICKER' header %7 | grep -qi 'unsaved\|save first'"
 check "header never names this machine's host name" bash -c "! bash '$PICKER' header %1 | grep -qi '$(hostname -s)'"
 
-# The moves line: a hand-off row is offered and more than one pane moves.
-eq "header: moves line names the panes a hand-off moves" "$(hdr %1 | sed -n 2p)" "moves: dev:1.0 zsh, dev:2.1 nvim"
-check "header: no moves line for a hand-back" bash -c "! bash '$PICKER' header %3 | grep -q 'moves:'"
+# The static moves line is gone: it read as if a soft switch moved every
+# pane. The highlighted row's description says what that row moves.
+check "header: no static moves line" bash -c "! bash '$PICKER' header %1 | grep -q 'moves'"
+desc() { bash "$PICKER" describe "$1" "$2"; }
+eq "describe: a soft switch moves only this pane, named by its command" "$(desc %1 switch:fakeworker)" "only this pane moves (zsh); no files move"
+eq "describe: an agent pane is named by its agent kind" "$(desc %6 switch:fakeworker)" "only this pane moves (claude); no files move"
+eq "describe: a hand-off names its panes by window, grouped" "$(desc %1 handoff:fakeworker)" "moves 2 panes and the files: 1 (zsh) · 2 (nvim)"
+eq "describe: a hand-back of one pane" "$(desc %3 handback)" "moves this pane and the files back to this machine"
 
 # Outside ~: soft switches only, with the reason in the header.
 mkdir -p "$SANDBOX/outside"
@@ -278,6 +286,13 @@ strip <"$FZF_LOG" >"$SANDBOX/fzf.stripped"
 check "the popup's fzf input is the rendered rows (pending marker, label)" grep -q $'^IN switch:fakeworker\t… switch this pane to fakeworker$' "$SANDBOX/fzf.stripped"
 check "the hand-off row is rendered the same way" grep -q $'^IN handoff:fakeworker\t… hand off to fakeworker (2 panes)$' "$SANDBOX/fzf.stripped"
 check "the header reaches fzf without the unsaved-buffers wording" bash -c "! grep -qi 'unsaved\|save first' '$FZF_LOG'"
+check "the header swaps on every cursor move (focus: transform-header with the row key)" grep -q 'focus:transform-header:.*focus-header .* {1}' "$FZF_LOG"
+check "the first header describes the first (highlighted) row" grep -q 'only this pane moves (zsh); no files move' "$FZF_LOG"
+fh="$SANDBOX/fh"
+printf 'line one\n' >"$fh.hdr"
+printf 'a:x\tfirst a\nb:y\tonly b\na:x\tsecond a\n' >"$fh.desc"
+eq "focus-header: the fixed lines, then every line of the key's description" "$(bash "$PICKER" focus-header "$fh.hdr" "$fh.desc" a:x)" "line one"$'\n'"first a"$'\n'"second a"
+eq "focus-header: another key" "$(bash "$PICKER" focus-header "$fh.hdr" "$fh.desc" b:y)" "line one"$'\n'"only b"
 
 pick %3 switch:local
 eq "remote pane to this machine: --to local, the mapped live directory" "$(cat "$RW_LOG")" "switch --pane %3 --to local --dir $owned/sub/deeper|TMUX_PANE="
@@ -492,26 +507,36 @@ eq "B5 a visit pane (and %20, bound by @rw-root-id only) do not come back" "$(ha
 echo "pane_id=%24${T}pane_current_path=$owned${T}pane_current_command=bash${T}@remote-host=fakeworker${T}@rw-worker=fakeworker${T}@rw-endpoint=e0000001" >>"$FAKE_TMUX_PANES"
 eq "B5 a second endpoint pane does" "$(hand %3)" "hand back to this machine (2 panes)"
 
-# A5: the moves line names the panes, folded to the popup width, with a
-# pane's session:window.pane and command kept together.
+# The hand-off description: panes grouped by window (index and name), the
+# agent kind instead of claudef's version-named binary, other sessions
+# prefixed, packed into the popup width without splitting an item.
 foldroot="$HOME/Developer/foldroot"
 mkdir -p "$foldroot"
 git init -q "$foldroot"
 foldroot="$(rw_physical_path "$foldroot")"
+S=a-long-session-name
 for i in 1 2 3 4 5 6 7 8; do
-  echo "pane_id=%4$i${T}pane_current_path=$foldroot${T}pane_current_command=zsh${T}session_name=a-long-session-name${T}window_index=$i${T}pane_index=0" >>"$FAKE_TMUX_PANES"
+  echo "pane_id=%4$i${T}pane_current_path=$foldroot${T}pane_current_command=zsh${T}session_name=$S${T}window_index=$i${T}pane_index=0${T}window_name=win$i" >>"$FAKE_TMUX_PANES"
 done
-folded="$(hdr %41)"
-eq "A5 the moves line starts the folded list" "$(printf '%s\n' "$folded" | sed -n 2p | cut -c1-35)" "moves: a-long-session-name:1.0 zsh,"
-check "A5 the list is folded (more than one line)" test "$(printf '%s\n' "$folded" | wc -l)" -gt 3
-check "A5 no folded line is wider than the popup less its margin" bash -c '! printf "%s\n" "$1" | awk "length(\$0) > 76 { bad = 1 } END { exit !bad }"' _ "$folded"
-check "A5 a continuation is indented under the first name" bash -c 'printf "%s\n" "$1" | sed -n 3p | grep -q "^       a-long"' _ "$folded"
-eq "A5 every pane is named once" "$(printf '%s\n' "$folded" | grep -o 'a-long-session-name:[0-9]*\.0 zsh' | wc -l | tr -d ' ')" "8"
+echo "pane_id=%50${T}pane_current_path=$foldroot${T}pane_current_command=nvim${T}session_name=$S${T}window_index=1${T}pane_index=1${T}window_name=win1" >>"$FAKE_TMUX_PANES"
+echo "pane_id=%51${T}pane_current_path=$foldroot${T}pane_current_command=2.1.329${T}session_name=other${T}window_index=3${T}pane_index=0${T}window_name=api${T}@agent_kind=claude${T}@agent_pid=$$" >>"$FAKE_TMUX_PANES"
+folded="$(desc %41 handoff:fakeworker)"
+check "hand-off: the list starts after the count, windows grouped" bash -c 'printf "%s\n" "$1" | head -n1 | grep -q "^moves 10 panes and the files: 1 win1 (zsh, nvim) · 2 win2 "' _ "$folded"
+check "hand-off: another session's window is prefixed, the agent named" grep -q 'other › 3 api (claude)' <<<"$folded"
+check "hand-off: never the version-named binary" bash -c '! grep -q "2\.1\.329" <<<"$1"' _ "$folded"
+check "hand-off: the list is packed into several lines" test "$(printf '%s\n' "$folded" | wc -l)" -gt 1
+# Characters, not bytes (· and › are multibyte).
+check "hand-off: no line is wider than the popup less its margin" bash -c 'printf "%s\n" "$1" | while IFS= read -r l; do [ "$(printf %s "$l" | wc -m)" -le 76 ] || exit 1; done' _ "$folded"
+check "hand-off: a continuation is indented under the first item" bash -c 'printf "%s\n" "$1" | sed -n 2p | grep -Eq "^ {30}[0-9o]"' _ "$folded"
+eq "hand-off: every window is named once" "$(printf '%s\n' "$folded" | grep -o 'win[0-9]' | wc -l | tr -d ' ')" "8"
 export RW_PICKER_COLS=400
-eq "A5 a wide popup keeps the list on one line" "$(hdr %41 | grep -c .)" "2"
+eq "hand-off: a wide popup keeps the list on one line" "$(desc %41 handoff:fakeworker | grep -c .)" "1"
+export RW_PICKER_COLS=50
+eq "hand-off: a narrow popup starts the list on its own line" "$(desc %41 handoff:fakeworker | sed -n 1p)" "moves 10 panes and the files:"
+check "hand-off: ... indented, items whole" bash -c 'printf "%s\n" "$1" | sed -n 2p | grep -q "^  1 win1 (zsh, nvim)"' _ "$(desc %41 handoff:fakeworker)"
 export RW_PICKER_COLS=80
 two_workers
-check "A5 the moves line appears with several workers too" bash -c "bash '$PICKER' header %41 | grep -q '^moves:'"
+check "hand-off: every worker's row lists the panes" bash -c "bash '$PICKER' describe %41 handoff:other | grep -q '^moves 10 panes'"
 one_worker
 
 # B7: pick acts on the pane it is given, never on an untargeted lookup.

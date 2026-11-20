@@ -48,8 +48,15 @@
 # ·  owned by <host>` follows only when the two hosts differ or the pane's
 # remote is unreachable or unconfigured; warnings (unreachable remote, a
 # directory only the remote has, a root that cannot be handed off) are
-# yellow; when a hand-off row is offered and more than one pane would move,
-# `moves: <session>:<window>.<pane> <command>, ...` names them.
+# yellow. Below them, one description of the HIGHLIGHTED row, rewritten on
+# every cursor move (fzf's focus event, transform-header; see `focus-header`):
+#   switch:   only this pane moves (<agent or command>); no files move
+#   hand-off: moves N panes and the files: 1 t3 code (claude, nvim) · 2 api (zsh)
+#   hand back / release: what comes back to this machine
+# Panes are named by window (index and name) with their agents (@agent_kind
+# while @agent_pid lives) or commands; a pane in another session is prefixed
+# `<session> › `. The description follows the row because a static `moves:`
+# line read as if a soft switch moved every pane too (2026-11-20).
 # Choosing a row is the confirmation; there is no y/n. Esc moves nothing.
 #
 # The picker runs only `rw switch`, `rw bg handoff` and `rw bg handback`
@@ -82,6 +89,11 @@
 #                             key<TAB>marker, label and note (with ANSI)
 #   probe-rows <file> [--raw] the rows in <file> with live reachability
 #                             filled in, rendered (--raw: machine form)
+#   describe <pane> <key>     print the highlighted-row description for <key>
+#   focus-header <hdr> <desc> <key>
+#                             the header fzf shows while <key> is
+#                             highlighted: <hdr>, then <key>'s lines of <desc>
+#                             (key<TAB>line files written by the menu)
 #
 # The menu renders immediately; fzf's start event reloads it from probe-rows
 # (one parallel `ssh -o BatchMode=yes` probe per distinct worker, bounded by
@@ -153,7 +165,7 @@ rw_pick_notice() {
 # rw_pick_cols -- the popup's width less a margin, for wrapping notices.
 rw_pick_cols() {
   local cols
-  cols="${RW_PICKER_COLS:-$(stty size </dev/tty 2>/dev/null | awk '{print $2}')}"
+  cols="${RW_PICKER_COLS:-$({ stty size </dev/tty; } 2>/dev/null | awk '{print $2}')}"
   case "$cols" in '' | *[!0-9]*) cols=80 ;; esac
   [ "$cols" -gt 20 ] || cols=80
   printf '%d\n' $((cols - 4))
@@ -355,17 +367,106 @@ rw_pick_render() {
 # rw_pick_warn <text> -- one header line in warning yellow.
 rw_pick_warn() { printf '\033[38;2;249;226;175m%s\033[0m\n' "$1"; }
 
-# rw_pick_moves_line -- `moves: <session>:<window>.<pane> <command>, ...`, the
-# local panes a hand-off moves, folded to the popup width (a continuation is
-# indented under the first name). A pane's session:window.pane and its
-# command stay on one line (the joining space is a placeholder for fold).
-rw_pick_moves_line() {
-  local list cols
+# rw_pick_pane_what <pane_id> <command> -- what runs in a local pane, for
+# display: its agent kind while @agent_pid lives (claudef shows up as its
+# version-named binary, e.g. 2.1.329, in pane_current_command), else the
+# command.
+rw_pick_pane_what() {
+  local kind pid
+  kind="$(rw_pane_get "$1" @agent_kind)"
+  if [ -n "$kind" ]; then
+    pid="$(rw_pane_get "$1" @agent_pid)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s\n' "$kind"
+      return 0
+    fi
+  fi
+  printf '%s\n' "$2"
+}
+
+# rw_pick_window_list -- the panes a hand-off moves (P_ROOT_PANE_LIST),
+# grouped by window, one item per window:
+#   [<session> › ]<window index> <window name> (<what>, <what>)
+# The session is named only for a window outside the origin pane's session.
+rw_pick_window_list() {
+  local own id sess win cmd name
+  own="$(tmux display-message -p -t "$P_PANE" '#{session_name}' 2>/dev/null)"
+  # awk first: `read` with IFS=TAB would merge the empty @rw-endpoint and
+  # @rw-root-id fields of a local pane and shift the command.
+  printf '%s\n' "$P_ROOT_PANE_LIST" | awk -F '\t' -v OFS='\t' 'NF { print $1, $3, $4, $8 }' |
+    while IFS=$'\t' read -r id sess win cmd; do
+    [ -n "$id" ] || continue
+    name="$(tmux display-message -p -t "$id" '#{window_name}' 2>/dev/null)"
+    printf '%s\t%s\t%s\t%s\n' "$sess" "$win" "$name" "$(rw_pick_pane_what "$id" "$cmd")"
+  done | awk -F '\t' -v own="$own" '
+    { k = $1 SUBSEP $2
+      if (!(k in what)) { order[++n] = k; head[k] = ($1 != own ? $1 " › " : "") $2 ($3 != "" ? " " $3 : ""); what[k] = $4 }
+      else what[k] = what[k] ", " $4 }
+    END { for (i = 1; i <= n; i++) print head[order[i]] " (" what[order[i]] ")" }'
+}
+
+# rw_pick_fold <prefix> <items...> -- "<prefix><item> · <item> ...", packed
+# into lines no wider than the popup, continuations indented under the first
+# item; an item is never split. Widths are counted in characters: awk's
+# length counts bytes on macOS, so UTF-8 continuation bytes are dropped
+# before measuring (· and › are multibyte).
+rw_pick_fold() {
+  local prefix="$1" cols
+  shift
   cols="$(rw_pick_cols)"
-  list="$(printf '%s\n' "$P_ROOT_PANE_LIST" | awk -F '\t' 'NF { printf "%s%s:%s.%s\001%s", (n++ ? ", " : ""), $3, $4, $5, $8 }')"
-  [ -n "$list" ] || return 0
-  printf '%s\n' "$list" | fold -s -w "$((cols - 7))" | tr '\001' ' ' |
-    awk '{ print (NR == 1 ? "moves: " : "       ") $0 }'
+  # Too little room after the prefix: the list starts on its own line.
+  if [ $((cols - ${#prefix})) -lt 30 ]; then
+    printf '%s\n' "${prefix% }"
+    prefix="  "
+  fi
+  printf '%s\n' "$@" | awk -v p="$prefix" -v w="$cols" '
+    function vlen(s,  t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+    { it[++n] = $0 }
+    END {
+      pad = ""; for (i = vlen(p); i > 0; i--) pad = pad " "
+      line = p; cur = vlen(p)
+      for (i = 1; i <= n; i++) {
+        piece = it[i] (i < n ? " ·" : "")
+        if (i > 1 && cur + 1 + vlen(piece) > w) { print line; line = pad piece; cur = vlen(line) }
+        else { line = line (i > 1 ? " " : "") piece; cur = vlen(line) }
+      }
+      print line
+    }'
+}
+
+# rw_pick_describe <key> -- what choosing the row <key> moves, one or more
+# lines (the header's last lines while that row is highlighted).
+rw_pick_describe() {
+  local key="$1" what="" n="${P_ROOT_PANES:-0}"
+  local -a items=()
+  case "$key" in
+    switch:* | release)
+      what="$P_AGENT"
+      if [ -z "$what" ] && [ -z "$P_HOST" ]; then
+        what="$(tmux display-message -p -t "$P_PANE" '#{pane_current_command}' 2>/dev/null)"
+      fi
+      if [ "$key" = release ]; then
+        printf 'only this pane%s comes back to this machine; no files move\n' "${what:+ ($what)}"
+      else
+        printf 'only this pane moves%s; no files move\n' "${what:+ ($what)}"
+      fi
+      ;;
+    handback)
+      if [ "$n" -gt 1 ]; then
+        printf 'moves %s panes and the files back to this machine\n' "$n"
+      else
+        printf 'moves this pane and the files back to this machine\n'
+      fi
+      ;;
+    handoff:*)
+      if [ "$n" -gt 1 ]; then
+        while IFS= read -r what; do [ -n "$what" ] && items+=("$what"); done < <(rw_pick_window_list)
+        rw_pick_fold "moves $n panes and the files: " "${items[@]}"
+      else
+        printf 'moves this pane and the files\n'
+      fi
+      ;;
+  esac
 }
 
 # rw_pick_header -- names the directory and the root; the hosts only when
@@ -398,9 +499,6 @@ rw_pick_header() {
   fi
   if [ -z "$P_OWNER" ] && [ -n "$P_ROOT" ] && [ "$P_ROOT_OK" != 1 ]; then
     rw_pick_warn "$root cannot be handed off: only directories under ~ (not ~ itself) can"
-  fi
-  if [ "${P_ROOT_PANES:-0}" -gt 1 ] && [ -n "$(rw_pick_handoff_aliases)" ]; then
-    rw_pick_moves_line
   fi
   return 0
 }
@@ -484,6 +582,13 @@ rw_pick_switch() {
   exit "$status"
 }
 
+# rw_pick_focus_header <hdr file> <desc file> <key> -- the fixed header
+# lines, then the description of <key>.
+rw_pick_focus_header() {
+  cat "$1" 2>/dev/null
+  awk -F '\t' -v k="$3" '$1 == k { sub(/^[^\t]*\t/, ""); print }' "$2" 2>/dev/null
+}
+
 # rw_pick_menu -- the S1 menu; prints the chosen key, nothing on abort.
 rw_pick_menu() {
   local rows header sel
@@ -494,18 +599,26 @@ rw_pick_menu() {
     rw_pick_notice "Remote workspace" "Nothing to offer here: no remote worker is configured in config.json ($RW_CONFIG_FILE)."
     return 1
   fi
-  header="$(rw_pick_header)"
+  # The fixed header lines, and each row's description (key<TAB>line), so
+  # the focus event only has to print files, never resolve the pane again.
+  rw_pick_header >"$rows.hdr"
+  cut -f1 "$rows" | while IFS= read -r key; do
+    rw_pick_describe "$key" | awk -v k="$key" '{ print k "\t" $0 }'
+  done >"$rows.desc"
+  header="$(rw_pick_focus_header "$rows.hdr" "$rows.desc" "$(head -n1 "$rows" | cut -f1)")"
   # --color=header: a muted overlay grey, replacing the red the user's
   # FZF_DEFAULT_OPTS would otherwise give it. --ansi: the status markers and
-  # warning lines carry their own colors.
+  # warning lines carry their own colors. focus: the header's last lines
+  # describe the highlighted row ({1} is its key).
   sel="$(rw_pick_render <"$rows" | "$RW_FZF" \
     --layout=reverse --info=inline --no-sort --no-multi --ansi \
     --prompt='rw ⇒ ' \
     --color='header:#9399b2' \
     --header="$header" \
     --delimiter=$'\t' --with-nth=2.. \
-    --bind "start:reload-sync:$(printf '%q' "$RW_PICK_SELF") probe-rows $(printf '%q' "$rows")")"
-  rm -f "$rows"
+    --bind "start:reload-sync:$(printf '%q' "$RW_PICK_SELF") probe-rows $(printf '%q' "$rows")" \
+    --bind "focus:transform-header:$(printf '%q' "$RW_PICK_SELF") focus-header $(printf '%q' "$rows.hdr") $(printf '%q' "$rows.desc") {1}")"
+  rm -f "$rows" "$rows.hdr" "$rows.desc"
   sel="${sel%%$'\t'*}"
   [ -n "$sel" ] || return 1
   printf '%s\n' "$sel"
@@ -554,6 +667,11 @@ case "$mode" in
     fi
     ;;
   render) rw_pick_render ;;
+  focus-header) rw_pick_focus_header "${2:?}" "${3:?}" "${4:-}" ;;
+  describe)
+    rw_pick_context "${2:?rw-picker: describe needs a pane id}"
+    rw_pick_describe "${3:?rw-picker: describe needs a row key}"
+    ;;
   rows)
     rw_pick_context "${2:?rw-picker: rows needs a pane id}"
     rw_pick_rows
