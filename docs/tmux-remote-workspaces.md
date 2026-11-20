@@ -20,9 +20,9 @@ is the command and operational reference.
 
 New shells, windows, and agents start locally. `prefix e` opens one menu for
 the focused pane. Its first rows move only that pane to another host (a soft
-switch). Its last row transfers the pane's root: it hands the root off to a
-remote, or hands it back when a remote owns it, whichever pane it is pressed
-from. A handoff (that row, or `rw handoff --worker <alias>`) moves every pane
+switch). Its last rows transfer the pane's root: one row per remote hands the
+root off to it, or one row hands it back when a remote owns it, whichever pane
+it is pressed from. A handoff (such a row, or `rw handoff --worker <alias>`) moves every pane
 on the laptop server whose cwd is the root or inside it, in any session and
 at any depth. The rest of a mixed session stays local. Transfers run in the
 background (`rw bg`), so the popup closes as soon as the choice is made. See
@@ -195,7 +195,10 @@ UI and log strings say `remote`, never a host name.
 Nothing is replaced until every check that can refuse has run:
 
 1. Resolve the root (exit 7) and preflight the worker (exit 6 when
-   unreachable). Run any pending action recorded for that worker.
+   unreachable). Run any pending action recorded for that worker. Before
+   the root is locked, refuse (exit 1; `rw bg handoff` refuses the same way
+   with exit 7, inline in the `prefix e` picker) when a local agent pane
+   launched outside the root is working inside it, as below.
 2. Per pane: detect a supported agent, refuse a busy pane that is neither a
    shell, an editor, nor a recognized agent session, and check the provider
    version policy. One version block (exit 3) aborts the whole handoff.
@@ -207,13 +210,38 @@ Nothing is replaced until every check that can refuse has run:
    only after the remote resume is confirmed. Then write the endpoint and
    replace the pane with its attach loop.
 
+Off-root agent guard. A hand-off moves the panes whose `pane_current_path`
+is the root or inside it. That is the directory of the pane's foreground
+process, and Claude Code never changes its own, so an agent started outside
+the root that later `cd`s into it keeps reporting its launch directory. It
+would not move, and would keep writing the root here while the worker owns
+it. So the hand-off refuses, naming the pane, and never tries to move the
+agent: `rw: <session:window.pane> runs claude working in <dir> (started in
+<dir>); it would keep writing <root> on this machine. Stop it or start it
+inside <root>, then hand off.` (`(and N more)` follows the pane name when
+several qualify.) The agent's directory is the last non-null `cwd` in the
+tail (200 lines) of its Claude transcript, found through the adapter's
+`transcript-path`. A local pane with a live `@agent_pid` and `@agent_kind`
+`claude` that is not inside the root counts when that directory is the root
+or below it. Any failure to read it (no recorded session, no transcript, an
+adapter error) lets the hand-off proceed. pi sessions record their directory
+once, in the header, so pi panes are not checked. Not covered: an agent
+inside the root whose own directory is outside it (it moves, and loses
+access to that directory), and edits by absolute path, which leave no
+directory trace. See `docs/tasks/remote-owned-directories.md`, "Off-root
+agent guard".
+
 An editor pane (nvim, vim, vi) is not left as a bare remote shell: its
 editor is reopened in the worker pane, from the Neovim session that
 `tmux_workspace_resurrect.lua` registers (refreshed over its RPC socket, so
 buffers, windows and tabs come back), or else from the editor's own argv,
-with paths inside the root rewritten to the worker root. Unsaved buffer
-contents never travel (the picker warns first), and an editor that cannot
-be confirmed only prints the command to run, it never fails the handoff.
+with paths inside the root rewritten to the worker root. Unsaved buffers
+travel too: the session carries each buffer's text and modified flag (the
+buffer names inside it are rewritten like the other paths), so the reopened
+editor shows the unsaved text over the synced file. Only what is typed
+between the capture and the source pane being replaced (seconds) is lost.
+An editor that cannot be confirmed only prints the command to run, it never
+fails the handoff.
 
 A pane that is already visiting the target worker inside the root (a soft
 switch put it there) is not moved again. The handoff adopts it: its endpoint
@@ -376,37 +404,51 @@ parentheses where the menu has to tell remotes apart.
 `prefix e` opens one popup for the focused pane. It first works out the pane's
 directory: a local pane's own, or a remote pane's live directory on the
 worker, asked over one ssh with a hard deadline. It then finds the root, the
-owner and the pane host, and names them in a two-line header (the directory and
-its root, then `pane on <host>` and `owned by <host>`). A warning line follows
-when an editor is involved, because unsaved buffers do not travel.
+owner and the pane host. The popup keeps its size (70% by 60%); the content
+is what fits it, so no row is padded to a common width and no label carries
+the root's path.
+
+The header is a muted grey, not the red the shell's `FZF_DEFAULT_OPTS` would
+give it. Its first line names the directory and its root (`<dir> (root)` or
+`<dir>  ·  root <root>`). A second line, `pane on <host>  ·  owned by <host>`,
+appears only when the two differ, or when the pane's remote is unreachable or
+no longer in `config.json`. Warnings are yellow: an unreachable remote, a
+directory only the remote has, a root that cannot be handed off (outside `~`
+or `~` itself). When a hand-off row is offered and more than one pane would
+move, a line `moves: <session>:<window>.<pane> <command>, ...` names them,
+folded to the popup's width.
+
+Each row starts with a reachability marker, then the label, then a short note
+when there is one: a grey `…` while the remote is being probed, a green `●`
+online, a red `○` offline, and nothing for a row that needs no remote (this
+machine, hand back, release). The marker fills in without moving the cursor.
+There is no editor warning: unsaved buffers travel with the pane.
 
 The rows, in order:
 
 1. Soft-switch rows, one for every host except the pane's own: this machine
    and each configured remote. The owner comes first, marked `(owner)`, so
    enter picks it. Then this machine, then the other remotes in `config.json`
-   order. Remote rows show `online` or `offline` once probed, without moving
-   the cursor. When the pane has an agent and the destination is not the
-   owner, the row warns that the agent will work on a copy that does not own
-   the directory.
-2. One full-transfer row last. Its direction comes from the owner, not from
-   where the pane runs. When a remote owns the root, it reads "hand back
-   `<root>` to this machine", from a local pane or a remote one alike. When
-   this machine owns the root, it reads "hand off `<root>` to remote". Either
-   label adds the number of panes that move when more than one does. The root
-   is the one the header names, even if the pane has since changed directory.
-   The hand-off row is absent when the root is outside `~` or is `~` itself
-   (the header says so), when the directory exists only on the remote with
-   nothing enclosing it here to hand off, and when no worker is configured.
+   order. When the pane has an agent and the destination is not the owner,
+   the row says `⚠ agent would work on a non-owner copy`.
+2. The full-transfer rows last. Their direction comes from the owner, not from
+   where the pane runs. When a remote owns the root, one row reads "hand back
+   to this machine", from a local pane or a remote one alike. When this
+   machine owns the root, there is one row per configured remote, "hand off to
+   `<alias>`", so with several remotes each choice names where it goes (the
+   pane's own remote first). Either label adds `(N panes)` when more than one
+   pane moves. The root is the one the header names, even if the pane has
+   since changed directory. The hand-off rows are absent when the root is
+   outside `~` or is `~` itself (the header says so), when the directory
+   exists only on the remote with nothing enclosing it here to hand off, and
+   when no remote is configured.
 
 Choosing a row is the confirmation. There is no yes or no prompt, including
-for a hand-back, and `esc` runs nothing. A hand-off asks which remote only
-when several are configured, listing the pane's own remote first, and the
-chooser is skipped when there is exactly one. Transfers start in the
-background and the popup closes. A soft switch runs in the popup, since it is
-quick. A refusal that `rw bg` finds at once, such as a root already moving,
-shows in the popup as a notice. Later conflicts and failures open their
-dialogs as before.
+for a hand-back, and `esc` runs nothing. There is no second menu to pick the
+remote. Transfers start in the background and the popup closes. A soft switch
+runs in the popup, since it is quick. A refusal that `rw bg` finds at once,
+such as a root already moving, shows in the popup as a notice. Later
+conflicts and failures open their dialogs as before.
 
 If the pane's remote does not answer within the probe deadline, or its alias
 is no longer in `config.json`, the header says so and the menu changes. No
@@ -419,8 +461,8 @@ ownership record but stays registered with a pending close. Whatever still
 runs on the remote, including an agent, is stopped by the next contact with
 that remote (any handoff, hand-back, open, switch or forget), and restore
 never reattaches that endpoint. Release changes no ownership, and a transfer
-row that needs the dead remote (a hand-back to it, a hand-off with no other
-remote) is left out. `rw reclaim --force` is the separate way to take a
+row that needs the dead remote (a hand-back to it, a hand-off to it) is left
+out. `rw reclaim --force` is the separate way to take a
 remote-owned root back. A reachable remote ignores `--force`, so the same
 command is then a normal switch.
 
@@ -448,7 +490,8 @@ export, install and resume as a handoff without the directory sync, and the
 source agent stops only after the destination resume is confirmed, so there
 are never two writers and never zero. If anything fails before then, the new
 endpoint is discarded and the source is untouched. An editor (nvim, vim, vi)
-reopens on the destination, best effort, and unsaved buffers never travel.
+reopens on the destination, best effort, and its unsaved buffers travel with
+it (paths in the session rewritten to the destination root).
 Files and ownership do not move. After a soft switch away from the owner, the
 pane works on whatever copy the destination has, which may be stale.
 
@@ -678,7 +721,7 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 
 | Action | Behavior |
 | --- | --- |
-| `prefix e` | One menu for the focused pane: soft-switch rows (this machine and each remote except the pane's own host), then one transfer row, hand back when a remote owns the root, hand off otherwise. Choosing a row is the confirmation. Transfers run in the background |
+| `prefix e` | One menu for the focused pane: soft-switch rows (this machine and each remote except the pane's own host), then the transfer rows: hand back when a remote owns the root, one "hand off to `<alias>`" row per remote otherwise. Each remote row shows a reachability marker. Choosing a row is the confirmation. Transfers run in the background |
 | `prefix c` | New window on the pane's host: local from a local pane, the same remote from a remote pane |
 | `prefix \\` / `prefix /` | Split on the pane's host, with the same rule as `prefix c` |
 | `prefix q` | Close the focused endpoint through tombstone-first teardown, otherwise kill a plain pane |
@@ -749,7 +792,8 @@ new window follows the owner of its root.
 - `scripts/resolve-workspace.sh` resolves a root and its `~`-relative worker
   placement without SSH.
 - `scripts/rw-picker.sh` implements the `prefix e` popup: the soft-switch
-  and transfer rows, the release row, and the hand-off worker chooser. It
+  and transfer rows (one hand-off row per worker), the release row, and the
+  reachability markers. It
   calls only `rw switch`, `rw bg handoff` and `rw bg handback`, and never
   creates endpoints itself.
 - `libexec/rw-bg` is `rw bg`: the synchronous check, the `setsid` detach

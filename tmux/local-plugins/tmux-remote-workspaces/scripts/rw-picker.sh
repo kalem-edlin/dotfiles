@@ -17,27 +17,39 @@
 # row). The owner host is that record's worker, else this machine; the pane
 # host is @remote-host, else this machine.
 #
-# The menu (fzf, the worker chooser's look), its header naming the directory,
-# the root, the pane host and the owner host:
+# The menu (fzf), its header naming the directory and the root. Every row is
+# one short line, never padded to a common width (the popup is a fixed size
+# and a long label used to push the reachability status off its right edge):
+#   <marker> <label>  <note>
+# The marker is the first thing on a row: `…` (grey) while the destination
+# is being probed, a green `●` online, a red `○` offline, two spaces for a
+# row that needs no remote (this machine, hand back, release). The rows:
 #   - soft-switch rows first, one per host other than the pane's own (this
 #     machine and every configured worker), the owner first, so enter picks
 #     it: `rw switch --pane <origin> --to <alias|local> --dir <dir>`. Only
 #     the pane changes host; no files move. With an agent in the pane, a row
-#     whose destination is not the owner warns that the agent would work on
-#     a copy that does not own the directory.
-#   - the full-transfer row last. A worker-owned root: "hand back <root> to
-#     this machine" (`rw bg handback --pane <origin> --root <root>`), from
-#     any pane, local or remote. A root this machine owns: "hand off <root>
-#     to remote", then the worker chooser, skipped when exactly one worker
-#     is configured (`rw bg handoff --worker <alias> --pane <origin> --root
-#     <root>`). --root is always the root the label names, so a pane that
-#     cd'd out of the root it was opened in moves the root it is in now.
+#     whose destination is not the owner carries the note `⚠ agent would work
+#     on a non-owner copy`.
+#   - the full-transfer rows last. A worker-owned root: one `hand back to
+#     this machine` row (`rw bg handback --pane <origin> --root <root>`),
+#     from any pane, local or remote. A root this machine owns: one `hand
+#     off to <alias>` row per configured worker (`rw bg handoff --worker
+#     <alias> --pane <origin> --root <root>`), the pane's own worker first.
+#     Either label ends with `(N panes)` when more than one pane moves.
+#     --root is always the root the header names, so a pane that cd'd out of
+#     the root it was opened in moves the root it is in now.
 #   - a remote pane whose remote is unreachable (or no longer in
 #     config.json) gets no soft-switch row (each needs that remote) but
 #     "release this pane to this machine (remote unreachable)" first: `rw
 #     switch --pane <origin> --to local --force`. A transfer row that needs
-#     that remote (a hand-back to it, a hand-off with no other worker) is
-#     left out too.
+#     that remote (a hand-back to it, a hand-off to it) is left out too.
+# The header (muted, --color=header:..., not the user's FZF_DEFAULT_OPTS
+# red): line 1 is `<dir> (root)` or `<dir>  ·  root <root>`; `pane on <host>
+# ·  owned by <host>` follows only when the two hosts differ or the pane's
+# remote is unreachable or unconfigured; warnings (unreachable remote, a
+# directory only the remote has, a root that cannot be handed off) are
+# yellow; when a hand-off row is offered and more than one pane would move,
+# `moves: <session>:<window>.<pane> <command>, ...` names them.
 # Choosing a row is the confirmation; there is no y/n. Esc moves nothing.
 #
 # The picker runs only `rw switch`, `rw bg handoff` and `rw bg handback`
@@ -60,24 +72,26 @@
 # client), so rw_dialog cannot be used here.
 #
 # Modes (self-invocations; the binding only ever calls `pick`):
-#   pick [pane]        act on <pane> (the binding passes #{pane_id}); with
-#                      no pane, the popup client's active pane
-#   rows <pane>        print the menu rows (key<TAB>label<TAB>status<TAB>note)
-#   header <pane>      print the menu header
-#   probe-rows <file>  the rows in <file> with live reachability filled in
-#   list               emit worker lines instantly (reachability pending)
-#   probe              emit the same lines with live online/offline status
+#   pick [pane]               act on <pane> (the binding passes #{pane_id});
+#                             with no pane, the popup client's active pane
+#   rows <pane>               print the menu rows, machine form:
+#                             key<TAB>status<TAB>label<TAB>note, status one
+#                             of none, pending, online, offline
+#   header <pane>             print the menu header (with ANSI colors)
+#   render                    rows on stdin -> what fzf shows:
+#                             key<TAB>marker, label and note (with ANSI)
+#   probe-rows <file> [--raw] the rows in <file> with live reachability
+#                             filled in, rendered (--raw: machine form)
 #
-# Both menus render immediately; fzf's start event reloads them from the
-# probe modes (parallel `ssh -o BatchMode=yes` probes bounded by the
-# config's status timeout), so reachability fills in without delaying the
-# popup. The menu reloads with reload-sync and probe-rows keeps the row
-# order, so the first row (the owner) stays under the cursor. In the worker
-# chooser, typed text that matches no listed worker is passed through as an
-# alias on enter (--print-query); rw rejects aliases not in config.json.
+# The menu renders immediately; fzf's start event reloads it from probe-rows
+# (one parallel `ssh -o BatchMode=yes` probe per distinct worker, bounded by
+# the config's status timeout), so reachability fills in without delaying
+# the popup. The menu reloads with reload-sync and probe-rows keeps the row
+# order, so the first row (the owner) stays under the cursor.
 #
 # Test seams: RW_PICKER_RW_BIN (the rw to run), RW_PICKER_FZF (the fzf),
-# RW_PICKER_STUBS (a file sourced after roots.sh: stand-ins for its helpers).
+# RW_PICKER_COLS (the popup width, else the tty's), RW_PICKER_STUBS (a file
+# sourced after roots.sh: stand-ins for its helpers).
 
 set -uo pipefail
 
@@ -96,74 +110,11 @@ mode="${1:-pick}"
 RW_BIN="${RW_PICKER_RW_BIN:-$SCRIPT_DIR/rw}"
 RW_FZF="${RW_PICKER_FZF:-fzf}"
 RW_PICK_SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
-RW_PICK_AGENT_WARNING="⚠ the agent will work on a copy that does not own this directory"
-
-# --- Worker list (the handoff chooser) ----------------------------------------
-
-worker_line() { # alias platform status notes
-  printf '%s\t[%s]\t%s\t%s\n' "$1" "$2" "$3" "$4"
-}
-
-# Configured workers, as alias<TAB>platform<TAB>notes; $RW_PICK_FIRST (an
-# alias) is listed first when set.
-rw_pick_workers_tsv() {
-  jq -r --arg first "${RW_PICK_FIRST:-}" '
-    .workers // [] | (map(select(.alias == $first)) + map(select(.alias != $first)))[]
-    | [.alias, .platform, (.notes // "")] | @tsv' "$RW_CONFIG_FILE"
-}
+RW_PICK_AGENT_WARNING="⚠ agent would work on a non-owner copy"
 
 # rw_pick_worker_aliases -- one configured alias per line, config order.
 rw_pick_worker_aliases() {
   jq -r '.workers // [] | .[].alias' "$RW_CONFIG_FILE" 2>/dev/null
-}
-
-list_workers() {
-  rw_pick_workers_tsv |
-    while IFS=$'\t' read -r alias platform notes; do
-      worker_line "$alias" "$platform" "…" "$notes"
-    done
-}
-
-# Each probe prints its own finished line (one printf, atomic well under
-# PIPE_BUF) so fzf's reload streams results in completion order: reachable
-# workers appear in ~a round trip instead of every row waiting out the
-# slowest host's timeout (2026-08-05).
-probe_workers() {
-  local alias platform notes
-  while IFS=$'\t' read -r alias platform notes; do
-    (
-      if rw_ssh_batch "$alias" "$(rw_ssh_status_timeout)" true >/dev/null 2>&1; then
-        worker_line "$alias" "$platform" "online" "$notes"
-      else
-        worker_line "$alias" "$platform" "offline" "$notes"
-      fi
-    ) &
-  done < <(rw_pick_workers_tsv)
-  wait
-}
-
-# rw_pick_worker_menu <prompt> <header>
-# fzf over the worker list. Prints the chosen (or typed, unmatched) alias;
-# prints nothing and returns 1 on abort (esc/ctrl-c) or an empty pick.
-rw_pick_worker_menu() {
-  local prompt="$1" header="$2" out status sel alias
-  out="$(list_workers | "$RW_FZF" \
-    --layout=reverse --info=inline \
-    --prompt="$prompt" \
-    --header="$header" \
-    --delimiter=$'\t' \
-    --print-query \
-    --bind "start:reload:$(printf '%q' "$RW_PICK_SELF") probe")"
-  status=$?
-  case "$status" in
-    0) sel="$(printf '%s\n' "$out" | tail -n1)" ;; # picked a listed worker
-    1) sel="$(printf '%s\n' "$out" | head -n1)" ;; # typed alias, no match
-    *) return 1 ;;                                 # aborted (esc / ctrl-c)
-  esac
-  alias="${sel%%$'\t'*}"
-  alias="${alias//[[:space:]]/}"
-  [ -n "$alias" ] || return 1
-  printf '%s\n' "$alias"
 }
 
 # --- Display helpers ----------------------------------------------------------
@@ -202,7 +153,7 @@ rw_pick_notice() {
 # rw_pick_cols -- the popup's width less a margin, for wrapping notices.
 rw_pick_cols() {
   local cols
-  cols="$(stty size </dev/tty 2>/dev/null | awk '{print $2}')"
+  cols="${RW_PICKER_COLS:-$(stty size </dev/tty 2>/dev/null | awk '{print $2}')}"
   case "$cols" in '' | *[!0-9]*) cols=80 ;; esac
   [ "$cols" -gt 20 ] || cols=80
   printf '%d\n' $((cols - 4))
@@ -225,14 +176,14 @@ rw_pick_failure_dialog() {
 #   P_PANE P_HOST (alias, or "" for this machine) P_DIR P_ROOT (may be ""
 #   when the directory exists only on the remote) P_ROOT_ID (worker-owned
 #   record, or "") P_OWNER (alias, or "") P_AGENT (claude|pi or "")
-#   P_EDITOR (nvim|vim|vi or "", local or remote) P_ROOT_OK (1 when the root
-#   may be handed off: under ~, not ~) P_ROOT_PANES (panes that move with a
-#   transfer) P_ROOT_EDITORS (editors among them) P_UNREACHABLE ("",
-#   "unreachable", or "unconfigured" when @remote-host is not in
-#   config.json) P_REMOTE_ONLY (1 when neither the directory nor a root
-#   enclosing it exists on this machine)
+#   P_ROOT_OK (1 when the root may be handed off: under ~, not ~)
+#   P_ROOT_PANES (panes that move with a transfer) P_ROOT_PANE_LIST (a
+#   hand-off's panes, rw_root_panes lines) P_UNREACHABLE ("", "unreachable",
+#   or "unconfigured" when @remote-host is not in config.json)
+#   P_REMOTE_ONLY (1 when neither the directory nor a root enclosing it
+#   exists on this machine)
 rw_pick_context() {
-  local pane="$1" line="" rc kind pid cmd="" panes eps base
+  local pane="$1" line="" rc kind pid panes eps base
   P_PANE="$pane"
   P_HOST="$(rw_pane_get "$pane" @remote-host)"
   P_DIR="" P_UNREACHABLE="" P_REMOTE_ONLY=0
@@ -241,24 +192,19 @@ rw_pick_context() {
       P_UNREACHABLE=unconfigured # never ssh to an alias config.json dropped
     else
       # One ssh with a hard deadline (I3): the live cwd (a pane_title can
-      # lag a worker-side cd by over a minute) and the foreground command.
+      # lag a worker-side cd by over a minute).
       line="$(rw_pane_remote_probe "$pane" 2>/dev/null)"
       rc=$?
       case "$rc" in
-        0)
-          P_DIR="${line%%$'\t'*}"
-          case "$line" in *$'\t'*) cmd="${line#*$'\t'}" ;; esac
-          ;;
+        0) P_DIR="${line%%$'\t'*}" ;;
         6) P_UNREACHABLE=unreachable ;;
       esac
     fi
-  else
-    cmd="$(tmux display-message -pt "$pane" -F '#{pane_current_command}' 2>/dev/null || true)"
   fi
   # The title, else the endpoint's focus path, else pane_current_path.
   [ -n "$P_DIR" ] || P_DIR="$(rw_pane_dir "$pane")"
 
-  P_ROOT_ID="" P_OWNER="" P_ROOT="" P_ROOT_OK=0 P_ROOT_PANES=0 P_ROOT_EDITORS=0
+  P_ROOT_ID="" P_OWNER="" P_ROOT="" P_ROOT_OK=0 P_ROOT_PANES=0 P_ROOT_PANE_LIST=""
   if [ -n "$P_DIR" ] && line="$(rw_owner_for_path "$P_DIR" 2>/dev/null)" && [ -n "$line" ]; then
     IFS=$'\t' read -r P_ROOT_ID P_OWNER P_ROOT <<<"$line"
     # The panes a hand-back moves: those bound to one of the record's
@@ -292,14 +238,14 @@ rw_pick_context() {
     # Local panes only: they are what a hand-off moves; a remote (visit)
     # pane in the root keeps its own endpoint.
     panes="$(rw_root_panes "$P_ROOT" | awk -F '\t' '$6 == ""')"
+    P_ROOT_PANE_LIST="$panes"
     P_ROOT_PANES="$(printf '%s\n' "$panes" | grep -c . || true)"
-    P_ROOT_EDITORS="$(printf '%s\n' "$panes" | awk -F '\t' '$8 == "nvim" || $8 == "vim" || $8 == "vi"' | grep -c . || true)"
   fi
 
   # An agent in the pane: a remote pane's mirrored @agent_kind (B2 clears it
   # when the worker agent is gone); a local pane's, while its @agent_pid
   # lives.
-  P_AGENT="" P_EDITOR=""
+  P_AGENT=""
   kind="$(rw_pane_get "$pane" @agent_kind)"
   if [ -n "$kind" ]; then
     if [ -n "$P_HOST" ]; then
@@ -309,27 +255,36 @@ rw_pick_context() {
       [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && P_AGENT="$kind"
     fi
   fi
-  # A local pane's pane_current_command, a remote pane's from the probe.
-  case "$cmd" in nvim | vim | vi) P_EDITOR="$cmd" ;; esac
   return 0
-}
-
-# rw_pick_other_worker -- true when a worker other than the pane's own is
-# configured (a hand-off that need not go to an unreachable pane host).
-rw_pick_other_worker() {
-  rw_pick_worker_aliases | grep -qvxF -- "$P_HOST"
 }
 
 # --- The menu -----------------------------------------------------------------
 
-# rw_pick_rows -- the menu rows for the resolved context, one per line:
-#   key<TAB>label<TAB>status<TAB>note
-# key: switch:local, switch:<alias>, handback or handoff. status: "…" on a
-# worker row until probe-rows fills it in. Labels are padded to one width so
-# the status column lines up.
+# rw_pick_handoff_aliases -- the workers a hand-off row is offered for, one
+# alias per line: none unless this machine owns a root under ~ and a worker
+# is configured. The pane's own worker comes first (when it answers); an
+# unreachable pane host gets no row (the hand-off could not run), the other
+# workers still do.
+rw_pick_handoff_aliases() {
+  local w
+  { [ -z "$P_OWNER" ] && [ "$P_ROOT_OK" = 1 ]; } || return 0
+  if [ -n "$P_HOST" ] && [ -z "$P_UNREACHABLE" ]; then printf '%s\n' "$P_HOST"; fi
+  while IFS= read -r w; do
+    [ -n "$w" ] && [ "$w" != "$P_HOST" ] && printf '%s\n' "$w"
+  done < <(rw_pick_worker_aliases)
+  return 0
+}
+
+# rw_pick_rows -- the menu rows for the resolved context, one per line, in
+# machine form:
+#   key<TAB>status<TAB>label<TAB>note
+# key: switch:local, switch:<alias>, handback, handoff:<alias> or release.
+# status: none (nothing remote to reach), or pending on a row whose
+# destination is a worker, until probe-rows sets online or offline. The
+# labels carry no root path (the header names it) and no padding.
 rw_pick_rows() {
   local -a keys=() labels=() notes=() dests=()
-  local d w i width=0 label note status
+  local d w i label note status
   if [ -n "$P_UNREACHABLE" ]; then
     # Every soft switch needs the pane's own remote (rw switch exits 6);
     # releasing the pane to a local shell does not (I4).
@@ -356,29 +311,66 @@ rw_pick_rows() {
   if [ -n "$P_OWNER" ]; then
     # A hand-back to an unreachable pane host cannot run: no row.
     if [ -z "$P_UNREACHABLE" ] || [ "$P_OWNER" != "$P_HOST" ]; then
-      label="hand back $(rw_pick_tilde "$P_ROOT") to this machine"
-      [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label ($(rw_pick_plural "$P_ROOT_PANES" pane) come back)"
+      label="hand back to this machine"
+      [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label (${P_ROOT_PANES} panes)"
       keys+=(handback) labels+=("$label") notes+=("")
     fi
-  elif [ "$P_ROOT_OK" = 1 ] && [ -n "$(rw_pick_worker_aliases)" ] &&
-    { [ -z "$P_UNREACHABLE" ] || rw_pick_other_worker; }; then
-    label="hand off $(rw_pick_tilde "$P_ROOT") to remote"
-    [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label ($(rw_pick_plural "$P_ROOT_PANES" pane) move)"
-    keys+=(handoff) labels+=("$label") notes+=("")
+  else
+    while IFS= read -r w; do
+      [ -n "$w" ] || continue
+      label="hand off to $w"
+      [ "${P_ROOT_PANES:-0}" -gt 1 ] && label="$label (${P_ROOT_PANES} panes)"
+      keys+=("handoff:$w") labels+=("$label") notes+=("")
+    done < <(rw_pick_handoff_aliases)
   fi
 
-  for label in "${labels[@]+"${labels[@]}"}"; do
-    [ "${#label}" -gt "$width" ] && width="${#label}"
-  done
   for i in "${!keys[@]}"; do
-    status=""
-    case "${keys[$i]}" in switch:local | handback | handoff | release) ;; switch:*) status="…" ;; esac
-    printf '%s\t%-*s\t%s\t%s\n' "${keys[$i]}" "$width" "${labels[$i]}" "$status" "${notes[$i]}"
+    status=none
+    case "${keys[$i]}" in switch:local | handback | release) ;; switch:* | handoff:*) status=pending ;; esac
+    printf '%s\t%s\t%s\t%s\n' "${keys[$i]}" "$status" "${labels[$i]}" "${notes[$i]}"
   done
 }
 
-# rw_pick_header -- names the directory, the root, the pane host and the
-# owner host; then what a choice would cost.
+# rw_pick_render -- machine rows on stdin -> the rows fzf shows (--ansi):
+#   key<TAB><marker> <label>  <note>
+# The marker is one cell plus a space, so labels line up whatever the status.
+rw_pick_render() {
+  awk -F '\t' '
+    BEGIN {
+      rst = "\033[0m"
+      grey = "\033[38;2;108;112;134m"; green = "\033[38;2;166;227;161m"
+      red = "\033[38;2;243;139;168m"; yellow = "\033[38;2;249;226;175m"
+    }
+    {
+      m = "  "
+      if ($2 == "pending") m = grey "…" rst " "
+      else if ($2 == "online") m = green "●" rst " "
+      else if ($2 == "offline") m = red "○" rst " "
+      line = m $3
+      if ($4 != "") line = line "  " yellow $4 rst
+      print $1 "\t" line
+    }'
+}
+
+# rw_pick_warn <text> -- one header line in warning yellow.
+rw_pick_warn() { printf '\033[38;2;249;226;175m%s\033[0m\n' "$1"; }
+
+# rw_pick_moves_line -- `moves: <session>:<window>.<pane> <command>, ...`, the
+# local panes a hand-off moves, folded to the popup width (a continuation is
+# indented under the first name). A pane's session:window.pane and its
+# command stay on one line (the joining space is a placeholder for fold).
+rw_pick_moves_line() {
+  local list cols
+  cols="$(rw_pick_cols)"
+  list="$(printf '%s\n' "$P_ROOT_PANE_LIST" | awk -F '\t' 'NF { printf "%s%s:%s.%s\001%s", (n++ ? ", " : ""), $3, $4, $5, $8 }')"
+  [ -n "$list" ] || return 0
+  printf '%s\n' "$list" | fold -s -w "$((cols - 7))" | tr '\001' ' ' |
+    awk '{ print (NR == 1 ? "moves: " : "       ") $0 }'
+}
+
+# rw_pick_header -- names the directory and the root; the hosts only when
+# they differ or the remote cannot be reached; warnings in yellow; the panes
+# a hand-off would move.
 rw_pick_header() {
   local dir root host
   dir="$(rw_pick_tilde "$P_DIR")"
@@ -390,74 +382,61 @@ rw_pick_header() {
   else
     printf '%s  ·  root %s\n' "$dir" "$root"
   fi
-  host="$(rw_pick_host_name "$P_HOST")"
-  case "$P_UNREACHABLE" in
-    unreachable) host="$host, remote unreachable" ;;
-    unconfigured) host="$host, not in config.json" ;;
-  esac
-  printf 'pane on %s  ·  owned by %s\n' "$host" "$(rw_pick_host_name "$P_OWNER")"
+  if [ "$P_HOST" != "$P_OWNER" ] || [ -n "$P_UNREACHABLE" ]; then
+    host="$(rw_pick_host_name "$P_HOST")"
+    case "$P_UNREACHABLE" in
+      unreachable) host="$host, remote unreachable" ;;
+      unconfigured) host="$host, not in config.json" ;;
+    esac
+    printf 'pane on %s  ·  owned by %s\n' "$host" "$(rw_pick_host_name "$P_OWNER")"
+  fi
   if [ -n "$P_UNREACHABLE" ]; then
-    printf 'the directory is the last one it reported; switching needs the remote, releasing does not\n'
+    rw_pick_warn 'the directory is the last one it reported; switching needs the remote, releasing does not'
   fi
   if [ "$P_REMOTE_ONLY" = 1 ]; then
-    printf '%s exists only on %s: nothing on this machine to hand off\n' "$dir" "$(rw_pick_host_name "$P_HOST")"
-  fi
-  [ -n "$P_EDITOR" ] && printf '%s reopens on the destination, but unsaved buffers do not travel: save first\n' "$P_EDITOR"
-  if [ -z "$P_OWNER" ] && [ "${P_ROOT_EDITORS:-0}" -gt 0 ] && [ -z "$P_EDITOR" ]; then
-    printf 'a hand-off moves editors too, but unsaved buffers do not: save first\n'
+    rw_pick_warn "$dir exists only on $(rw_pick_host_name "$P_HOST"): nothing on this machine to hand off"
   fi
   if [ -z "$P_OWNER" ] && [ -n "$P_ROOT" ] && [ "$P_ROOT_OK" != 1 ]; then
-    printf '%s cannot be handed off: only directories under ~ (not ~ itself) can\n' "$root"
+    rw_pick_warn "$root cannot be handed off: only directories under ~ (not ~ itself) can"
+  fi
+  if [ "${P_ROOT_PANES:-0}" -gt 1 ] && [ -n "$(rw_pick_handoff_aliases)" ]; then
+    rw_pick_moves_line
   fi
   return 0
 }
 
-# probe_rows <rows file> -- the same rows, in the same order, each worker
-# row's status set to online or offline. Probes run in parallel; the rows
-# are printed once all have answered (fzf reload-sync keeps the instant list
-# until then), so the order and the cursor never move.
+# probe_rows <rows file> -- the same machine rows, in the same order, each
+# worker row's status set to online or offline. One probe per distinct
+# worker (a switch row and a hand-off row for it share the answer), in
+# parallel; the rows are printed once all have answered (fzf reload-sync
+# keeps the instant list until then), so the order and the cursor never move.
 probe_rows() {
-  local file="$1" dir n=0 key line label note alias
+  local file="$1" dir n=0 alias
   dir="$(mktemp -d "${TMPDIR:-/tmp}/rw-picker-probe.XXXXXX")" || {
     cat "$file"
     return 0
   }
-  while IFS= read -r line; do
-    key="${line%%$'\t'*}"
+  while IFS= read -r alias; do
+    [ -n "$alias" ] || continue
     n=$((n + 1))
-    case "$key" in
-      switch:local | handback | handoff | release | '') ;;
-      switch:*)
-        alias="${key#switch:}"
-        (
-          if rw_ssh_batch "$alias" "$(rw_ssh_status_timeout)" true >/dev/null 2>&1; then
-            echo online >"$dir/$n"
-          else
-            echo offline >"$dir/$n"
-          fi
-        ) &
-        ;;
-    esac
-  done <"$file"
+    (
+      if rw_ssh_batch "$alias" "$(rw_ssh_status_timeout)" true >/dev/null 2>&1; then
+        printf '%s\tonline\n' "$alias" >"$dir/r.$n"
+      else
+        printf '%s\toffline\n' "$alias" >"$dir/r.$n"
+      fi
+    ) &
+  done < <(awk -F '\t' '$1 ~ /^(switch|handoff):/ { a = $1; sub(/^[^:]*:/, "", a); if (a != "local" && !(a in seen)) { seen[a] = 1; print a } }' "$file")
   wait
-  n=0
-  while IFS= read -r line; do
-    n=$((n + 1))
-    if [ -f "$dir/$n" ]; then
-      # Split by hand: `read` would trim the label's padding and collapse
-      # the empty status field.
-      key="${line%%$'\t'*}"
-      line="${line#*$'\t'}"
-      label="${line%%$'\t'*}"
-      line="${line#*$'\t'}"
-      note="${line#*$'\t'}"
-      printf '%s\t%s\t%s\t%s\n' "$key" "$label" "$(cat "$dir/$n")" "$note"
-    else
-      printf '%s\n' "$line"
-    fi
-  done <"$file"
+  : >"$dir/map"
+  cat "$dir"/r.* >>"$dir/map" 2>/dev/null
+  awk -F '\t' -v OFS='\t' '
+    NR == FNR { st[$1] = $2; next }
+    $1 ~ /^(switch|handoff):/ { a = $1; sub(/^[^:]*:/, "", a); if (a in st) $2 = st[a] }
+    { print }' "$dir/map" "$file"
   rm -rf "$dir"
 }
+
 
 # --- Actions ------------------------------------------------------------------
 
@@ -505,26 +484,6 @@ rw_pick_switch() {
   exit "$status"
 }
 
-# rw_pick_handoff -- the worker chooser (skipped with exactly one worker,
-# D26), then `rw bg handoff`.
-rw_pick_handoff() {
-  local workers n alias header note first="$P_HOST"
-  workers="$(rw_pick_worker_aliases)"
-  n="$(printf '%s\n' "$workers" | grep -c . || true)"
-  if [ "$n" -eq 1 ]; then
-    alias="$workers"
-  else
-    note="$(rw_pick_plural "$P_ROOT_PANES" pane) working in it move to the chosen worker (any session)"
-    [ "$P_ROOT_PANES" -le 1 ] && note="this pane moves to the chosen worker; nothing else works in it"
-    header="hand off $(rw_pick_tilde "$P_ROOT")"$'\n'"$note"
-    [ "$P_ROOT_EDITORS" -gt 0 ] && header="$header"$'\n'"editors move too, but unsaved buffers do not: save first"
-    # An unreachable pane host is not offered first.
-    [ -z "$P_UNREACHABLE" ] || first=""
-    alias="$(RW_PICK_FIRST="$first" rw_pick_worker_menu 'rw handoff ⇒ ' "$header")" || exit 0
-  fi
-  rw_pick_bg handoff --worker "$alias" --pane "$P_PANE" --root "$P_ROOT"
-}
-
 # rw_pick_menu -- the S1 menu; prints the chosen key, nothing on abort.
 rw_pick_menu() {
   local rows header sel
@@ -536,13 +495,16 @@ rw_pick_menu() {
     return 1
   fi
   header="$(rw_pick_header)"
-  sel="$("$RW_FZF" \
-    --layout=reverse --info=inline --no-sort --no-multi \
+  # --color=header: a muted overlay grey, replacing the red the user's
+  # FZF_DEFAULT_OPTS would otherwise give it. --ansi: the status markers and
+  # warning lines carry their own colors.
+  sel="$(rw_pick_render <"$rows" | "$RW_FZF" \
+    --layout=reverse --info=inline --no-sort --no-multi --ansi \
     --prompt='rw ⇒ ' \
+    --color='header:#9399b2' \
     --header="$header" \
     --delimiter=$'\t' --with-nth=2.. \
-    --bind "start:reload-sync:$(printf '%q' "$RW_PICK_SELF") probe-rows $(printf '%q' "$rows")" \
-    <"$rows")"
+    --bind "start:reload-sync:$(printf '%q' "$RW_PICK_SELF") probe-rows $(printf '%q' "$rows")")"
   rm -f "$rows"
   sel="${sel%%$'\t'*}"
   [ -n "$sel" ] || return 1
@@ -577,16 +539,21 @@ pick() {
   case "$key" in
     switch:*) rw_pick_switch "${key#switch:}" ;;
     handback) rw_pick_bg handback --pane "$P_PANE" --root "$P_ROOT" ;;
-    handoff) rw_pick_handoff ;;
+    handoff:*) rw_pick_bg handoff --worker "${key#handoff:}" --pane "$P_PANE" --root "$P_ROOT" ;;
     release) rw_pick_switch local --force ;;
   esac
   exit 0
 }
 
 case "$mode" in
-  list) list_workers ;;
-  probe) probe_workers ;;
-  probe-rows) probe_rows "${2:?rw-picker: probe-rows needs a rows file}" ;;
+  probe-rows)
+    if [ "${3:-}" = --raw ]; then
+      probe_rows "${2:?rw-picker: probe-rows needs a rows file}"
+    else
+      probe_rows "${2:?rw-picker: probe-rows needs a rows file}" | rw_pick_render
+    fi
+    ;;
+  render) rw_pick_render ;;
   rows)
     rw_pick_context "${2:?rw-picker: rows needs a pane id}"
     rw_pick_rows
