@@ -560,3 +560,51 @@ evidence transfers. Each is independent.
 - Later or conditional: checkpoints (F1.8), temp-branch rename (F1.7), `thr`
   CLI (F3.18), handoff budget (F3.17), accounts (F6, needs a second
   account), scheduler (F7.40), PR watch (F7.41), `op://` secrets (F4.27).
+
+## Corrections after the user's review (2026-11-20)
+
+The first summary overstated several items. Checked against the dotfiles
+code, the record is:
+
+- F1.6: T3's env symlinking is not novel and does not solve port collisions.
+  T3 has no port allocation at all; its port scanner (`apps/server/src/
+  preview/PortScanner.ts`) only discovers what is listening with `lsof`. The
+  dotfiles' copy-then-rewrite of `.env.local` per block stays. A hybrid
+  (symlink the files that never carry per-worktree values, copy and rewrite
+  only `.env.local`) is the only possible gain and `C-a e` already covers
+  propagation of later edits.
+- F1.7 (model-named branch rename): rejected. `/new-worktree` already names
+  the branch from the chat.
+- F1.8 (checkpoints): value only for pif. Claude Code has its own rewind.
+- F2.11: pif already excludes service shells from holding Working
+  (`shells.ts`, `agent-state.ts`). The gap is `claudef` only: `agent-state`
+  `bg_shells()` counts every Bash background shell, dev servers included,
+  because Claude Code has no service notion. T3's "only agent-declared
+  awaited work holds" would become a `bg-await` script the agent calls, with
+  the Stop hook honouring that flag instead of the `ps` scan.
+- F2.13: the picker already orders by `Recency()` (last attach, focus or
+  state change, `picker/state/state.go`). The remaining delta is the 2 s
+  Working-exit grace.
+- F2.11 "unseen Done": already exists as Done becoming Idle on focus.
+- F3.17: wrong link to `/new-worktree` and `/remote-handoff`. Both move the
+  whole session (`claudef --resume`, `pif --fork`), so no context selection
+  is needed. T3 selects context only because it cannot move a session across
+  providers. Dropped.
+- F3 scope: T3 does not touch Claude Code's native subagents. `delegate_task`
+  is T3's own orchestrator tool, exposed to the agent over MCP, and children
+  are T3 threads. It is the counterpart of `delegate.ts`, nothing more.
+- F4.20 (host identity): the hostname flip (laptop `HostName` unset, so
+  `hostname -s` alternates between `mac` and `kalems-macbook-pro` after
+  sleep) broke the old worktree-claim system, which no longer exists. Today
+  only `tmux/scripts/host_indicator.sh` reads the hostname. rw uses ssh
+  aliases. Low value.
+- F4.25 (keep-awake): no value if the worker's sleep is already disabled
+  with `pmset`. F4.26: the status chips never call ssh already.
+- F4 dev servers: T3 does not map `localhost` to hostnames. It carries raw
+  TCP over a WebSocket to the host's loopback ports
+  (`apps/server/src/preview/PreviewTunnel.ts`), lists listeners per thread
+  with `lsof` (`PortScanner.ts`), and the desktop app forwards a host port to
+  the laptop's `localhost`. Reaching a worker's dev server from the laptop
+  or a phone is a Tailscale MagicDNS matter (`mini:<port>`), with the
+  `.env.ports` block giving the port. Expo QR codes encode the host's LAN
+  address, so a phone needs Tailscale or the worker's LAN.

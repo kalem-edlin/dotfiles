@@ -15,6 +15,7 @@ offsets the same:
   Bun runs its source.
 - Title: drops the mascot's box and gap from the title module's source, so the
   title starts at the left edge. That module also runs from source.
+- Waiver: blanks the startup warning that the rm waiver claudef sets is on.
 
 The stock binary is never modified. Exits nonzero, leaving nothing behind, when
 a build no longer matches. Identifiers are minified differently per release, so
@@ -163,10 +164,14 @@ def flush_title(data):
     (offset, mascot), = found.items()
     entry, start, end = module_containing(data, offset)
     module = bytes(data[start:end])
+    # Since 2.1.329 the row names a copy of the mascot (let xe=Be).
+    names = {mascot.group(1)}
+    tail = bytes(data[offset : offset + 400])
+    names |= {m.group(1) for m in re.finditer(rb"(?:let |,)([\w$]+)=" + re.escape(mascot.group(1)) + rb"[,;]", tail)}
     row = re.compile(
-        rb'flexDirection:"row",gap:2,alignItems:"center",children:\['
-        + re.escape(mascot.group(1))
-        + rb",(?P<title>[\w$]+)\]"
+        rb'flexDirection:"row",gap:2,alignItems:"center",children:\[(?:'
+        + b"|".join(re.escape(n) for n in names)
+        + rb"),(?P<title>[\w$]+)\]"
     )
     matches = list(row.finditer(module))
     if len(matches) != 1:
@@ -174,6 +179,28 @@ def flush_title(data):
     match = matches[0]
     title_only = b'flexDirection:"row",children:[' + match["title"] + b"]"
     data[start + match.start() : start + match.end()] = title_only.ljust(len(match[0]))
+    struct.pack_into("<II", data, entry + BYTECODE_FIELD, 0, 0)
+
+
+def hide_waiver_notice(data):
+    """Return nothing where Claude would warn that the rm waiver is on.
+
+    claudef sets CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS on purpose.
+    The "has no effect" warning stays, since that one means the waiver is off.
+    Optional: a release that rewords the warning only brings the warning back.
+    """
+    literal = re.compile(rb'"CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS is set, [^"]*"')
+    found = []
+    for anchor in find_all(data, b'"CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS is set, '):
+        match = literal.match(bytes(data[anchor : anchor + 600]))
+        if match:
+            found.append((anchor, match.end()))
+    if len(found) != 1:
+        print(f"patch-startup: rm waiver warning not found ({len(found)} matches), leaving it", file=sys.stderr)
+        return
+    (offset, size), = found
+    entry, _, _ = module_containing(data, offset)
+    data[offset : offset + size] = b"void 0".ljust(size)
     struct.pack_into("<II", data, entry + BYTECODE_FIELD, 0, 0)
 
 
@@ -202,6 +229,7 @@ def main():
     data = bytearray(stock.read_bytes())
     hide_mascot(data)
     draw_art(data)
+    hide_waiver_notice(data)
 
     # Keep the stock file name: it is the process name tmux reports.
     build_dir = Path(tempfile.mkdtemp(dir=output.parent, prefix=".build-"))

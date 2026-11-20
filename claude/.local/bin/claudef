@@ -75,16 +75,31 @@ if [ "$interactive" = 1 ]; then
   patched="${XDG_CACHE_HOME:-$HOME/.cache}/claudef/bin/$(basename "$stock")"
   patcher="$plugin_dir/patch-startup.py"
   # Build once per stock binary and patcher version. The build takes a few
-  # seconds, so say so first. A failed build leaves a marker so a release the
-  # patch no longer fits costs one warning, then runs stock.
+  # seconds, so say so first. A failed build saves its error in a marker, so
+  # the release is not retried; every launch until the next release or
+  # patcher change runs stock and prints a command that fixes the patcher.
   if { [ ! "$patched" -nt "$stock" ] || [ ! "$patched" -nt "$patcher" ]; } &&
     { [ ! "$patched.failed" -nt "$stock" ] || [ ! "$patched.failed" -nt "$patcher" ]; }; then
     printf '%s\n' "claudef: building the mascot-free copy of claude $(basename "$stock"), once per release..." >&2
-    if ! python3 "$patcher" "$stock" "$patched"; then
+    # Not next to $patched: a successful build deletes everything else there.
+    log=$(mktemp)
+    if python3 "$patcher" "$stock" "$patched" 2>"$log"; then
+      cat "$log" >&2
+      rm -f "$log"
+    else
       mkdir -p "$(dirname "$patched")"
-      : > "$patched.failed"
-      printf '%s\n' 'claudef: build failed; running the stock binary until the next release or patcher change' >&2
+      mv "$log" "$patched.failed"
     fi
+  fi
+  if [ -f "$patched.failed" ] && [ "$patched.failed" -nt "$stock" ] && [ "$patched.failed" -nt "$patcher" ]; then
+    error=$(tail -n 1 "$patched.failed" | tr -d '"$`\\')
+    error=${error#patch-startup: }
+    repo=$(git -C "$plugin_dir" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$plugin_dir")
+    version=$(basename "$stock")
+    printf '%s\n' \
+      "claudef: the mascot-free build does not fit claude $version (${error:-unknown error}); running stock." \
+      'claudef: to fix the patcher, run:' \
+      "  cd $repo && claudef -p \"claude/.config/claudef/patch-startup.py fails on claude $version: ${error:-see its output}. Find what changed in the new binary and fix the patcher so it builds again. Do not commit.\"" >&2
   fi
   if [ -x "$patched" ] && [ "$patched" -nt "$stock" ] && [ "$patched" -nt "$patcher" ]; then
     claude_bin=$patched
@@ -107,7 +122,9 @@ fi
 # variable turns off the substitution case; the second waives the breaker in
 # bypass mode as a whole, so a parse failure no longer blocks the turn. The
 # waiver is silently void when a Bash deny or ask rule, a PermissionRequest
-# hook, or a child session is present; claude prints its status at startup.
+# hook, or a child session is present. Stock claude warns at startup that the
+# waiver is on; the patched build (patch-startup.py) hides that line but keeps
+# the "has no effect" warning.
 export CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1
 export CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS=1
 
