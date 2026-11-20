@@ -584,6 +584,76 @@ motions travel through the existing SSH PTY. OSC 52 passthrough returns yanks
 to the focus machine. Local paste remains useful because it types the local
 tmux buffer into the remote program.
 
+## Dropping files into remote panes
+
+Dragging a file from Finder into a remote workspace pane copies it to the
+worker and pastes the worker's path instead of the laptop's. Pasting a
+copied laptop path does the same. That gives nvim and the agent prompts
+(`claudef`, `pif`) a path they can open. Full design, contracts and review
+ledger: `docs/tasks/drop-to-remote-paste.md`.
+
+What happens on a drop:
+
+- Ghostty turns the drop into a bracketed paste of shell-escaped paths. A
+  small relay, `rw-paste-shim`, sits between Ghostty and the tmux client and
+  is started by the `tmux` zsh function for `tmux`, `tmux new` and
+  `tmux attach`.
+- The paste is held only when it is one or more existing files under
+  `$HOME`, `/tmp`, `/private/var/folders` or `/Volumes`, the pane is a
+  remote workspace pane, and the pane is not in a mode. Everything else
+  passes through untouched.
+- The files are copied over the existing ssh master (else a direct
+  connection) and the paste is rewritten to the worker paths, escaped the
+  same way. A copy that runs longer than 300 ms shows "rw: copying N
+  file(s) to <worker>…". Keys typed meanwhile follow the paste, in order.
+- A copy that fails or runs past 4 s pastes the original laptop path with
+  one message saying so. Anything the shim does not act on (a pane that is
+  not a remote workspace, a file outside the scope above, a pane lookup
+  that fails) passes through unchanged with no message. Nothing on the
+  worker is overwritten.
+
+Where files land:
+
+| Laptop file | Worker path |
+| --- | --- |
+| inside the pane's workspace | the same place in the worker's copy of that workspace |
+| elsewhere under `$HOME` | the same path under the worker's home |
+| `/tmp`, `/Volumes`, ... | `~/rw-drops/<name>` |
+| an identical file is already there | that file, no copy |
+| a different file or a directory is already there, or the nearest existing ancestor is a symlink or not a directory | `~/rw-drops/<stem>-<stamp>-<pid>-<n><.ext>` |
+
+`prefix Ctrl-v` pastes a clipboard image (a screenshot) the same way. It is
+saved as `~/Pictures/rw-clips/<UTC time>.png` on the laptop and copied to
+the same place on the worker. In a local pane the laptop path is pasted. In
+a remote pane the worker path is pasted if the copy took under 2 s;
+otherwise it is left in a paste buffer and a message says to press
+`prefix ]`.
+
+Escape hatches:
+
+- `command tmux ...` runs plain tmux for one command.
+- `RW_PASTE_SHIM=0` switches the relay off for a shell.
+- `tmux new -d` never uses it.
+- Any failure of the relay before tmux starts falls back to plain tmux.
+- Running clients are untouched until they are reattached from a new
+  shell.
+
+Install note: `~/.zsh` is a stow-folded directory, so run `make install`
+once to link `~/.zsh/tmux-paste-shim.zsh`. Until then the zsh function is
+not defined and drops paste the laptop path as before.
+
+Known limits:
+
+- tmux 3.7b has no format for an open popup or the `:` prompt, so a drop
+  into one of those over a remote pane is still rewritten.
+- While the client's terminal is in cooked mode (just around attach, during
+  a `prefix C-z` suspend, at the lock-server password prompt), typed input
+  is echoed and anything past about 1 KiB is dropped by the kernel, as
+  without the relay. Keys typed while a suspend completes go to tmux after
+  `fg` instead of to zsh.
+- `detach -E <cmd>` with a command that reads `/dev/tty` is not supported:
+  the job re-stops on every `fg`.
+
 ## Remote agent state
 
 An agent on the worker publishes its state into the worker's tmux server,
@@ -729,6 +799,8 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 | `prefix Tab` | Open local Treemux or toggle a remote tree endpoint |
 | `prefix [` / `PageUp` | Enter local or worker-side copy mode as appropriate |
 | `prefix Ctrl-s` | Run the verified local save and, when focused remotely, the worker save |
+| `prefix Ctrl-v` | Paste the clipboard image as a file path; in a remote pane the image is copied to the worker first (see "Dropping files into remote panes") |
+| drag a file into a pane | In a remote pane the file is copied to the worker and its worker path is pasted |
 | `rw status` | Print remote roots (owner, worker, panes, pending), then each endpoint's live pane and latest event |
 | `rw doctor` | Report local, worker, registry, reconciliation, ssh config speed, and clipboard health |
 | `rw switch` | Soft-switch one pane to a remote or back to this machine, in the same directory. No files move |

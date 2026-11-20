@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# rw-push-file <pane_id> <local path>... -- copy laptop files to the worker
+# behind a remote workspace pane (contracts C1, C3, C5 and decision D2 in
+# docs/tasks/drop-to-remote-paste.md).
+#
+# Prints one worker path per line, in input order, and only once EVERY file
+# is in place, so a caller never sees a half-rewritten list.
+#   exit 0  every file is in place on the worker
+#   exit 1  any failure (missing file, unreachable worker, copy error)
+#   exit 2  the pane is not a remote workspace pane (prints nothing)
+#   exit 3  a file is outside the intercept scope (prints nothing, copies
+#           nothing): only $HOME, /tmp, /private/tmp, /private/var/folders
+#           and /Volumes are intercepted (C5)
+#   exit 64 usage
+#
+# Where a file lands (D2 with the C5 overwrite policy):
+#   target = inside the pane's workspace: remote_path + path relative to
+#            focus_path; elsewhere under the laptop $HOME: worker_home + path
+#            relative to $HOME; anywhere else: worker_home/rw-drops/<basename>
+#   nothing at the target          -> uploaded there
+#   identical file at the target   -> not copied, the target path is used
+#   a different file, a directory, or no usable parent
+#                                  -> uploaded to worker_home/rw-drops/
+#                                     <stem>-<unique suffix><.ext>
+#   Never overwrites anything on the worker: an identical file is skipped, a
+#   differing one goes to rw-drops, and the final step is a hard link
+#   (sftp `ln`, hardlink@openssh.com, link(2)), which fails with EEXIST
+#   instead of clobbering a file that appeared after the check; that fails
+#   the whole batch, so the original paste goes through. Every upload goes
+#   to a temporary name in the destination directory first, so a kill never
+#   leaves a partial file under the final name. Missing parent directories
+#   are created only for files that land there, in the upload batch.
+#
+# Transport (C5), each step bounded: the shared ssh master (ssh -O check, no
+# ControlPath override), else the rw-stream master, else a direct connection
+# (ConnectTimeout=3). Never starts a master (ControlMaster=no). Over that
+# connection: ONE ssh that reports each target (bounded at 1.5 s through a
+# master: a master that survived a laptop sleep can answer -O check with a
+# dead connection; on timeout the rest goes over a direct connection with
+# ConnectTimeout=2), then ONE `sftp -b` batch (mkdir, put to a temporary
+# name, ln, rm) with literal paths and no remote shell. The caller enforces the wall-clock budget (the paste
+# shim's 4 s deadline kills this process group). RW_SSH_BIN and RW_SFTP_BIN
+# (default sftp) let tests stub transport. bash 3.2 compatible.
+
+set -uo pipefail
+
+LIBEXEC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../scripts/common.sh
+source "$LIBEXEC_DIR/../scripts/common.sh"
+
+[ $# -ge 2 ] || rw_die "usage: rw-push-file <pane_id> <local path>..." 64
+pane="$1"
+shift
+rw_need_jq
+
+# rw_bounded <seconds> <command...> -- the command, killed by SIGALRM after
+# <seconds>, fractions allowed (the timer survives exec). Without perl:
+# unbounded (the caller's deadline still holds).
+rw_bounded() {
+  local secs="$1"
+  shift
+  if [ -x /usr/bin/perl ]; then
+    /usr/bin/perl -MTime::HiRes=alarm -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# --- inputs and scope (C5) ---------------------------------------------------------
+home="$(rw_physical_path "$HOME")"
+locals=()
+phys=()
+for p in "$@"; do
+  case "$p" in
+    /*) ;;
+    *) rw_die "rw-push-file: not an absolute path: $p" 1 ;;
+  esac
+  case "$p" in *$'\n'*) rw_die "rw-push-file: a newline in a file name is not supported" 1 ;; esac
+  [ -f "$p" ] || rw_die "rw-push-file: not a regular file: $p" 1
+  dir="${p%/*}"
+  [ -n "$dir" ] || dir=/
+  dir="$(rw_physical_path "$dir")"
+  if [ "$dir" = / ]; then lp="/${p##*/}"; else lp="$dir/${p##*/}"; fi
+  case "$lp" in
+    "$home"/?* | /private/tmp/?* | /private/var/folders/?* | /Volumes/?*) ;;
+    *) exit 3 ;;
+  esac
+  locals+=("$p")
+  phys+=("$lp")
+done
+
+# --- the pane's endpoint ------------------------------------------------------------
+endpoint="$(tmux display-message -p -t "$pane" '#{@rw-endpoint}' 2>/dev/null)" || exit 2
+[ -n "$endpoint" ] || exit 2
+record="$(rw_read_endpoint "$endpoint")" || exit 2
+
+worker="" worker_home="" focus_path="" remote_path=""
+{
+  IFS= read -r -d '' worker
+  IFS= read -r -d '' worker_home
+  IFS= read -r -d '' focus_path
+  IFS= read -r -d '' remote_path
+} < <(printf '%s' "$record" | jq -j '(.worker // ""), "\u0000", (.worker_home // ""), "\u0000",
+  (.workspace.focus_path // ""), "\u0000", (.workspace.remote_path // ""), "\u0000"' 2>/dev/null)
+[ -n "$worker" ] || exit 2
+case "$worker_home" in /?*) ;; *) exit 2 ;; esac
+worker_home="${worker_home%/}"
+drops="$worker_home/rw-drops"
+case "$drops" in *'"'* | *\\*) rw_die "rw-push-file: unsupported character in the worker home $worker_home" 1 ;; esac
+
+focus=""
+if [ -n "$focus_path" ]; then
+  case "$remote_path" in
+    /?*) focus="$(rw_physical_path "$focus_path")" ;;
+  esac
+fi
+[ "$focus" = / ] && focus=""
+remote_path="${remote_path%/}"
+
+# map_path <physical local file> -- the D2 target.
+map_path() {
+  local lp="$1"
+  if [ -n "$focus" ]; then
+    case "$lp" in
+      "$focus"/?*)
+        printf '%s/%s\n' "$remote_path" "${lp#"$focus"/}"
+        return 0
+        ;;
+    esac
+  fi
+  case "$lp" in
+    "$home"/?*)
+      printf '%s/%s\n' "$worker_home" "${lp#"$home"/}"
+      return 0
+      ;;
+  esac
+  printf '%s/%s\n' "$drops" "${lp##*/}"
+}
+
+targets=()
+for lp in "${phys[@]}"; do
+  targets+=("$(map_path "$lp")")
+done
+
+# --- transport (C5) ------------------------------------------------------------------
+ssh_bin="$(rw_ssh_bin)"
+ssh_base=(-o BatchMode=yes -o ControlMaster=no)
+rw_ssh_stream_opts
+via=""
+if rw_bounded 1 "$ssh_bin" "${ssh_base[@]}" -O check "$worker" </dev/null >/dev/null 2>&1; then
+  opts=("${ssh_base[@]}")
+  via=shared
+elif [ "${#RW_SSH_STREAM_OPTS[@]}" -gt 0 ] &&
+  rw_bounded 1 "$ssh_bin" "${ssh_base[@]}" "${RW_SSH_STREAM_OPTS[@]}" -O check "$worker" </dev/null >/dev/null 2>&1; then
+  opts=("${ssh_base[@]}" "${RW_SSH_STREAM_OPTS[@]}")
+  via=stream
+else
+  opts=("${ssh_base[@]}" -o ControlPath=none -o ConnectTimeout=3)
+  via=direct
+fi
+
+# --- one ssh: the state of each target (creates nothing) ----------------------------
+# Prints per target "<index> " followed by one of: missing (parent exists),
+# mkdir <deepest existing ancestor> (parent to be created), noparent (an
+# ancestor is not a directory), dir, other, file <algo> <hash>.
+# shellcheck disable=SC2016 # expanded by the worker's sh
+check_sh='
+h() {
+  if command -v shasum >/dev/null 2>&1; then printf "sha256 %s" "$(shasum -a 256 <"$1" | cut -d" " -f1)"
+  elif command -v sha256sum >/dev/null 2>&1; then printf "sha256 %s" "$(sha256sum <"$1" | cut -d" " -f1)"
+  else printf "cksum %s" "$(cksum <"$1" | awk "{print \$1 \":\" \$2}")"; fi
+}
+i=0
+for t in "$@"; do
+  d=${t%/*}
+  [ -n "$d" ] || d=/
+  if [ -d "$d" ]; then
+    if [ -d "$t" ]; then echo "$i dir"
+    elif [ -f "$t" ]; then echo "$i file $(h "$t")"
+    elif [ -e "$t" ] || [ -L "$t" ]; then echo "$i other"
+    else echo "$i missing"; fi
+  else
+    p=$d
+    while [ -n "$p" ] && [ ! -e "$p" ] && [ ! -L "$p" ]; do p=${p%/*}; done
+    [ -n "$p" ] || p=/
+    if [ -d "$p" ] && [ ! -L "$p" ]; then echo "$i mkdir $p"; else echo "$i noparent"; fi
+  fi
+  i=$((i + 1))
+done'
+cmd="sh -c $(rw_shquote "$check_sh") rw-push-file"
+for t in "${targets[@]}"; do
+  cmd="$cmd $(rw_shquote "$t")"
+done
+if [ "$via" = direct ]; then
+  report="$("$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)" ||
+    rw_die "rw-push-file: cannot reach $worker (direct connection)" 1
+elif ! report="$(rw_bounded 1.5 "$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)"; then
+  # A master that answers -O check over a dead TCP connection (after the
+  # laptop slept): spend the rest of the budget on a direct connection.
+  via="direct, after the $via master did not answer"
+  opts=("${ssh_base[@]}" -o ControlPath=none -o ConnectTimeout=2)
+  report="$("$ssh_bin" "${opts[@]}" "$worker" "$cmd" </dev/null 2>/dev/null)" ||
+    rw_die "rw-push-file: cannot reach $worker ($via)" 1
+fi
+
+# local_hash <algo> <file>
+local_hash() {
+  case "$1" in
+    sha256) shasum -a 256 <"$2" 2>/dev/null | cut -d' ' -f1 ;;
+    cksum) cksum <"$2" 2>/dev/null | awk '{print $1 ":" $2}' ;;
+    *) return 1 ;;
+  esac
+}
+
+stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+# unique_drop <basename> <index> -- worker_home/rw-drops/<stem>-<suffix><.ext>
+unique_drop() {
+  local base="$1" stem ext=""
+  base="${base//\"/_}"
+  base="${base//\\/_}"
+  stem="$base"
+  case "$base" in
+    ?*.*) stem="${base%.*}" ext=".${base##*.}" ;;
+  esac
+  printf '%s/%s-%s-%s-%s%s\n' "$drops" "$stem" "$stamp" "$$" "$2" "$ext"
+}
+
+finals=()
+mkfrom=()  # per index: the existing ancestor to create the parent from, or ""
+uploads=() # indexes to upload
+need_drops=0
+i=0
+while [ "$i" -lt "${#targets[@]}" ]; do
+  t="${targets[$i]}"
+  state="$(printf '%s\n' "$report" | sed -n "s|^$i ||p" | head -n 1)"
+  final="$t"
+  upload=1
+  anc=""
+  case "$state" in
+    missing) ;;
+    "mkdir /"*) anc="${state#mkdir }" ;;
+    "file "*)
+      read -r _ algo hash <<<"$state"
+      if [ -n "$hash" ] && [ "$(local_hash "$algo" "${locals[$i]}")" = "$hash" ]; then
+        upload=0
+      else
+        final=""
+      fi
+      ;;
+    dir | noparent | other) final="" ;;
+    *) rw_die "rw-push-file: no report from $worker for $t" 1 ;;
+  esac
+  # The sftp batch quotes with "...": a target with " or \ goes to rw-drops
+  # under a sanitized name. Two inputs never share a target.
+  if [ "$upload" = 1 ]; then
+    case "$final" in *'"'* | *\\*) final="" ;; esac
+  fi
+  if [ -n "$final" ] && [ "$upload" = 1 ]; then
+    for seen in ${finals[@]+"${finals[@]}"}; do
+      [ "$seen" != "$final" ] || final=""
+    done
+  fi
+  if [ -z "$final" ]; then
+    final="$(unique_drop "${t##*/}" "$i")"
+    upload=1
+    need_drops=1
+    anc=""
+  fi
+  finals+=("$final")
+  mkfrom+=("$anc")
+  [ "$upload" = 0 ] || uploads+=("$i")
+  i=$((i + 1))
+done
+
+# --- one sftp batch: parents, put to a temporary name, link into place ----------------
+if [ "${#uploads[@]}" -gt 0 ]; then
+  work="$(mktemp -d "${TMPDIR:-/tmp}/rw-push.XXXXXX")" || rw_die "rw-push-file: no temp dir" 1
+  trap 'rm -rf "$work"' EXIT
+  batch="$work/batch"
+  : >"$batch"
+  [ "$need_drops" = 0 ] || printf -- '-mkdir "%s"\n' "$drops" >>"$batch"
+  token="$(rw_new_short_id 2>/dev/null || echo "$$")"
+  for i in "${uploads[@]}"; do
+    # sftp globs a put's local path: put a symlink with a plain name.
+    ln -s "${locals[$i]}" "$work/$i"
+    f="${finals[$i]}"
+    d="${f%/*}"
+    # Missing parents, created one level at a time ("-": an existing one is
+    # fine; a real failure fails the put).
+    if [ -n "${mkfrom[$i]}" ]; then
+      cur="${mkfrom[$i]%/}"
+      rel="${d#"$cur"/}"
+      while [ -n "$rel" ]; do
+        cur="$cur/${rel%%/*}"
+        printf -- '-mkdir "%s"\n' "$cur" >>"$batch"
+        case "$rel" in */*) rel="${rel#*/}" ;; *) rel="" ;; esac
+      done
+    fi
+    part="$d/.rw-drop-$token-$i.part"
+    # ln = hardlink@openssh.com: link(2) fails if the final name exists.
+    printf 'put "%s" "%s"\nln "%s" "%s"\nrm "%s"\n' "$work/$i" "$part" "$part" "$f" "$part" >>"$batch"
+  done
+  "${RW_SFTP_BIN:-sftp}" -q -b "$batch" "${opts[@]}" "$worker" </dev/null >/dev/null 2>"$work/err" ||
+    rw_die "rw-push-file: copying to $worker failed ($via connection): $(tail -n 1 "$work/err" 2>/dev/null)" 1
+fi
+
+printf '%s\n' "${finals[@]}"

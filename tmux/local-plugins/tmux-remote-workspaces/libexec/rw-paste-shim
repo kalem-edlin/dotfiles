@@ -1,0 +1,1108 @@
+#!/usr/bin/python3
+"""rw-paste-shim -- run tmux under a fresh pty and relay, rewriting dropped
+laptop file paths into worker paths for remote workspace panes.
+
+Usage: rw-paste-shim [tmux args...]
+
+Design and contracts: docs/tasks/drop-to-remote-paste.md (C1, C2, C5). In
+short: Ghostty turns a file drop into a bracketed paste of shell-escaped
+paths (F3). Nothing inside tmux can intercept that (F1), so this process
+sits between Ghostty and the tmux client and is the one place that sees it.
+
+Safety rules, each enforced below:
+  - every byte outside a complete ESC[200~ ... ESC[201~ bracket is handed
+    to the child the moment it is read; no look-ahead, no timer (C2.1);
+  - writes to the child never block: the child pty is non-blocking and
+    input waits in an ordered out-buffer; past 256 KiB the terminal is not
+    read (back-pressure onto Ghostty), so the loop always gets back to the
+    wake pipe, child exit and suspend (W2-1);
+  - only a paste whose content is a list of existing absolute regular files
+    in the intercept scope is ever held, and only while one worker thread
+    checks the pane and runs rw-push-file under a 4 s deadline (C2.3-C2.5,
+    C5); the output direction keeps flowing meanwhile and later input is
+    queued in order;
+  - any doubt, error or timeout forwards the original bytes (C2.10, D4);
+  - any failure before the child exists exits 213, on which the zsh
+    wrapper runs plain tmux (C5).
+
+Python 3.9 stdlib only (D6). Importable: the test loads this file with
+runpy and drives both the pure parts and the whole binary.
+"""
+
+import errno
+import fcntl
+import json
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty
+
+START = b"\x1b[200~"
+END = b"\x1b[201~"
+CHUNK = 65536
+CAPTURE_CAP = 65536  # bytes of paste content held at most (C2.2)
+CAPTURE_TIMEOUT = 2.0  # seconds without the end marker (C2.2)
+LOOKUP_TIMEOUT = 2.0  # tmux display-message for the pane (C2.4)
+COPY_DEADLINE = 4.0  # whole pending paste: check + lookup + copy (C5)
+PROGRESS_AFTER = 0.3  # "copying N file(s)" once the copy runs this long
+NOTIFY_TIMEOUT = 2.0  # tmux display-message
+CHILD_WAIT = 2.0  # after SIGHUP before SIGKILL (C2.8)
+DRAIN_IDLE = 0.05  # child output drain after a normal child exit
+DRAIN_IDLE_HANGUP = 0.25  # after we hung the child up: the server's resets
+DRAIN_MAX = 1.0
+OUTBUF_MAX = 256 * 1024  # input waiting for the child; above: stop reading
+PATH_MAX = 1024  # macOS: no single path token can be longer
+MAX_FILES = 64  # more dropped files than this: pass-through
+EXIT_SHIM_FAILED = 213  # failed before tmux started: the wrapper runs tmux (C5)
+
+# Ghostty.Shell.escape (F3): a backslash before each of these.
+GHOSTTY_ESCAPE = frozenset('\\ ()[]{}<>"\'`!#$&;|*?\t')
+
+HERE = os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
+PUSH_FILE = os.path.join(HERE, "rw-push-file")
+
+MSG_COPY_FAILED = "rw: copying the dropped file to the worker failed; pasted the laptop path"
+MSG_COPY_TIMEOUT = "rw: copying the dropped file to the worker timed out; pasted the laptop path"
+
+
+# ---------------------------------------------------------------------------
+# Log (C1): one line per intercept decision or error, never per byte.
+# ---------------------------------------------------------------------------
+
+
+def state_dir():
+    """Same resolution as rw_state_dir in scripts/common.sh."""
+    d = os.environ.get("TMUX_REMOTE_WORKSPACES_STATE_DIR")
+    if d:
+        return d
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(base, "tmux-remote-workspaces")
+
+
+def log(message):
+    try:
+        d = state_dir()
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        path = os.path.join(d, "paste-shim.log")
+        line = "[%s] [%d] %s\n" % (
+            time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            os.getpid(),
+            message.replace("\n", " "),
+        )
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8", "replace"))
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Classifier (pure, C2.3)
+# ---------------------------------------------------------------------------
+
+# One token: escaped characters (backslash + anything but a control byte
+# other than tab) or plain characters (no backslash, space or control byte).
+# A paste: tokens separated by single spaces, optionally a trailing run of
+# spaces. Regex work runs in C, so a 64 KiB paste costs well under a
+# millisecond on the relay thread (W2-12).
+_TOK = r"(?:\\[^\x00-\x08\x0a-\x1f\x7f]|[^\\ \x00-\x1f\x7f])+"
+_PASTE_RE = re.compile(r"(%s(?: %s)*)( *)" % (_TOK, _TOK))
+_TOKEN_RE = re.compile(_TOK)
+_UNESCAPE_RE = re.compile(r"\\(.)", re.S)
+
+
+def parse_paths(payload):
+    """Split a paste on unescaped spaces and unescape (backslash + any
+    character yields that character). Returns (tokens, trailer) where
+    trailer is a run of trailing unescaped spaces kept verbatim, or None
+    when the paste cannot be a list of absolute paths. No filesystem
+    access: safe to call on the relay thread."""
+    if not payload or len(payload) > CAPTURE_CAP or payload[:1] != b"/":
+        return None
+    if b"\n" in payload or b"\r" in payload:
+        return None
+    # Cheap bounds first (C-speed bytes operations): at most MAX_FILES
+    # paths, and no run between spaces longer than an escaped PATH_MAX.
+    if payload.count(b" /") >= MAX_FILES:
+        return None
+    if max(map(len, payload.split(b" "))) > 2 * PATH_MAX:
+        return None
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    m = _PASTE_RE.fullmatch(text)
+    if m is None:
+        return None
+    raws = _TOKEN_RE.findall(m.group(1))
+    if len(raws) > MAX_FILES:
+        return None
+    tokens = []
+    for raw in raws:
+        if raw[0] != "/":
+            return None
+        t = _UNESCAPE_RE.sub(r"\1", raw)
+        if len(t.encode("utf-8")) > PATH_MAX:
+            return None
+        tokens.append(t)
+    return tokens, m.group(2)
+
+
+def all_regular_files(tokens):
+    """Filesystem half of the classifier: every token is an existing
+    regular file (directories and anything else: pass-through). Runs on
+    the worker thread, never the relay thread (a stat can hang on a dead
+    network volume)."""
+    try:
+        return all(os.path.isfile(t) for t in tokens)
+    except Exception:
+        return False
+
+
+def scope_roots():
+    roots = ["/private/tmp", "/private/var/folders", "/Volumes"]
+    try:
+        roots.append(os.path.realpath(os.path.expanduser("~")))
+    except Exception:
+        pass
+    return [r for r in roots if r and r != "/"]
+
+
+def in_scope(path, roots=None):
+    """C5 intercept scope: files under the laptop $HOME, /tmp,
+    /private/tmp, /private/var/folders or /Volumes, judged by the physical
+    parent directory. Anything else (/etc/hosts, /Applications/...) passes
+    through."""
+    try:
+        parent = os.path.realpath(os.path.dirname(path))
+    except Exception:
+        return False
+    for root in roots if roots is not None else scope_roots():
+        if parent == root or parent.startswith(root + "/"):
+            return True
+    return False
+
+
+def classify(payload):
+    """Full classifier: (tokens, trailer) for a candidate, else None."""
+    parsed = parse_paths(payload)
+    if parsed is None or not all_regular_files(parsed[0]):
+        return None
+    if not all(in_scope(t) for t in parsed[0]):
+        return None
+    return parsed
+
+
+def ghostty_escape(path):
+    return "".join("\\" + c if c in GHOSTTY_ESCAPE else c for c in path)
+
+
+def rewrite(remote_paths, trailer):
+    """The replacement paste: same escaping, same separator (C2.6)."""
+    body = " ".join(ghostty_escape(p) for p in remote_paths) + trailer
+    return START + body.encode("utf-8") + END
+
+
+# ---------------------------------------------------------------------------
+# Paste capture state machine (bytes in, bytes out; C2.1, C2.2)
+# ---------------------------------------------------------------------------
+
+
+class PasteCapture:
+    """feed(data) -> (forward, paste, rest).
+
+    forward: bytes to write to the child now. paste: the content between
+    the markers of a completed paste (markers excluded), else None. rest:
+    unprocessed bytes after a completed paste, for the caller to feed again
+    (or queue). Capture starts only on a complete ESC[200~ inside one feed;
+    a start marker split across reads is never waited for."""
+
+    def __init__(self, cap=CAPTURE_CAP, timeout=CAPTURE_TIMEOUT, clock=time.monotonic):
+        self.cap = cap
+        self.timeout = timeout
+        self.clock = clock
+        self.active = False
+        self.deadline = None
+        self.buf = bytearray()
+
+    def _reset(self):
+        self.active = False
+        self.deadline = None
+        self.buf = bytearray()
+
+    def feed(self, data):
+        if not self.active:
+            i = data.find(START)
+            if i < 0:
+                return data, None, b""
+            forward = data[:i]
+            data = data[i + len(START):]
+            self.active = True
+            self.deadline = self.clock() + self.timeout
+            self.buf = bytearray()
+            search_from = 0
+        else:
+            forward = b""
+            search_from = max(0, len(self.buf) - (len(END) - 1))
+        self.buf += data
+        j = self.buf.find(END, search_from)
+        if j >= 0:
+            paste = bytes(self.buf[:j])
+            rest = bytes(self.buf[j + len(END):])
+            self._reset()
+            return forward, paste, rest
+        if len(self.buf) > self.cap:
+            out = forward + START + bytes(self.buf)
+            self._reset()
+            return out, None, b""
+        return forward, None, b""
+
+    def expire(self, now):
+        """Captured bytes (start marker included) once the capture timed
+        out, else None."""
+        if self.active and now >= self.deadline:
+            out = START + bytes(self.buf)
+            self._reset()
+            return out
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Subprocess helpers (worker threads only)
+# ---------------------------------------------------------------------------
+
+
+def run_bounded(argv, timeout, holder=None, progress=None):
+    """Run argv in its own process group with stdin closed; returns
+    (rc, stdout, stderr) or None on timeout/error. On timeout the whole
+    group is killed (a grandchild holding the pipe cannot wedge us).
+    progress() is called once if the command is still running after
+    PROGRESS_AFTER seconds."""
+    if timeout <= 0:
+        return None
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception as e:
+        log("spawn %s failed: %r" % (os.path.basename(argv[0]), e))
+        return None
+    if holder is not None:
+        holder.proc = proc
+    end = time.monotonic() + timeout
+    try:
+        if progress is not None and timeout > PROGRESS_AFTER:
+            try:
+                out, err = proc.communicate(timeout=PROGRESS_AFTER)
+                return proc.returncode, out, err
+            except subprocess.TimeoutExpired:
+                try:
+                    progress()
+                except Exception:
+                    pass
+        out, err = proc.communicate(timeout=max(0.0, end - time.monotonic()))
+        return proc.returncode, out, err
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        try:
+            proc.communicate(timeout=1.0)
+        except Exception:
+            pass
+        return None
+    except Exception as e:
+        kill_group(proc)
+        log("%s failed: %r" % (os.path.basename(argv[0]), e))
+        return None
+    finally:
+        if holder is not None:
+            holder.proc = None
+
+
+def kill_group(proc):
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def notify(client_tty, message):
+    """One tmux display-message to the client (C2.6). Never raises."""
+    try:
+        run_bounded(["tmux", "display-message", "-c", client_tty, message], NOTIFY_TIMEOUT)
+    except Exception:
+        pass
+
+
+def notify_async(client_tty, message):
+    try:
+        t = threading.Thread(target=notify, args=(client_tty, message), daemon=True)
+        t.start()
+    except Exception:
+        pass
+
+
+def endpoint_worker(endpoint):
+    """The worker alias of an endpoint record, for the progress message;
+    never raises."""
+    try:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", endpoint):
+            return "the worker"
+        with open(os.path.join(state_dir(), "endpoints", endpoint + ".json")) as f:
+            w = json.load(f).get("worker") or ""
+        return w.replace("#", "##") if isinstance(w, str) and w else "the worker"
+    except Exception:
+        return "the worker"
+
+
+# ---------------------------------------------------------------------------
+# Pending paste (one at a time)
+# ---------------------------------------------------------------------------
+
+
+class Pending:
+    """A candidate paste being resolved by a worker thread. state moves
+    from 'running' to exactly one of 'done' (thread) or 'cancelled' (relay
+    deadline) under lock, so exactly one side decides and notifies."""
+
+    def __init__(self, raw, tokens, trailer, deadline):
+        self.raw = raw
+        self.tokens = tokens
+        self.trailer = trailer
+        self.deadline = deadline
+        self.lock = threading.Lock()
+        self.state = "running"
+        self.phase = "check"
+        self.output = raw  # what the relay writes once done
+        self.proc = None
+        self.started = time.monotonic()
+
+
+def resolve(pending, client_tty, wake, push_file=PUSH_FILE):
+    """Worker thread body: classify (filesystem, scope), look up the pane,
+    push. Posts its outcome through `wake`; never raises."""
+    message = None
+    output = pending.raw
+    note = ""
+    try:
+        if not all_regular_files(pending.tokens):
+            note = "not existing regular files: pass-through"
+        elif not all(in_scope(t) for t in pending.tokens):
+            note = "outside the intercept scope: pass-through"
+        else:
+            left = pending.deadline - time.monotonic()
+            r = run_bounded(
+                ["tmux", "display-message", "-p", "-t", client_tty,
+                 "#{pane_id}\t#{@rw-endpoint}\t#{pane_in_mode}"],
+                min(LOOKUP_TIMEOUT, left),
+                pending,
+            )
+            pane = endpoint = in_mode = ""
+            if r is not None and r[0] == 0:
+                line = r[1].decode("utf-8", "replace").split("\n", 1)[0]
+                fields = line.split("\t")
+                pane = fields[0]
+                endpoint = fields[1] if len(fields) > 1 else ""
+                in_mode = fields[2] if len(fields) > 2 else ""
+            if r is None or r[0] != 0:
+                note = "pane lookup failed or timed out: pass-through"
+            elif not pane.startswith("%") or not endpoint.strip():
+                note = "pane %s is not a remote workspace pane: pass-through" % (pane or "?")
+            elif in_mode.strip() not in ("", "0"):
+                # The paste goes to the mode (copy mode, a chooser), not the
+                # program in the pane (W2-8).
+                note = "pane %s is in a mode: pass-through" % pane
+            else:
+                pending.phase = "copy"
+                left = pending.deadline - time.monotonic()
+                n = len(pending.tokens)
+                worker = endpoint_worker(endpoint.strip())
+                r = run_bounded(
+                    [push_file, pane] + list(pending.tokens), left, pending,
+                    progress=lambda: notify_async(
+                        client_tty, "rw: copying %d file(s) to %s…" % (n, worker)),
+                )
+                if r is None:
+                    note = "pane %s endpoint %s: copy timed out or did not start" % (pane, endpoint)
+                    message = MSG_COPY_TIMEOUT
+                elif r[0] in (2, 3):
+                    note = "pane %s: rw-push-file exit %d (not remote / out of scope): pass-through" % (
+                        pane, r[0])
+                elif r[0] != 0:
+                    err = r[2].decode("utf-8", "replace").strip().splitlines()
+                    note = "pane %s endpoint %s: copy failed rc=%d: %s" % (
+                        pane, endpoint, r[0], err[-1] if err else "")
+                    message = MSG_COPY_FAILED
+                else:
+                    lines = r[1].decode("utf-8", "replace").split("\n")
+                    if lines and lines[-1] == "":
+                        lines.pop()
+                    if len(lines) != len(pending.tokens) or not all(
+                        p.startswith("/") and parse_safe(p) for p in lines
+                    ):
+                        note = "pane %s: rw-push-file printed %d unusable line(s)" % (pane, len(lines))
+                        message = MSG_COPY_FAILED
+                    else:
+                        output = rewrite(lines, pending.trailer)
+                        note = "pane %s endpoint %s: copied %d file(s) in %d ms" % (
+                            pane, endpoint, len(lines),
+                            int((time.monotonic() - pending.started) * 1000))
+    except Exception as e:
+        output = pending.raw
+        note = "resolve error %r: pass-through" % (e,)
+        if pending.phase == "copy":
+            message = MSG_COPY_FAILED
+    with pending.lock:
+        if pending.state != "running":
+            log("late result discarded (%s)" % note)
+            return
+        pending.state = "done"
+        pending.output = output
+    log("paste of %d path(s): %s" % (len(pending.tokens), note))
+    wake()
+    if message:
+        notify(client_tty, message)
+
+
+def parse_safe(path):
+    return not any(ord(c) < 0x20 or c == "\x7f" for c in path)
+
+
+# ---------------------------------------------------------------------------
+# Relay
+# ---------------------------------------------------------------------------
+
+
+class _Terminate(BaseException):
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
+
+
+class _ChildGone(Exception):
+    pass
+
+
+class _TerminalGone(Exception):
+    pass
+
+
+def write_all(fd, data):
+    """Loop until every byte is written (C2.9). Used only for the real
+    terminal (Ghostty always reads). EINTR is retried by os.write itself
+    (PEP 475); EAGAIN (a terminal left O_NONBLOCK) waits for writability."""
+    view = memoryview(data)
+    while view:
+        try:
+            n = os.write(fd, view)
+        except BlockingIOError:
+            select.select([], [fd], [], 1.0)
+            continue
+        except InterruptedError:
+            continue
+        view = view[n:]
+
+
+def set_nonblocking(fd):
+    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+
+def exec_tmux(args):
+    """Routing (not failure): become plain tmux."""
+    try:
+        os.execvp("tmux", ["tmux"] + list(args))
+    except Exception as e:
+        try:
+            os.write(2, ("rw-paste-shim: cannot run tmux: %s\n" % e).encode())
+        except Exception:
+            pass
+        os._exit(127)
+
+
+def shim_failed(args, why):
+    """Failure before the child exists (C5): exit 213, the wrapper then
+    runs plain tmux. Never raises."""
+    log("%s: exit %d (the wrapper runs plain tmux)" % (why, EXIT_SHIM_FAILED))
+    os._exit(EXIT_SHIM_FAILED)
+
+
+class Relay:
+    def __init__(self, args, stdin_fd=0, stdout_fd=1, push_file=PUSH_FILE):
+        self.args = list(args)
+        self.stdin = stdin_fd
+        self.stdout = stdout_fd
+        self.push_file = push_file
+        self.capture = PasteCapture()
+        self.pending = None
+        self.queue = []
+        self.to_child = bytearray()  # input not yet accepted by the child pty
+        self.pid = None
+        self.status = None
+        self.in_loop = False
+        self.terminate = None
+        self.terminal_alive = True
+        self.suspends = 0  # how many times suspend() ran
+        self.saved_attrs = None
+        self.master = self.slave = None
+        self.client_tty = None
+        self.wake_r = self.wake_w = None
+        self.old_handlers = {}
+        self.old_wakeup = -1
+
+    # -- setup (no side effects on the real terminal) ------------------------
+
+    def prepare(self):
+        self.saved_attrs = termios.tcgetattr(self.stdin)
+        self.master, self.slave = os.openpty()
+        self.client_tty = os.ttyname(self.slave)
+        # The child's tty starts as the user's terminal was (cooked mode,
+        # same size including pixels): set before fork, so no race.
+        termios.tcsetattr(self.slave, termios.TCSANOW, self.saved_attrs)
+        try:
+            ws = fcntl.ioctl(self.stdin, termios.TIOCGWINSZ, b"\0" * 8)
+            fcntl.ioctl(self.slave, termios.TIOCSWINSZ, ws)
+        except OSError:
+            pass
+        self.wake_r, self.wake_w = os.pipe()
+        set_nonblocking(self.wake_r)
+        set_nonblocking(self.wake_w)
+
+    def close_fds(self):
+        for fd in (self.master, self.slave, self.wake_r, self.wake_w):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        self.master = self.slave = self.wake_r = self.wake_w = None
+
+    def spawn(self):
+        env = dict(os.environ)
+        env.pop("RW_PASTE_SHIM", None)  # never leak into the server (W2-10)
+        argv = ["tmux"] + self.args
+        # The child gets a process group of its own in THIS session (not a
+        # session of its own): its group then has a parent (this process)
+        # in the same session, so it is not orphaned and tmux's
+        # suspend-client (prefix C-z: the client sends itself SIGTSTP) really
+        # stops it; in a new session the kernel discards that SIGTSTP and
+        # the server waits forever on a client that never stopped (verified
+        # on macOS). Its own group also keeps the kernel's SIGWINCH for the
+        # user's terminal away from it: the size reaches it through resize().
+        # It needs no controlling terminal: tmux uses its stdin's ttyname.
+        pid = os.fork()
+        if pid == 0:  # child: a few syscalls, then exec
+            try:
+                os.setpgid(0, 0)
+                # Python ignores SIGPIPE and SIGXFSZ; a tmux server started
+                # by this client would hand SIGXFSZ-ignored to every pane
+                # (W2-9). Exec resets caught signals, not ignored ones.
+                for sig in (signal.SIGPIPE, signal.SIGXFSZ, signal.SIGINT):
+                    signal.signal(sig, signal.SIG_DFL)
+                for fd in (0, 1, 2):
+                    os.dup2(self.slave, fd)
+                os.close(self.slave)
+                os.close(self.master)
+                os.execvpe("tmux", argv, env)
+            except BaseException as e:
+                try:
+                    os.write(2, ("rw-paste-shim: cannot run tmux: %s\r\n" % e).encode())
+                except BaseException:
+                    pass
+            os._exit(127)
+        self.pid = pid
+        try:
+            os.setpgid(pid, pid)  # both sides, so no window without it
+        except OSError:
+            pass
+        os.close(self.slave)
+        self.slave = None
+        set_nonblocking(self.master)
+
+    # -- signals ---------------------------------------------------------------
+
+    def _install_signals(self):
+        def on_term(signum, frame):
+            self.terminate = signum
+            if self.in_loop:
+                self.in_loop = False
+                raise _Terminate(signum)
+
+        def on_winch(signum, frame):
+            self.resize()
+
+        def on_chld(signum, frame):
+            pass  # the wakeup fd wakes select; the loop reaps
+
+        for sig, h in ((signal.SIGTERM, on_term), (signal.SIGHUP, on_term),
+                       (signal.SIGINT, on_term), (signal.SIGWINCH, on_winch),
+                       (signal.SIGCHLD, on_chld)):
+            self.old_handlers[sig] = signal.signal(sig, h)
+        self.old_wakeup = signal.set_wakeup_fd(self.wake_w, warn_on_full_buffer=False)
+
+    def _restore_signals(self):
+        try:
+            signal.set_wakeup_fd(self.old_wakeup)
+        except Exception:
+            pass
+        for sig, h in self.old_handlers.items():
+            try:
+                signal.signal(sig, h if h is not None else signal.SIG_DFL)
+            except Exception:
+                pass
+        self.old_handlers = {}
+
+    def resize(self):
+        """C2.7: re-copy the real terminal's size, SIGWINCH the child."""
+        try:
+            ws = fcntl.ioctl(self.stdin, termios.TIOCGWINSZ, b"\0" * 8)
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, ws)
+            if self.pid:
+                os.kill(self.pid, signal.SIGWINCH)
+        except Exception:
+            pass
+
+    def wake(self):
+        try:
+            os.write(self.wake_w, b"w")
+        except Exception:
+            pass
+
+    # -- child -------------------------------------------------------------------
+
+    def reap(self, block_for=0.0, on_stop=None):
+        """Reap the child; returns True once it has exited. A stopped child
+        (tmux suspend-client, prefix C-z) calls on_stop when given."""
+        if self.status is not None:
+            return True
+        end = time.monotonic() + block_for
+        while True:
+            try:
+                pid, st = os.waitpid(self.pid, os.WNOHANG | os.WUNTRACED)
+            except ChildProcessError:
+                self.status = 1 if self.status is None else self.status
+                return True
+            if pid == self.pid:
+                if os.WIFSIGNALED(st):
+                    self.status = 128 + os.WTERMSIG(st)
+                elif os.WIFEXITED(st):
+                    self.status = os.WEXITSTATUS(st)
+                else:
+                    if os.WIFSTOPPED(st) and on_stop is not None:
+                        on_stop()
+                    continue
+                return True
+            if time.monotonic() >= end:
+                return False
+            self.pump_output(0.02)
+
+    def pump_output(self, wait):
+        """While waiting for the child: forward its output (discard it once
+        the terminal is gone). macOS discards what is still queued in a pty
+        when the last slave fd closes, and that close waits for the queue to
+        drain, so the server's terminal resets survive only if someone
+        reads them meanwhile (W2-4)."""
+        if self.master is None:
+            time.sleep(wait)
+            return
+        try:
+            r, _, _ = select.select([self.master], [], [], wait)
+        except (OSError, ValueError):
+            time.sleep(wait)
+            return
+        if not r:
+            return
+        try:
+            data = os.read(self.master, CHUNK)
+        except (BlockingIOError, InterruptedError):
+            return
+        except OSError:
+            time.sleep(wait)  # EIO: every slave fd is closed
+            return
+        if not data:
+            time.sleep(wait)
+            return
+        if self.terminal_alive:
+            try:
+                write_all(self.stdout, data)
+            except OSError:
+                self.terminal_alive = False
+
+    def suspend(self):
+        """The tmux client stopped itself (suspend-client): do what it
+        would have done in the user's shell. Forward its last output (the
+        terminal resets), restore the terminal, stop this process so the
+        shell's job control sees a suspended job; once continued, raw mode
+        again, continue the client, re-send the size. When the stop is
+        discarded (orphaned process group, no job control) this resumes the
+        client at once instead of leaving it stopped. Input still waiting
+        in the out-buffer stays there and is written once the client reads
+        again."""
+        self.suspends += 1
+        log("tmux client suspended itself: suspending the shim")
+        self.drain_child_output()
+        self.restore_tty()
+        try:
+            os.kill(os.getpid(), signal.SIGTSTP)
+        except OSError:
+            pass
+        try:
+            tty.setraw(self.stdin, termios.TCSADRAIN)
+        except Exception:
+            pass
+        try:
+            os.kill(self.pid, signal.SIGCONT)
+        except OSError:
+            pass
+        self.resize()
+
+    def end_child(self):
+        """Child pty gone or terminal gone: SIGHUP, bounded wait, SIGKILL."""
+        if self.reap(0.0):
+            return
+        if self.reap(0.2):
+            return
+        try:
+            os.kill(self.pid, signal.SIGHUP)
+            os.kill(self.pid, signal.SIGCONT)  # in case it is stopped
+        except OSError:
+            pass
+        if self.reap(CHILD_WAIT):
+            return
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        self.reap(CHILD_WAIT)
+        if self.status is None:
+            self.status = 1
+
+    def drain_child_output(self, idle=DRAIN_IDLE):
+        """Forward what is left in the child pty: after the child exited or
+        was hung up, the tmux server's terminal resets (leave the alternate
+        screen, mouse and bracketed paste off) are in there (W2-4)."""
+        if self.master is None:
+            return
+        end = time.monotonic() + DRAIN_MAX
+        while time.monotonic() < end:
+            try:
+                r, _, _ = select.select([self.master], [], [], idle)
+            except (OSError, ValueError):
+                return
+            if not r:
+                return
+            try:
+                data = os.read(self.master, CHUNK)
+            except BlockingIOError:
+                continue
+            except OSError:
+                return
+            if not data:
+                return
+            if not self.terminal_alive:
+                continue
+            try:
+                write_all(self.stdout, data)
+            except OSError:
+                self.terminal_alive = False
+
+    # -- input path --------------------------------------------------------------
+
+    def write_child(self, data):
+        """Queue input for the child and write what the pty accepts now;
+        never blocks (W2-1)."""
+        if data:
+            self.to_child += data
+            self.flush_child()
+
+    def flush_child(self):
+        while self.to_child:
+            try:
+                n = os.write(self.master, self.to_child[:CHUNK])
+            except (BlockingIOError, InterruptedError):
+                return
+            except OSError as e:
+                if e.errno in (errno.EIO, errno.EBADF, errno.ENXIO, errno.EPIPE):
+                    raise _ChildGone()
+                raise
+            del self.to_child[:n]
+
+    def handle_input(self, data):
+        while data:
+            if self.pending is not None:
+                self.queue.append(data)
+                return
+            forward, paste, rest = self.capture.feed(data)
+            if forward:
+                self.write_child(forward)
+            if paste is not None:
+                self.on_paste(paste)
+            data = rest
+
+    def on_paste(self, paste):
+        raw = START + paste + END
+        parsed = None
+        try:
+            parsed = parse_paths(paste)
+        except Exception as e:
+            log("parse error %r: pass-through" % (e,))
+        if parsed is None:
+            self.write_child(raw)
+            return
+        pending = Pending(raw, parsed[0], parsed[1], time.monotonic() + COPY_DEADLINE)
+        try:
+            t = threading.Thread(
+                target=resolve,
+                args=(pending, self.client_tty, self.wake, self.push_file),
+                daemon=True,
+            )
+            t.start()
+        except Exception as e:
+            log("thread start failed %r: pass-through" % (e,))
+            self.write_child(raw)
+            return
+        self.pending = pending
+
+    def settle(self, now):
+        """Finish the pending paste when its thread is done or its deadline
+        passed; then replay the queued input in order (C2.5)."""
+        p = self.pending
+        if p is None:
+            return
+        timed_out = False
+        with p.lock:
+            if p.state == "running":
+                if now < p.deadline:
+                    return
+                p.state = "cancelled"
+                timed_out = True
+            output = p.output if p.state == "done" else p.raw
+        if timed_out:
+            kill_group(p.proc)
+            log("paste of %d path(s): deadline %.0f s passed in phase %s: pass-through"
+                % (len(p.tokens), COPY_DEADLINE, p.phase))
+            if p.phase == "copy":
+                notify_async(self.client_tty, MSG_COPY_TIMEOUT)
+        self.pending = None
+        queued = b"".join(self.queue)
+        self.queue = []
+        self.write_child(output)
+        self.handle_input(queued)
+
+    # -- main loop ---------------------------------------------------------------
+
+    def drain_wake(self):
+        try:
+            while os.read(self.wake_r, 4096):
+                pass
+        except (BlockingIOError, InterruptedError):
+            pass
+        except OSError:
+            pass
+
+    def timeout(self, now):
+        ds = []
+        if self.capture.active:
+            ds.append(self.capture.deadline)
+        if self.pending is not None:
+            ds.append(self.pending.deadline)
+        if not ds:
+            return None
+        return max(0.0, min(ds) - now)
+
+    def read_child(self):
+        try:
+            data = os.read(self.master, CHUNK)
+        except (BlockingIOError, InterruptedError):
+            return  # W2-11: nothing to read after all
+        except OSError as e:
+            if e.errno in (errno.EIO, errno.EBADF, errno.ENXIO):
+                raise _ChildGone()
+            raise
+        if not data:
+            raise _ChildGone()
+        try:
+            write_all(self.stdout, data)
+        except OSError as e:
+            if e.errno in (errno.EIO, errno.EPIPE, errno.ENXIO, errno.EBADF):
+                raise _TerminalGone()
+            raise
+
+    def read_terminal(self):
+        try:
+            data = os.read(self.stdin, CHUNK)
+        except (BlockingIOError, InterruptedError):
+            return  # W2-11: another reader of a shared O_NONBLOCK tty won
+        except OSError as e:
+            if e.errno in (errno.EIO, errno.EBADF, errno.ENXIO):
+                raise _TerminalGone()
+            raise
+        if not data:
+            raise _TerminalGone()
+        self.handle_input(data)
+
+    def loop(self):
+        if self.terminate is not None:
+            raise _Terminate(self.terminate)
+        while True:
+            rl = [self.wake_r, self.master]
+            if len(self.to_child) <= OUTBUF_MAX:
+                rl.append(self.stdin)  # else: back-pressure onto the terminal
+            wl = [self.master] if self.to_child else []
+            r, w, _ = select.select(rl, wl, [], self.timeout(time.monotonic()))
+            # Wake pipe first: child exit and suspend are handled even with
+            # input still waiting for the child (W2-1).
+            if self.wake_r in r:
+                self.drain_wake()
+                suspends = self.suspends
+                if self.reap(0.0, on_stop=self.suspend):
+                    self.drain_child_output()
+                    return
+                if self.suspends != suspends:
+                    # This process was stopped and continued: the rest of
+                    # this select() result is stale (the shell may have read
+                    # the keys it reported while we were stopped, and a
+                    # blocking read of the terminal would then wait for the
+                    # next keypress with tmux's redraw unrelayed). Select
+                    # afresh (W2R-2).
+                    continue
+            if self.master in r:
+                self.read_child()
+            if self.master in w:
+                self.flush_child()
+            if self.stdin in r:
+                self.read_terminal()
+            now = time.monotonic()
+            expired = self.capture.expire(now) if self.pending is None else None
+            if expired:
+                log("paste capture: no end marker within %.0f s: forwarded" % CAPTURE_TIMEOUT)
+                self.write_child(expired)
+            self.settle(now)
+
+    def hang_up_and_drain(self):
+        """Failure path: SIGHUP the client, bounded reap, relay the
+        server's terminal resets. Never raises."""
+        try:
+            if self.status is None:
+                self.end_child()
+            self.drain_child_output(DRAIN_IDLE_HANGUP)
+        except BaseException:
+            pass
+
+    def run(self):
+        """Returns the exit status (C2.8)."""
+        try:
+            tty.setraw(self.stdin, termios.TCSADRAIN)
+            self.spawn()
+        except Exception as e:
+            self.restore_tty()
+            if self.pid:  # the child exists: hang it up, report its status
+                self.hang_up_and_drain()
+                self.close_fds()
+                return self.status if self.status is not None else 1
+            self.close_fds()
+            shim_failed(self.args, "start failed %r" % (e,))
+        failure = None
+        try:
+            self._install_signals()
+            self.in_loop = True
+            try:
+                self.loop()
+            finally:
+                self.in_loop = False
+        except _ChildGone:
+            self.end_child()
+            self.drain_child_output()
+        except _TerminalGone:
+            self.terminal_alive = False
+            self.end_child()
+        except _Terminate as t:
+            log("signal %d: hanging up tmux client" % t.signum)
+            if t.signum == signal.SIGHUP:
+                self.terminal_alive = False
+            self.end_child()
+            self.drain_child_output(DRAIN_IDLE_HANGUP)
+        except BaseException as e:
+            failure = e
+            log("relay loop error %r" % (e,))
+        finally:
+            for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+                try:
+                    signal.signal(sig, signal.SIG_IGN)
+                except Exception:
+                    pass
+            if self.pending is not None:
+                kill_group(self.pending.proc)
+            if failure is not None:
+                self.hang_up_and_drain()
+            self.restore_tty()
+            self._restore_signals()
+        if failure is not None:
+            raise failure
+        if self.status is None:
+            self.end_child()
+        self.close_fds()
+        return self.status
+
+    def restore_tty(self):
+        if self.saved_attrs is None:
+            return
+        try:
+            termios.tcsetattr(self.stdin, termios.TCSADRAIN, self.saved_attrs)
+        except Exception:
+            pass
+
+
+def main(argv=None):
+    args = list(sys.argv[1:] if argv is None else argv)
+    # Routing, not failure: inside tmux, switched off, or no terminal on
+    # both ends -> plain tmux.
+    if os.environ.get("TMUX") or os.environ.get("RW_PASTE_SHIM") == "0":
+        exec_tmux(args)
+    relay = None
+    try:
+        if not (os.isatty(0) and os.isatty(1)):
+            exec_tmux(args)
+        relay = Relay(args)
+        relay.prepare()
+    except Exception as e:
+        if relay is not None:
+            relay.close_fds()
+        shim_failed(args, "setup failed %r" % (e,))
+    try:
+        code = relay.run()
+    except BaseException:
+        # The child existed (run() itself handles a failed start): the tty
+        # is restored and the client hung up; show the error.
+        import traceback
+        traceback.print_exc()
+        os._exit(1)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code if isinstance(code, int) else 1)
+
+
+if __name__ == "__main__":
+    main()
