@@ -211,9 +211,13 @@ An editor pane (nvim, vim, vi) is not left as a bare remote shell: its
 editor is reopened in the worker pane, from the Neovim session that
 `tmux_workspace_resurrect.lua` registers (refreshed over its RPC socket, so
 buffers, windows and tabs come back), or else from the editor's own argv,
-with paths inside the root rewritten to the worker root. Unsaved buffer
-contents never travel (the picker warns first), and an editor that cannot
-be confirmed only prints the command to run, it never fails the handoff.
+with paths inside the root rewritten to the worker root. Unsaved buffers
+travel too: the session carries each buffer's text and modified flag (the
+buffer names inside it are rewritten like the other paths), so the reopened
+editor shows the unsaved text over the synced file. Only what is typed
+between the capture and the source pane being replaced (seconds) is lost.
+An editor that cannot be confirmed only prints the command to run, it never
+fails the handoff.
 
 A pane that is already visiting the target worker inside the root (a soft
 switch put it there) is not moved again. The handoff adopts it: its endpoint
@@ -377,8 +381,8 @@ parentheses where the menu has to tell remotes apart.
 directory: a local pane's own, or a remote pane's live directory on the
 worker, asked over one ssh with a hard deadline. It then finds the root, the
 owner and the pane host, and names them in a two-line header (the directory and
-its root, then `pane on <host>` and `owned by <host>`). A warning line follows
-when an editor is involved, because unsaved buffers do not travel.
+its root, then `pane on <host>` and `owned by <host>`). No warning is shown
+for editors: their unsaved buffers travel.
 
 The rows, in order:
 
@@ -448,7 +452,8 @@ export, install and resume as a handoff without the directory sync, and the
 source agent stops only after the destination resume is confirmed, so there
 are never two writers and never zero. If anything fails before then, the new
 endpoint is discarded and the source is untouched. An editor (nvim, vim, vi)
-reopens on the destination, best effort, and unsaved buffers never travel.
+reopens on the destination, best effort, and its unsaved buffers travel with
+it (paths in the session rewritten to the destination root).
 Files and ownership do not move. After a soft switch away from the owner, the
 pane works on whatever copy the destination has, which may be stale.
 
