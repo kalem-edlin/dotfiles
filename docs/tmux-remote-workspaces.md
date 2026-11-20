@@ -20,9 +20,9 @@ is the command and operational reference.
 
 New shells, windows, and agents start locally. `prefix e` opens one menu for
 the focused pane. Its first rows move only that pane to another host (a soft
-switch). Its last row transfers the pane's root: it hands the root off to a
-remote, or hands it back when a remote owns it, whichever pane it is pressed
-from. A handoff (that row, or `rw handoff --worker <alias>`) moves every pane
+switch). Its last rows transfer the pane's root: one row per remote hands the
+root off to it, or one row hands it back when a remote owns it, whichever pane
+it is pressed from. A handoff (such a row, or `rw handoff --worker <alias>`) moves every pane
 on the laptop server whose cwd is the root or inside it, in any session and
 at any depth. The rest of a mixed session stays local. Transfers run in the
 background (`rw bg`), so the popup closes as soon as the choice is made. See
@@ -376,37 +376,50 @@ parentheses where the menu has to tell remotes apart.
 `prefix e` opens one popup for the focused pane. It first works out the pane's
 directory: a local pane's own, or a remote pane's live directory on the
 worker, asked over one ssh with a hard deadline. It then finds the root, the
-owner and the pane host, and names them in a two-line header (the directory and
-its root, then `pane on <host>` and `owned by <host>`). A warning line follows
-when an editor is involved, because unsaved buffers do not travel.
+owner and the pane host. The popup keeps its size (70% by 60%); the content
+is what fits it, so no row is padded to a common width and no label carries
+the root's path.
+
+The header is a muted grey, not the red the shell's `FZF_DEFAULT_OPTS` would
+give it. Its first line names the directory and its root (`<dir> (root)` or
+`<dir>  ·  root <root>`). A second line, `pane on <host>  ·  owned by <host>`,
+appears only when the two differ, or when the pane's remote is unreachable or
+no longer in `config.json`. Warnings are yellow: an unreachable remote, a
+directory only the remote has, a root that cannot be handed off (outside `~`
+or `~` itself). When a hand-off row is offered and more than one pane would
+move, a line `moves: <session>:<window>.<pane> <command>, ...` names them,
+folded to the popup's width.
+
+Each row starts with a reachability marker, then the label, then a short note
+when there is one: a grey `…` while the remote is being probed, a green `●`
+online, a red `○` offline, and nothing for a row that needs no remote (this
+machine, hand back, release). The marker fills in without moving the cursor.
 
 The rows, in order:
 
 1. Soft-switch rows, one for every host except the pane's own: this machine
    and each configured remote. The owner comes first, marked `(owner)`, so
    enter picks it. Then this machine, then the other remotes in `config.json`
-   order. Remote rows show `online` or `offline` once probed, without moving
-   the cursor. When the pane has an agent and the destination is not the
-   owner, the row warns that the agent will work on a copy that does not own
-   the directory.
-2. One full-transfer row last. Its direction comes from the owner, not from
-   where the pane runs. When a remote owns the root, it reads "hand back
-   `<root>` to this machine", from a local pane or a remote one alike. When
-   this machine owns the root, it reads "hand off `<root>` to remote". Either
-   label adds the number of panes that move when more than one does. The root
-   is the one the header names, even if the pane has since changed directory.
-   The hand-off row is absent when the root is outside `~` or is `~` itself
-   (the header says so), when the directory exists only on the remote with
-   nothing enclosing it here to hand off, and when no worker is configured.
+   order. When the pane has an agent and the destination is not the owner,
+   the row says `⚠ agent would work on a non-owner copy`.
+2. The full-transfer rows last. Their direction comes from the owner, not from
+   where the pane runs. When a remote owns the root, one row reads "hand back
+   to this machine", from a local pane or a remote one alike. When this
+   machine owns the root, there is one row per configured remote, "hand off to
+   `<alias>`", so with several remotes each choice names where it goes (the
+   pane's own remote first). Either label adds `(N panes)` when more than one
+   pane moves. The root is the one the header names, even if the pane has
+   since changed directory. The hand-off rows are absent when the root is
+   outside `~` or is `~` itself (the header says so), when the directory
+   exists only on the remote with nothing enclosing it here to hand off, and
+   when no remote is configured.
 
 Choosing a row is the confirmation. There is no yes or no prompt, including
-for a hand-back, and `esc` runs nothing. A hand-off asks which remote only
-when several are configured, listing the pane's own remote first, and the
-chooser is skipped when there is exactly one. Transfers start in the
-background and the popup closes. A soft switch runs in the popup, since it is
-quick. A refusal that `rw bg` finds at once, such as a root already moving,
-shows in the popup as a notice. Later conflicts and failures open their
-dialogs as before.
+for a hand-back, and `esc` runs nothing. There is no second menu to pick the
+remote. Transfers start in the background and the popup closes. A soft switch
+runs in the popup, since it is quick. A refusal that `rw bg` finds at once,
+such as a root already moving, shows in the popup as a notice. Later
+conflicts and failures open their dialogs as before.
 
 If the pane's remote does not answer within the probe deadline, or its alias
 is no longer in `config.json`, the header says so and the menu changes. No
@@ -419,8 +432,8 @@ ownership record but stays registered with a pending close. Whatever still
 runs on the remote, including an agent, is stopped by the next contact with
 that remote (any handoff, hand-back, open, switch or forget), and restore
 never reattaches that endpoint. Release changes no ownership, and a transfer
-row that needs the dead remote (a hand-back to it, a hand-off with no other
-remote) is left out. `rw reclaim --force` is the separate way to take a
+row that needs the dead remote (a hand-back to it, a hand-off to it) is left
+out. `rw reclaim --force` is the separate way to take a
 remote-owned root back. A reachable remote ignores `--force`, so the same
 command is then a normal switch.
 
@@ -678,7 +691,7 @@ through the loss. They die only on an explicit hand-back, `rw forget`, or
 
 | Action | Behavior |
 | --- | --- |
-| `prefix e` | One menu for the focused pane: soft-switch rows (this machine and each remote except the pane's own host), then one transfer row, hand back when a remote owns the root, hand off otherwise. Choosing a row is the confirmation. Transfers run in the background |
+| `prefix e` | One menu for the focused pane: soft-switch rows (this machine and each remote except the pane's own host), then the transfer rows: hand back when a remote owns the root, one "hand off to `<alias>`" row per remote otherwise. Each remote row shows a reachability marker. Choosing a row is the confirmation. Transfers run in the background |
 | `prefix c` | New window on the pane's host: local from a local pane, the same remote from a remote pane |
 | `prefix \\` / `prefix /` | Split on the pane's host, with the same rule as `prefix c` |
 | `prefix q` | Close the focused endpoint through tombstone-first teardown, otherwise kill a plain pane |
@@ -749,7 +762,8 @@ new window follows the owner of its root.
 - `scripts/resolve-workspace.sh` resolves a root and its `~`-relative worker
   placement without SSH.
 - `scripts/rw-picker.sh` implements the `prefix e` popup: the soft-switch
-  and transfer rows, the release row, and the hand-off worker chooser. It
+  and transfer rows (one hand-off row per worker), the release row, and the
+  reachability markers. It
   calls only `rw switch`, `rw bg handoff` and `rw bg handback`, and never
   creates endpoints itself.
 - `libexec/rw-bg` is `rw bg`: the synchronous check, the `setsid` detach
