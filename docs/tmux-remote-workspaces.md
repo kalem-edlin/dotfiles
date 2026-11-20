@@ -606,8 +606,11 @@ What happens on a drop:
   connection) and the paste is rewritten to the worker paths, escaped the
   same way. A copy that runs longer than 300 ms shows "rw: copying N
   file(s) to <worker>…". Keys typed meanwhile follow the paste, in order.
-- After 4 s, or on any error, the original laptop path is pasted and one
-  message explains why. Nothing on the worker is overwritten.
+- A copy that fails or runs past 4 s pastes the original laptop path with
+  one message saying so. Anything the shim does not act on (a pane that is
+  not a remote workspace, a file outside the scope above, a pane lookup
+  that fails) passes through unchanged with no message. Nothing on the
+  worker is overwritten.
 
 Where files land:
 
@@ -617,7 +620,7 @@ Where files land:
 | elsewhere under `$HOME` | the same path under the worker's home |
 | `/tmp`, `/Volumes`, ... | `~/rw-drops/<name>` |
 | an identical file is already there | that file, no copy |
-| a different file or a directory is already there | `~/rw-drops/<name>-<stamp>-<n>.<ext>` |
+| a different file or a directory is already there, or the nearest existing ancestor is a symlink or not a directory | `~/rw-drops/<stem>-<stamp>-<pid>-<n><.ext>` |
 
 `prefix Ctrl-v` pastes a clipboard image (a screenshot) the same way. It is
 saved as `~/Pictures/rw-clips/<UTC time>.png` on the laptop and copied to
