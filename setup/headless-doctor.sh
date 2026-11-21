@@ -930,16 +930,14 @@ else
   fi
 fi
 
-# ipatool (setup/rea.sh): the stable symlink must run and report the pinned
-# version. Apple ID login is a one-time manual step, so it is reported as info
-# and never fails the gate.
-IPATOOL_VERSION="$(sed -n 's/^IPATOOL_VERSION=//p' "$REA_SETUP" 2>/dev/null)"
+# ipatool (setup/rea.sh): the stable symlink must run. It tracks the latest
+# GitHub release, so there is no version to compare against here. Apple ID
+# sign-in is a one-time manual step, so it is reported as info and never fails
+# the gate.
 REA_IPATOOL="$REA_TOOLS_DIR/ipatool/ipatool"
-if [ -z "$IPATOOL_VERSION" ]; then
-  c_fail "tool:ipatool" "could not read IPATOOL_VERSION from $REA_SETUP" "restore setup/rea.sh from the repository"
-elif [ -x "$REA_IPATOOL" ]; then
+if [ -x "$REA_IPATOOL" ]; then
   ipatool_version="$("$REA_IPATOOL" --version 2>/dev/null | sed -n 's/^ipatool version //p')"
-  if [ "$ipatool_version" = "$IPATOOL_VERSION" ]; then
+  if [ -n "$ipatool_version" ]; then
     c_pass "tool:ipatool" "$REA_IPATOOL reports $ipatool_version"
     ipatool_auth="$("$REA_IPATOOL" auth info --format json 2>/dev/null | grep -c '"success"[[:space:]]*:[[:space:]]*true' || true)"
     if [ "${ipatool_auth:-0}" -gt 0 ]; then
@@ -948,7 +946,7 @@ elif [ -x "$REA_IPATOOL" ]; then
       c_info "tool:ipatool:auth" "not signed in; one-time manual step: $REA_IPATOOL auth login"
     fi
   else
-    c_fail "tool:ipatool" "$REA_IPATOOL reports '${ipatool_version:-unreadable}', expected $IPATOOL_VERSION" "$REA_REMEDIATION"
+    c_fail "tool:ipatool" "$REA_IPATOOL did not report a version" "$REA_REMEDIATION"
   fi
 else
   c_fail "tool:ipatool" "$REA_IPATOOL does not exist or is not executable" "$REA_REMEDIATION"

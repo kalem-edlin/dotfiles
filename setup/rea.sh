@@ -7,7 +7,7 @@
 #
 #   ~/Developer/tools/jdk-<JDK_RELEASE>      Temurin JDK 21, pinned sha256
 #   ~/Developer/tools/ghidra_<VER>_PUBLIC    Ghidra release zip, pinned sha256
-#   ~/Developer/tools/ipatool/ipatool        ipatool <IPATOOL_VERSION>, pinned sha256,
+#   ~/Developer/tools/ipatool/ipatool        ipatool, latest GitHub release (not pinned),
 #                                            symlinked from the versioned binary
 #
 # Take JAVA_HOME and GHIDRA_INSTALL_DIR from zsh/.zshenv. ipatool needs a
@@ -16,8 +16,9 @@
 #
 # Rerun is the update contract, and every step is idempotent: the JDK and
 # Ghidra directories are left alone once they exist; a new pin installs side
-# by side under a new directory name. ipatool's versioned binary is likewise
-# kept once present, and the `ipatool` symlink is repointed at it.
+# by side under a new directory name. ipatool is the exception: every rerun
+# asks GitHub for the latest release, installs it beside any older binary, and
+# repoints the `ipatool` symlink at it.
 #
 # Ghidra's public zip ships the decompiler native only for linux_x86_64 and
 # Windows. On macOS (both arches) and Linux aarch64 this script builds it
@@ -58,15 +59,6 @@ GHIDRA_VERSION=12.1.4
 GHIDRA_BUILD_DATE=20260921
 GHIDRA_SHA256=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db
 
-# github.com/majd/ipatool release v$IPATOOL_VERSION, one tar.gz per platform
-# (each holds bin/ipatool-$IPATOOL_VERSION-<os>-<arch>). sha256 from the
-# release's GitHub asset digests, cross-checked against the downloaded
-# archives and the macOS arm64 binary already in use (2026-11-20).
-IPATOOL_VERSION=2.7.0
-IPATOOL_SHA256_MAC_ARM64=5ae100d4520cf4b3f4374239e5925a9ad9a8dc02abc16bae27479e7ae99aca33
-IPATOOL_SHA256_MAC_X64=05f48994d8b3cfefe7ea1172a0ac0b28715888e9df0af38cf3e490d2ed592263
-IPATOOL_SHA256_LINUX_X64=68372de9743d468296f2dba5b413a3e7df56ad0c85b8d0f4f0f6c9b8b53a54e8
-IPATOOL_SHA256_LINUX_ARM64=133c3fb754bafcd61698ba6047b48096c7033345529f57d7a83d281f8a403c23
 
 OS_NAME="$(uname -s)"
 MACHINE="$(uname -m)"
@@ -271,29 +263,51 @@ install_ghidra() {
 # ipatool
 # ---------------------------------------------------------------------------
 
+# ipatool tracks the latest GitHub release rather than a pin. The release's
+# own asset digests (from the GitHub API, over TLS) are the integrity check:
+# a download must match the digest GitHub publishes for that exact asset.
+IPATOOL_API="https://api.github.com/repos/majd/ipatool/releases/latest"
+
 install_ipatool() {
     local dir="$TOOLS_DIR/ipatool"
-    local os arch sha256 asset url name extracted link_temp version_out
+    local os arch platform release_json version name asset url sha256 extracted link_temp version_out
 
     case "$OS_NAME:$MACHINE" in
-        Darwin:arm64) os=macos arch=arm64 sha256="$IPATOOL_SHA256_MAC_ARM64" ;;
-        Darwin:x86_64) os=macos arch=amd64 sha256="$IPATOOL_SHA256_MAC_X64" ;;
-        Linux:aarch64 | Linux:arm64) os=linux arch=arm64 sha256="$IPATOOL_SHA256_LINUX_ARM64" ;;
-        Linux:x86_64 | Linux:amd64) os=linux arch=amd64 sha256="$IPATOOL_SHA256_LINUX_X64" ;;
+        Darwin:arm64) platform="macos-arm64" ;;
+        Darwin:x86_64) platform="macos-amd64" ;;
+        Linux:aarch64 | Linux:arm64) platform="linux-arm64" ;;
+        Linux:x86_64 | Linux:amd64) platform="linux-amd64" ;;
         *)
-            echo "Error: no pinned ipatool archive for $OS_NAME $MACHINE." >&2
+            echo "Error: no ipatool release for $OS_NAME $MACHINE." >&2
             exit 1
             ;;
     esac
 
-    name="ipatool-$IPATOOL_VERSION-$os-$arch"
-    asset="$name.tar.gz"
-    url="https://github.com/majd/ipatool/releases/download/v$IPATOOL_VERSION/$asset"
+    release_json="$(curl --fail --location --retry 3 --silent --show-error -H 'Accept: application/vnd.github+json' "$IPATOOL_API")" ||
+        { echo "Error: could not read the latest ipatool release from $IPATOOL_API." >&2; exit 1; }
+    # Prints: <tag without v> <asset name> <asset url> <sha256 hex>
+    read -r version asset url sha256 < <(printf '%s' "$release_json" | python3 -c '
+import json, sys
+platform = sys.argv[1]
+rel = json.load(sys.stdin)
+tag = rel["tag_name"].lstrip("v")
+for a in rel.get("assets", []):
+    if a["name"] == f"ipatool-{tag}-{platform}.tar.gz":
+        digest = a.get("digest") or ""
+        if not digest.startswith("sha256:"):
+            sys.exit("no sha256 digest published for " + a["name"])
+        print(tag, a["name"], a["browser_download_url"], digest[len("sha256:"):])
+        break
+else:
+    sys.exit("no " + platform + " asset in release " + tag)
+' "$platform") || { echo "Error: could not resolve the latest ipatool asset for $platform." >&2; exit 1; }
+
+    name="ipatool-$version-$platform"
 
     if [[ -x "$dir/$name" ]]; then
-        echo "✓ ipatool $IPATOOL_VERSION already installed: $dir/$name"
+        echo "✓ ipatool $version already installed: $dir/$name"
     else
-        echo "Installing ipatool $IPATOOL_VERSION ($os $arch)..."
+        echo "Installing ipatool $version ($platform)..."
         new_download_temp
         fetch_verified "$url" "$sha256" "$DOWNLOAD_TEMP/$asset"
         mkdir "$DOWNLOAD_TEMP/x"
@@ -305,18 +319,17 @@ install_ipatool() {
         fi
         chmod 755 "$extracted"
         version_out="$("$extracted" --version 2>/dev/null || true)"
-        if [[ "$version_out" != *"$IPATOOL_VERSION"* ]]; then
-            echo "Error: the extracted ipatool does not report version $IPATOOL_VERSION." >&2
+        if [[ "$version_out" != *"$version"* ]]; then
+            echo "Error: the extracted ipatool does not report version $version." >&2
             exit 1
         fi
         mkdir -p "$dir"
         mv -f "$extracted" "$dir/$name"
         cleanup_download
-        echo "✓ ipatool $IPATOOL_VERSION installed: $dir/$name"
+        echo "✓ ipatool $version installed: $dir/$name"
     fi
 
-    # Repoint the stable name atomically; the versioned binary stays in place.
-    mkdir -p "$TOOLS_DIR"
+    # Repoint the stable name atomically; older versioned binaries stay in place.
     link_temp="$dir/.ipatool-link.$$"
     ln -s "$name" "$link_temp"
     mv -f "$link_temp" "$dir/ipatool"
@@ -327,4 +340,4 @@ install_jdk
 install_ghidra
 install_ipatool
 
-echo "✓ JDK $JDK_RELEASE, Ghidra $GHIDRA_VERSION and ipatool $IPATOOL_VERSION ready"
+echo "✓ JDK $JDK_RELEASE, Ghidra $GHIDRA_VERSION and ipatool (latest) ready"
