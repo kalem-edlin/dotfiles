@@ -17,7 +17,7 @@ Read this file and your own `grokbot/<bot>/AGENTS.md` at the start of every subs
 - Specs, task files and Linear tickets are written by the focus agent conversation that did the investigation, because it already has the full context: the implementation, the data sources it owns, and current research. Grok Bot doesn't write them.
 - Before the focus agent writes, Grok Bot confirms intent with it. That intent combines Kalem's decisions, Grok Bot's own knowledge and the task Grok Bot owns. Expect several rounds of clarification.
 - Grok Bot answers the focus agent's questions itself whenever its intent context covers them. It only passes a question up to Kalem, as a decision, when it genuinely needs human direction. That applies both in Grok chat and in focus-agent chat.
-- Choose the model by the work. Use `pif` with DeepSeek V4 Flash for cheap, mechanical work. Use `pif` with `openai-codex/gpt-5.6-sol` for an investigation that delegates to subagents and ends in a recommendation. Use `claudef` with Opus/Sonnet for critical work.
+- Before you start any focus-agent work, ask Kalem which tier to use (1, 2 or 3) and give your recommendation. Bots that build systems load `grokbot/skills/focus-agents/SKILL.md` for the tiers and the full process.
 - Once the remote-workspace thread system is proven (lane 1 mirroring plus status listeners), bots will start their own focus threads in tmux remote workspaces. Each thread is tagged with the bot that started it, and that bot gets reawakened when the thread's status changes (Awaiting or Done, with the final message). The focus accountability bot picks up stale Awaiting or Done threads. Until then, threads are started only on the laptop, and only on Kalem's direction.
 
 ## Communication
