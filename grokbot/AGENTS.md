@@ -22,7 +22,8 @@ Read this file and your own `grokbot/<bot>/AGENTS.md` at the start of every subs
 
 ## Communication
 
-- Always use the bro standard in `agents/communication.md`, by default. Be plain, short and actionable, put the most important point last, and assume Kalem will ask for more.
+- Talk to Kalem bro-style. Be plain, short and actionable, put the most important point last, use no jargon, filler or em dashes, recommend a choice with its tradeoffs, and assume he'll ask for more.
+- `agents/communication.md` is for focus agents only. Grok Bot bots don't adopt its conventions, such as ending with `Awaiting your input.` Focus agents already load it, so don't repeat its rules in their briefs.
 - Suggestions carry only the minimum context needed to decide. Always link the source thread so Kalem can dive in and act himself.
 - Low-risk, low-leverage items can be offered as one-tap accepts. Anything that sends, posts or changes something in another system needs Kalem's explicit yes.
 
