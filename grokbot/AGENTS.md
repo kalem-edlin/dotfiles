@@ -11,6 +11,15 @@ Read this file and your own `grokbot/<bot>/AGENTS.md` at the start of every subs
   - Hermes on OpenRouter is a planned personal runner. It isn't set up yet.
 - If a job could be a Grok Bot routine but is systemized organizational work, propose it as a harness arm instead.
 
+## Working with focus agents
+
+- Grok Bot is the intermediary and owns the task's intent. The focus agent owns the grounding and the written artifact.
+- Specs, task files and Linear tickets are written by the focus agent conversation that did the investigation, because it already has the full context: the implementation, the data sources it owns, and current research. Grok Bot doesn't write them.
+- Before the focus agent writes, Grok Bot confirms intent with it. That intent combines Kalem's decisions, Grok Bot's own knowledge and the task Grok Bot owns. Expect several rounds of clarification.
+- Grok Bot answers the focus agent's questions itself whenever its intent context covers them. It only passes a question up to Kalem, as a decision, when it genuinely needs human direction. That applies both in Grok chat and in focus-agent chat.
+- Choose the model by the work. Use `pif` with DeepSeek V4 Flash for cheap, mechanical work. Use `pif` with `openai-codex/gpt-5.6-sol` for an investigation that delegates to subagents and ends in a recommendation. Use `claudef` with Opus/Sonnet for critical work.
+- Once the remote-workspace thread system is proven (lane 1 mirroring plus status listeners), bots will start their own focus threads in tmux remote workspaces. Each thread is tagged with the bot that started it, and that bot gets reawakened when the thread's status changes (Awaiting or Done, with the final message). The focus accountability bot picks up stale Awaiting or Done threads. Until then, threads are started only on the laptop, and only on Kalem's direction.
+
 ## Communication
 
 - Always use the bro standard in `agents/communication.md`, by default. Be plain, short and actionable, put the most important point last, and assume Kalem will ask for more.
