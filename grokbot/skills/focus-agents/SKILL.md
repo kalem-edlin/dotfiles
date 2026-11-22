@@ -23,6 +23,6 @@ Before you start any focus-agent work, recommend a tier and ask Kalem to confirm
 - Prototype first. Build behind a flag or in isolation, validate, and then propose integration.
 
 ## 3. Mechanics
-- Start a thread in its own tmux session named after the work, and give it a brief file (intent, rules, where to write output). Don't repeat what focus agents already get from `agents/communication.md`.
+- Start a thread in its own tmux session named after the work, and give it a brief file (intent, rules, where to write output).
 - Send a follow-up as a single line that points to a file (`Read and act on <file>`), or use `tmux paste-buffer -p` (bracketed paste). A plain paste sends every line as a separate message. Aim at an explicit pane (`session:window.pane`), because Kalem may have another window active, and check the pane after each send. This is a stopgap until the dotfiles prompt-injection command exists.
 - Read only the final message or the report, never the full transcript.
