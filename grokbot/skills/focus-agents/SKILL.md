@@ -26,3 +26,10 @@ Before you start any focus-agent work, recommend a tier and ask Kalem to confirm
 - Start a thread in its own tmux session named after the work, and give it a brief file (intent, rules, where to write output).
 - Send a follow-up as a single line that points to a file (`Read and act on <file>`), or use `tmux paste-buffer -p` (bracketed paste). A plain paste sends every line as a separate message. Aim at an explicit pane (`session:window.pane`), because Kalem may have another window active, and check the pane after each send. This is a stopgap until the dotfiles prompt-injection command exists.
 - Read only the final message or the report, never the full transcript.
+
+## 4. Clean up
+Kalem works inside this tmux workspace, so anything a bot leaves behind is noise for him. Once a thread's output has been delivered or folded into a commit or spec:
+- Close its tmux session.
+- Remove the worktrees it created, plus any sub-worktrees its agents made, and delete merged or abandoned branches.
+- Delete brief and report files.
+Never close a pane or buffer that Kalem opened, or anything with unsaved work. Leave those and tell him.
